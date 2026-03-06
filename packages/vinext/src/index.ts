@@ -2171,13 +2171,22 @@ hydrate();
       },
 
       resolveId: {
-        // Hook filter: only invoke JS for next/* imports and virtual:vinext-* modules.
+        // Hook filter: only invoke JS for next/* imports, virtual:vinext-* modules,
+        // and node:async_hooks (stubbed in client builds to avoid browser external errors).
         // Matches "next/navigation", "next/router.js", "virtual:vinext-rsc-entry",
-        // and \0-prefixed re-imports from @vitejs/plugin-rsc.
+        // \0-prefixed re-imports from @vitejs/plugin-rsc, and "node:async_hooks".
         filter: {
-          id: /(?:next\/|virtual:vinext-)/,
+          id: /(?:next\/|virtual:vinext-|node:async_hooks)/,
         },
         handler(id) {
+          // Redirect node:async_hooks to a browser-safe stub in the client
+          // environment. Server environments (rsc, ssr) use the real module
+          // via nodejs_compat. Without this, Vite externalizes the import to
+          // __vite-browser-external which has no named exports, causing
+          // Rollup named-export failures.
+          if (id === "node:async_hooks" && this.environment?.name === "client") {
+            return path.join(shimsDir, "async-hooks-browser.ts");
+          }
           // Strip \0 prefix if present — @vitejs/plugin-rsc's generated
           // browser entry imports our virtual module using the already-resolved
           // ID (with \0 prefix). We need to re-resolve it so the client
