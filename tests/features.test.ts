@@ -2558,6 +2558,35 @@ describe("instrumentation.ts support", () => {
     // Should not throw
     await runInstrumentation(mockServer, "/fake/empty-instrumentation.ts");
   });
+
+  it("runInstrumentation handles ssrLoadModule transport errors gracefully", async () => {
+    const { runInstrumentation } = await import(
+      "../packages/vinext/src/server/instrumentation.js"
+    );
+    const mockServer = {
+      ssrLoadModule: async (_id: string) => {
+        throw new TypeError(
+          "Cannot read properties of undefined (reading 'outsideEmitter')"
+        );
+      },
+    };
+    // Should not throw — error is caught internally
+    await runInstrumentation(mockServer, "/fake/instrumentation.ts");
+  });
+
+  it("runInstrumentation calls register via ssrLoadModule when environment is ready", async () => {
+    const { runInstrumentation } = await import(
+      "../packages/vinext/src/server/instrumentation.js"
+    );
+    let registerCalled = false;
+    const mockServer = {
+      ssrLoadModule: async (_id: string) => ({
+        register: () => { registerCalled = true; },
+      }),
+    };
+    await runInstrumentation(mockServer, "/fake/instrumentation.ts");
+    expect(registerCalled).toBe(true);
+  });
 });
 
 describe("production server compression", () => {

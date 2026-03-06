@@ -2391,13 +2391,6 @@ hydrate();
           }
         });
 
-        // Run instrumentation.ts register() if present (once at server startup)
-        if (instrumentationPath) {
-          runInstrumentation(server, instrumentationPath).catch((err) => {
-            console.error("[vinext] Instrumentation error:", err);
-          });
-        }
-
         // ── Dev request origin check ─────────────────────────────────────
         // Registered directly (not in the returned function) so it runs
         // BEFORE Vite's built-in middleware. This ensures all requests
@@ -2425,6 +2418,15 @@ hydrate();
 
         // Return a function to register middleware AFTER Vite's built-in middleware
         return () => {
+          // Run instrumentation.ts register() if present (once at server startup).
+          // Must be inside the returned function — ssrLoadModule() requires the
+          // SSR environment's transport channel, which is not initialized until
+          // after configureServer() returns. (See issue #167)
+          if (instrumentationPath) {
+            runInstrumentation(server, instrumentationPath).catch((err) => {
+              console.error("[vinext] Instrumentation error:", err);
+            });
+          }
           // App Router request logging in dev server
           //
           // For App Router, the RSC plugin handles requests internally.
