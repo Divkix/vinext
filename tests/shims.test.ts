@@ -8034,16 +8034,16 @@ describe("node:async_hooks resolveId", () => {
     return typeof hook === "function" ? hook : hook?.handler;
   }
 
-  function getConfigPlugin() {
-    const vinext = require("../packages/vinext/src/index.js").default;
+  async function getConfigPlugin() {
+    const vinext = (await import("../packages/vinext/src/index.js")).default;
     const plugins = vinext() as any[];
     const plugin = plugins.find((p: any) => p.name === "vinext:config");
     if (!plugin) throw new Error("vinext:config plugin not found");
     return plugin;
   }
 
-  it("resolves node:async_hooks to stub in client environment", () => {
-    const plugin = getConfigPlugin();
+  it("resolves node:async_hooks to stub in client environment", async () => {
+    const plugin = await getConfigPlugin();
     const resolve = unwrapHook(plugin.resolveId);
     const ctx = { environment: { name: "client" } };
     const result = resolve.call(ctx, "node:async_hooks");
@@ -8053,16 +8053,16 @@ describe("node:async_hooks resolveId", () => {
     expect(result).not.toMatch(/\.(ts|js)$/);
   });
 
-  it("does not resolve node:async_hooks in ssr environment", () => {
-    const plugin = getConfigPlugin();
+  it("does not resolve node:async_hooks in ssr environment", async () => {
+    const plugin = await getConfigPlugin();
     const resolve = unwrapHook(plugin.resolveId);
     const ctx = { environment: { name: "ssr" } };
     const result = resolve.call(ctx, "node:async_hooks");
     expect(result).toBeUndefined();
   });
 
-  it("does not resolve node:async_hooks in rsc environment", () => {
-    const plugin = getConfigPlugin();
+  it("does not resolve node:async_hooks in rsc environment", async () => {
+    const plugin = await getConfigPlugin();
     const resolve = unwrapHook(plugin.resolveId);
     const ctx = { environment: { name: "rsc" } };
     const result = resolve.call(ctx, "node:async_hooks");
