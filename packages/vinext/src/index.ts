@@ -2398,6 +2398,31 @@ hydrate();
           });
         }
 
+        // ── Dev request origin check ─────────────────────────────────────
+        // Registered directly (not in the returned function) so it runs
+        // BEFORE Vite's built-in middleware. This ensures all requests
+        // (including /@*, /__vite*, /node_modules* paths) are validated
+        // before Vite serves any content.
+        server.middlewares.use((req: any, res: any, next: any) => {
+          const blockReason = validateDevRequest(
+            {
+              origin: req.headers.origin as string | undefined,
+              host: req.headers.host,
+              "x-forwarded-host": req.headers["x-forwarded-host"] as string | undefined,
+              "sec-fetch-site": req.headers["sec-fetch-site"] as string | undefined,
+              "sec-fetch-mode": req.headers["sec-fetch-mode"] as string | undefined,
+            },
+            nextConfig?.serverActionsAllowedOrigins,
+          );
+          if (blockReason) {
+            console.warn(`[vinext] Blocked dev request: ${blockReason} (${req.url})`);
+            res.writeHead(403, { "Content-Type": "text/plain" });
+            res.end("Forbidden");
+            return;
+          }
+          next();
+        });
+
         // Return a function to register middleware AFTER Vite's built-in middleware
         return () => {
           // App Router request logging in dev server
@@ -2541,9 +2566,12 @@ hydrate();
                 return next();
               }
 
-              // ── Cross-origin request protection ─────────────────────────
-              // Block requests from non-localhost origins to prevent
-              // cross-origin data exfiltration from the dev server.
+              // ── Cross-origin request protection (defense-in-depth) ──────
+              // The pre-Vite middleware above already blocks cross-origin
+              // requests before Vite serves any content. This second check
+              // guards the Pages Router handler specifically, in case the
+              // middleware ordering changes or new middleware is added between
+              // the two. Both calls use the same validateDevRequest() function.
               const blockReason = validateDevRequest(
                 {
                   origin: req.headers.origin as string | undefined,
@@ -2571,7 +2599,16 @@ hydrate();
                 const imgUrl = rawImgUrl?.replaceAll("\\", "/") ?? null;
                 // Allowlist: must start with "/" but not "//" — blocks absolute
                 // URLs, protocol-relative, backslash variants, and exotic schemes.
-                if (!imgUrl || !imgUrl.startsWith("/") || imgUrl.startsWith("//")) {
+                // Also block internal Vite paths (/@*, /__vite*, /node_modules*)
+                // to prevent redirecting to dev server endpoints.
+                if (
+                  !imgUrl ||
+                  !imgUrl.startsWith("/") ||
+                  imgUrl.startsWith("//") ||
+                  imgUrl.startsWith("/@") ||
+                  imgUrl.startsWith("/__vite") ||
+                  imgUrl.startsWith("/node_modules")
+                ) {
                   res.writeHead(400);
                   res.end(!rawImgUrl ? "Missing url parameter" : "Only relative URLs allowed");
                   return;
