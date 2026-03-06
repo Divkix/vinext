@@ -63,6 +63,28 @@ describe("Pages Router integration", () => {
     expect(html).toContain("Rendered at:");
   });
 
+  it("getServerSideProps headers and status are applied to the response", async () => {
+    const res = await fetch(`${baseUrl}/ssr-headers`);
+    // gSSP sets statusCode = 201
+    expect(res.status).toBe(201);
+    const html = await res.text();
+    expect(html).toContain("Headers were set");
+    // Custom header set via res.setHeader
+    expect(res.headers.get("x-custom-header")).toBe("hello-from-gssp");
+    // Cookie set via res.setHeader("set-cookie", ...)
+    const setCookie = res.headers.get("set-cookie");
+    expect(setCookie).toContain("gssp_token=abc123");
+  });
+
+  it("getServerSideProps calling res.end() short-circuits the response", async () => {
+    const res = await fetch(`${baseUrl}/ssr-res-end`);
+    // gSSP calls res.end() with a JSON body and status 202
+    expect(res.status).toBe(202);
+    expect(res.headers.get("content-type")).toBe("application/json");
+    const body = await res.json();
+    expect(body).toEqual({ ok: true, source: "gssp-res-end" });
+  });
+
   it("getServerSideProps returning notFound renders custom 404 page", async () => {
     const res = await fetch(`${baseUrl}/posts/missing`);
     expect(res.status).toBe(404);
@@ -1318,6 +1340,17 @@ describe("Production server middleware (Pages Router)", () => {
     expect(body.equals(Buffer.from([0xff, 0xfe, 0xfd, 0x00, 0x61, 0x62, 0x63]))).toBe(true);
   });
 
+  it("defaults to application/octet-stream for API routes without Content-Type", async () => {
+    const res = await fetch(`${prodUrl}/api/no-content-type`);
+    expect(res.status).toBe(200);
+    const ct = res.headers.get("content-type") ?? "";
+    // Must NOT default to text/html, which would cause browsers to render
+    // the response body as HTML. When the handler passes a string to
+    // res.end(), the Response constructor sets text/plain automatically,
+    // so we verify the dangerous text/html default is gone.
+    expect(ct).not.toContain("text/html");
+  });
+
   it("serves normal pages without middleware interference", async () => {
     const res = await fetch(`${prodUrl}/`);
     expect(res.status).toBe(200);
@@ -1337,6 +1370,19 @@ describe("Production server middleware (Pages Router)", () => {
     expect(res.status).toBe(400);
     const body = await res.text();
     expect(body).toContain("Bad Request");
+  });
+
+  it("blocks access to .vite/ build metadata directory", async () => {
+    // The .vite/ directory contains build manifests (ssr-manifest.json,
+    // manifest.json) that should not be publicly accessible.
+    const res = await fetch(`${prodUrl}/.vite/ssr-manifest.json`);
+    expect(res.status).toBe(404);
+  });
+
+  it("blocks access to .vite/ with percent-encoded dot", async () => {
+    // Ensure encoded variants like /%2Evite/ are also blocked
+    const res = await fetch(`${prodUrl}/%2Evite/ssr-manifest.json`);
+    expect(res.status).toBe(404);
   });
 });
 
@@ -1444,6 +1490,28 @@ describe("Production server next.config.js features (Pages Router)", () => {
     expect(authRes.status).toBe(200);
     expect(authRes.headers.get("x-auth-only-header")).toBe("1");
     expect(authRes.headers.get("x-guest-only-header")).toBeNull();
+  });
+
+  it("has/missing conditions see middleware-injected cookies", async () => {
+    // When ?inject-login is present, middleware injects logged-in=1 cookie
+    // into the request headers. The config has/missing conditions should
+    // evaluate against the updated request, not the original.
+    const res = await fetch(`${prodUrl}/about?inject-login`);
+    expect(res.status).toBe(200);
+    // The has:[cookie:logged-in] condition should match
+    expect(res.headers.get("x-auth-only-header")).toBe("1");
+    // The missing:[cookie:logged-in] condition should NOT match
+    expect(res.headers.get("x-guest-only-header")).toBeNull();
+  });
+
+  it("config Vary header appends instead of replacing existing values", async () => {
+    // The /ssr page has config headers: [{ key: "Vary", value: "Accept-Language" }].
+    // If the response already has a Vary header (e.g. from compression),
+    // the config value should be appended, not replace it.
+    const res = await fetch(`${prodUrl}/ssr`);
+    expect(res.status).toBe(200);
+    const vary = res.headers.get("vary") ?? "";
+    expect(vary).toContain("Accept-Language");
   });
 
   it("serves normal pages unaffected by config rules", async () => {

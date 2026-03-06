@@ -194,6 +194,14 @@ function tryServeStatic(
   } catch {
     return false;
   }
+
+  // Block access to internal build metadata directories. The .vite/
+  // directory contains manifests and other build artifacts that should
+  // not be publicly served. Check after decoding to catch encoded
+  // variants like /%2Evite/manifest.json.
+  if (decodedPathname.startsWith("/.vite/") || decodedPathname === "/.vite") {
+    return false;
+  }
   const staticFile = path.resolve(clientDir, "." + decodedPathname);
   if (!staticFile.startsWith(resolvedClient + path.sep) && staticFile !== resolvedClient) {
     return false;
@@ -757,8 +765,10 @@ async function startPagesRouterServer(options: PagesRouterServerOptions) {
         duplex: hasBody ? "half" : undefined,
       });
 
-      // Build request context for has/missing condition matching
-      const reqCtx: RequestContext = requestContextFromRequest(webRequest);
+      // Build request context for has/missing condition matching.
+      // This is rebuilt after middleware runs (see below) so that
+      // config rules see middleware-modified cookies and headers.
+      let reqCtx: RequestContext = requestContextFromRequest(webRequest);
 
       // ── 4. Run middleware ─────────────────────────────────────────
       let resolvedUrl = url;
@@ -838,13 +848,36 @@ async function startPagesRouterServer(options: PagesRouterServerOptions) {
         }
       }
 
+      // Rebuild request context now that middleware may have modified
+      // headers (e.g. x-middleware-request-cookie copied to cookie).
+      // Without this, has/missing conditions in config redirects,
+      // rewrites, and headers would evaluate against stale values.
+      reqCtx = requestContextFromRequest(webRequest);
+
       let resolvedPathname = resolvedUrl.split("?")[0];
 
       // ── 5. Apply custom headers from next.config.js ───────────────
+      // Config headers are additive for multi-value headers (Vary,
+      // Set-Cookie) and override for everything else. Set-Cookie values
+      // are stored as arrays (RFC 6265 forbids comma-joining cookies).
       if (configHeaders.length) {
         const matched = matchHeaders(resolvedPathname, configHeaders, reqCtx);
         for (const h of matched) {
-          middlewareHeaders[h.key.toLowerCase()] = h.value;
+          const lk = h.key.toLowerCase();
+          if (lk === "set-cookie") {
+            const existing = middlewareHeaders[lk];
+            if (Array.isArray(existing)) {
+              existing.push(h.value);
+            } else if (existing) {
+              (middlewareHeaders as any)[lk] = [existing, h.value];
+            } else {
+              (middlewareHeaders as any)[lk] = [h.value];
+            }
+          } else if (lk === "vary" && middlewareHeaders[lk]) {
+            middlewareHeaders[lk] += ", " + h.value;
+          } else {
+            middlewareHeaders[lk] = h.value;
+          }
         }
       }
 
@@ -891,7 +924,10 @@ async function startPagesRouterServer(options: PagesRouterServerOptions) {
 
         // Merge middleware + config headers into the response
         const responseBody = Buffer.from(await response.arrayBuffer());
-        const ct = response.headers.get("content-type") ?? "text/html";
+        // API routes may return arbitrary data (JSON, binary, etc.), so
+        // default to application/octet-stream rather than text/html when
+        // the handler doesn't set an explicit Content-Type.
+        const ct = response.headers.get("content-type") ?? "application/octet-stream";
         const responseHeaders: Record<string, string> = { ...middlewareHeaders };
         response.headers.forEach((v, k) => { responseHeaders[k] = v; });
 
