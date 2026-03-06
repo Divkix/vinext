@@ -2185,7 +2185,7 @@ hydrate();
           // __vite-browser-external which has no named exports, causing
           // Rollup named-export failures.
           if (id === "node:async_hooks" && this.environment?.name === "client") {
-            return path.join(shimsDir, "async-hooks-browser.ts");
+            return path.join(shimsDir, "async-hooks-browser");
           }
           // Strip \0 prefix if present — @vitejs/plugin-rsc's generated
           // browser entry imports our virtual module using the already-resolved

@@ -7756,3 +7756,75 @@ describe("cache scope guards for dynamic APIs", () => {
     setCacheHandler(new MemoryCacheHandler());
   });
 });
+
+// ── node:async_hooks browser stub ────────────────────────────
+describe("async-hooks-browser stub", () => {
+  it("AsyncLocalStorage.run() passes through the callback return value", async () => {
+    const { AsyncLocalStorage } = await import(
+      "../packages/vinext/src/shims/async-hooks-browser.js"
+    );
+    const als = new AsyncLocalStorage();
+    const result = als.run("store-value", () => 42);
+    expect(result).toBe(42);
+  });
+
+  it("AsyncLocalStorage.getStore() returns undefined", async () => {
+    const { AsyncLocalStorage } = await import(
+      "../packages/vinext/src/shims/async-hooks-browser.js"
+    );
+    const als = new AsyncLocalStorage();
+    expect(als.getStore()).toBeUndefined();
+  });
+
+  it("disable() and enterWith() do not throw", async () => {
+    const { AsyncLocalStorage } = await import(
+      "../packages/vinext/src/shims/async-hooks-browser.js"
+    );
+    const als = new AsyncLocalStorage();
+    expect(() => als.disable()).not.toThrow();
+    expect(() => als.enterWith("value")).not.toThrow();
+  });
+});
+
+// ── node:async_hooks resolveId ───────────────────────────────
+describe("node:async_hooks resolveId", () => {
+  /** Unwrap a Vite plugin hook that may use the object-with-filter format */
+  function unwrapHook(hook: any): Function {
+    return typeof hook === "function" ? hook : hook?.handler;
+  }
+
+  function getConfigPlugin() {
+    const vinext = require("../packages/vinext/src/index.js").default;
+    const plugins = vinext() as any[];
+    const plugin = plugins.find((p: any) => p.name === "vinext:config");
+    if (!plugin) throw new Error("vinext:config plugin not found");
+    return plugin;
+  }
+
+  it("resolves node:async_hooks to stub in client environment", () => {
+    const plugin = getConfigPlugin();
+    const resolve = unwrapHook(plugin.resolveId);
+    const ctx = { environment: { name: "client" } };
+    const result = resolve.call(ctx, "node:async_hooks");
+    expect(result).toBeTypeOf("string");
+    expect(result).toContain("async-hooks-browser");
+    // Must be extensionless (Vite resolves .ts/.js automatically)
+    expect(result).not.toMatch(/\.(ts|js)$/);
+  });
+
+  it("does not resolve node:async_hooks in ssr environment", () => {
+    const plugin = getConfigPlugin();
+    const resolve = unwrapHook(plugin.resolveId);
+    const ctx = { environment: { name: "ssr" } };
+    const result = resolve.call(ctx, "node:async_hooks");
+    expect(result).toBeUndefined();
+  });
+
+  it("does not resolve node:async_hooks in rsc environment", () => {
+    const plugin = getConfigPlugin();
+    const resolve = unwrapHook(plugin.resolveId);
+    const ctx = { environment: { name: "rsc" } };
+    const result = resolve.call(ctx, "node:async_hooks");
+    expect(result).toBeUndefined();
+  });
+});
