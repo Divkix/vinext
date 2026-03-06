@@ -2570,11 +2570,19 @@ describe("instrumentation.ts support", () => {
         );
       },
     };
-    // Should not throw — error is caught internally
-    await runInstrumentation(mockServer, "/fake/instrumentation.ts");
+    const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await runInstrumentation(mockServer, "/fake/instrumentation.ts");
+      expect(consoleErrorSpy).toHaveBeenCalledWith(
+        "[vinext] Failed to load instrumentation:",
+        expect.any(String),
+      );
+    } finally {
+      consoleErrorSpy.mockRestore();
+    }
   });
 
-  it("runInstrumentation calls register via ssrLoadModule when environment is ready", async () => {
+  it("runInstrumentation calls exported register() function via ssrLoadModule", async () => {
     const { runInstrumentation } = await import(
       "../packages/vinext/src/server/instrumentation.js"
     );

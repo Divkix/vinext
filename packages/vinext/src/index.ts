@@ -2423,9 +2423,7 @@ hydrate();
           // SSR environment's transport channel, which is not initialized until
           // after configureServer() returns. (See issue #167)
           if (instrumentationPath) {
-            runInstrumentation(server, instrumentationPath).catch((err) => {
-              console.error("[vinext] Instrumentation error:", err);
-            });
+            runInstrumentation(server, instrumentationPath);
           }
           // App Router request logging in dev server
           //
