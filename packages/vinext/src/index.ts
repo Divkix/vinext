@@ -2129,6 +2129,13 @@ hydrate();
               },
             },
             client: {
+              // Explicitly mark as client consumer so other plugins (e.g. Nitro)
+              // can detect this during configEnvironment hooks — before Vite
+              // applies the default consumer based on environment name.
+              // Without this, Nitro's configEnvironment creates a server-side
+              // service for the client environment, causing virtual module
+              // imports to leak to Node's native ESM loader (ERR_UNSUPPORTED_ESM_URL_SCHEME).
+              consumer: "client",
               optimizeDeps: {
                 exclude: ["vinext"],
                 // React packages aren't crawled from app/ source files,
@@ -2165,6 +2172,7 @@ hydrate();
           // and there's no client-side hydration.
           viteConfig.environments = {
             client: {
+              consumer: "client",
               build: {
                 manifest: true,
                 ssrManifest: true,
