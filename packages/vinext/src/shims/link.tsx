@@ -12,6 +12,7 @@ import React, { forwardRef, useRef, useEffect, useCallback, useContext, createCo
 // so this resolves both via the Vite plugin and in direct vitest imports)
 import { toRscUrl, getPrefetchedUrls, storePrefetchResponse } from "./navigation.js";
 import { isDangerousScheme } from "./url-safety.js";
+import { toSameOriginPath } from "./url-utils.js";
 
 interface NavigateEvent {
   url: URL;
@@ -146,10 +147,15 @@ function scrollToHash(hash: string): void {
 function prefetchUrl(href: string): void {
   if (typeof window === "undefined") return;
 
-  const fullHref = withBasePath(href);
+  // Normalize same-origin absolute URLs to local paths before prefetching
+  let prefetchHref = href;
+  if (href.startsWith("http://") || href.startsWith("https://") || href.startsWith("//")) {
+    const localPath = toSameOriginPath(href);
+    if (localPath == null) return; // truly external — don't prefetch
+    prefetchHref = localPath;
+  }
 
-  // Don't prefetch external URLs
-  if (fullHref.startsWith("http://") || fullHref.startsWith("https://") || fullHref.startsWith("//")) return;
+  const fullHref = withBasePath(prefetchHref);
 
   // Don't prefetch the same URL twice (keyed by rscUrl so the browser
   // entry can clear the key when a cache entry is consumed)
@@ -318,13 +324,18 @@ const Link = forwardRef<HTMLAnchorElement, LinkProps>(function Link(
     const node = internalRef.current;
     if (!node) return;
 
-    // Don't prefetch external URLs
-    if (localizedHref.startsWith("http://") || localizedHref.startsWith("https://") || localizedHref.startsWith("//")) return;
+    // Normalize same-origin absolute URLs; skip truly external ones
+    let hrefToPrefetch = localizedHref;
+    if (localizedHref.startsWith("http://") || localizedHref.startsWith("https://") || localizedHref.startsWith("//")) {
+      const localPath = toSameOriginPath(localizedHref);
+      if (localPath == null) return; // truly external
+      hrefToPrefetch = localPath;
+    }
 
     const observer = getSharedObserver();
     if (!observer) return;
 
-    observerCallbacks.set(node, () => prefetchUrl(localizedHref));
+    observerCallbacks.set(node, () => prefetchUrl(hrefToPrefetch));
     observer.observe(node);
 
     return () => {
@@ -353,13 +364,18 @@ const Link = forwardRef<HTMLAnchorElement, LinkProps>(function Link(
       return;
     }
 
-    // External links: let the browser handle it
+    // External links: let the browser handle it.
+    // Same-origin absolute URLs (e.g. http://localhost:3000/about) are
+    // normalized to local paths so they get client-side navigation.
+    let navigateHref = resolvedHref;
     if (
       resolvedHref.startsWith("http://") ||
       resolvedHref.startsWith("https://") ||
       resolvedHref.startsWith("//")
     ) {
-      return;
+      const localPath = toSameOriginPath(resolvedHref);
+      if (localPath == null) return; // truly external
+      navigateHref = localPath;
     }
 
     e.preventDefault();
@@ -395,7 +411,7 @@ const Link = forwardRef<HTMLAnchorElement, LinkProps>(function Link(
     }
 
     // Resolve relative hrefs (#hash, ?query) against current URL
-    const absoluteHref = resolveRelativeHref(resolvedHref);
+    const absoluteHref = resolveRelativeHref(navigateHref);
     const absoluteFullHref = withBasePath(absoluteHref);
 
     // Hash-only change: update URL and scroll to target, skip RSC fetch

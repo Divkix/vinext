@@ -11,6 +11,7 @@
 // would throw at link time for missing bindings. With `import * as React`, the
 // bindings are just `undefined` on the namespace object and we can guard at runtime.
 import * as React from "react";
+import { toSameOriginPath } from "./url-utils.js";
 
 // ─── Layout segment depth context ─────────────────────────────────────────────
 // Used by useSelectedLayoutSegments() to know which layout it's inside.
@@ -448,17 +449,23 @@ async function navigateImpl(
   mode: "push" | "replace",
   scroll: boolean,
 ): Promise<void> {
-  // External URLs: use full page navigation
+  // Normalize same-origin absolute URLs to local paths for SPA navigation
+  let normalizedHref = href;
   if (isExternalUrl(href)) {
-    if (mode === "replace") {
-      window.location.replace(href);
-    } else {
-      window.location.assign(href);
+    const localPath = toSameOriginPath(href);
+    if (localPath == null) {
+      // Truly external: use full page navigation
+      if (mode === "replace") {
+        window.location.replace(href);
+      } else {
+        window.location.assign(href);
+      }
+      return;
     }
-    return;
+    normalizedHref = localPath;
   }
 
-  const fullHref = withBasePath(href);
+  const fullHref = withBasePath(normalizedHref);
 
   // Save scroll position before navigating (for back/forward restoration)
   if (mode === "push") {
