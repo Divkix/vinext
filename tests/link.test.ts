@@ -244,7 +244,7 @@ describe("Link locale handling", () => {
 
 // ─── toSameOriginPath ────────────────────────────────────────────────────
 // Tests for the shared same-origin URL normalization utility.
-// Related to: https://github.com/anthropics/vinext/issues/335
+// Related to: https://github.com/cloudflare/vinext/issues/335
 
 import { toSameOriginPath } from "../packages/vinext/src/shims/url-utils.js";
 
