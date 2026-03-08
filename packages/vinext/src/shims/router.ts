@@ -8,6 +8,7 @@
 import { useState, useEffect, useCallback, useMemo, createElement, type ReactElement } from "react";
 import { RouterContext } from "./internal/router-context.js";
 import { isValidModulePath } from "../client/validate-module-path.js";
+import { toSameOriginPath } from "./url-utils.js";
 
 /** basePath from next.config.js, injected by the plugin at build time */
 const __basePath: string = process.env.__NEXT_ROUTER_BASEPATH ?? "";
@@ -481,12 +482,16 @@ export function useRouter(): NextRouter {
 
   const push = useCallback(
     async (url: string | UrlObject, _as?: string, options?: TransitionOptions): Promise<boolean> => {
-      const resolved = applyNavigationLocale(resolveUrl(url), options?.locale);
+      let resolved = applyNavigationLocale(resolveUrl(url), options?.locale);
 
-      // External URLs — delegate to browser
+      // External URLs — delegate to browser (unless same-origin)
       if (isExternalUrl(resolved)) {
-        window.location.assign(resolved);
-        return true;
+        const localPath = toSameOriginPath(resolved);
+        if (localPath == null) {
+          window.location.assign(resolved);
+          return true;
+        }
+        resolved = localPath;
       }
 
       // Hash-only change — no page fetch needed
@@ -524,12 +529,16 @@ export function useRouter(): NextRouter {
 
   const replace = useCallback(
     async (url: string | UrlObject, _as?: string, options?: TransitionOptions): Promise<boolean> => {
-      const resolved = applyNavigationLocale(resolveUrl(url), options?.locale);
+      let resolved = applyNavigationLocale(resolveUrl(url), options?.locale);
 
-      // External URLs — delegate to browser
+      // External URLs — delegate to browser (unless same-origin)
       if (isExternalUrl(resolved)) {
-        window.location.replace(resolved);
-        return true;
+        const localPath = toSameOriginPath(resolved);
+        if (localPath == null) {
+          window.location.replace(resolved);
+          return true;
+        }
+        resolved = localPath;
       }
 
       // Hash-only change — no page fetch needed
@@ -652,12 +661,16 @@ export function wrapWithRouterContext(element: ReactElement): ReactElement {
 // Also export a default Router singleton for `import Router from 'next/router'`
 const Router = {
   push: async (url: string | UrlObject, _as?: string, options?: TransitionOptions) => {
-    const resolved = applyNavigationLocale(resolveUrl(url), options?.locale);
+    let resolved = applyNavigationLocale(resolveUrl(url), options?.locale);
 
-    // External URLs
+    // External URLs (unless same-origin)
     if (isExternalUrl(resolved)) {
-      window.location.assign(resolved);
-      return true;
+      const localPath = toSameOriginPath(resolved);
+      if (localPath == null) {
+        window.location.assign(resolved);
+        return true;
+      }
+      resolved = localPath;
     }
 
     // Hash-only change
@@ -688,12 +701,16 @@ const Router = {
     return true;
   },
   replace: async (url: string | UrlObject, _as?: string, options?: TransitionOptions) => {
-    const resolved = applyNavigationLocale(resolveUrl(url), options?.locale);
+    let resolved = applyNavigationLocale(resolveUrl(url), options?.locale);
 
-    // External URLs
+    // External URLs (unless same-origin)
     if (isExternalUrl(resolved)) {
-      window.location.replace(resolved);
-      return true;
+      const localPath = toSameOriginPath(resolved);
+      if (localPath == null) {
+        window.location.replace(resolved);
+        return true;
+      }
+      resolved = localPath;
     }
 
     // Hash-only change
