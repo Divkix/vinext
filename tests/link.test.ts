@@ -292,9 +292,12 @@ describe("toSameOriginPath", () => {
       expect(toSameOriginPath("https://example.com/path")).toBe(null);
     });
 
-    it("returns null for protocol-relative URLs (cannot determine origin)", () => {
-      // Protocol-relative URLs resolve against the page's protocol,
-      // but //other.com would have a different origin
+    it("returns pathname for same-origin protocol-relative URL", () => {
+      // //localhost:3000/about resolves to the page's protocol + localhost:3000
+      expect(toSameOriginPath("//localhost:3000/about")).toBe("/about");
+    });
+
+    it("returns null for cross-origin protocol-relative URL", () => {
       expect(toSameOriginPath("//other.com/path")).toBe(null);
     });
 

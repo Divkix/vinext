@@ -13,7 +13,9 @@
 export function toSameOriginPath(url: string): string | null {
   if (typeof window === "undefined") return null;
   try {
-    const parsed = new URL(url);
+    const parsed = url.startsWith("//")
+      ? new URL(url, window.location.origin)
+      : new URL(url);
     if (parsed.origin === window.location.origin) {
       return parsed.pathname + parsed.search + parsed.hash;
     }
