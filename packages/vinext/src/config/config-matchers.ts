@@ -7,6 +7,48 @@
 
 import type { NextRedirect, NextRewrite, NextHeader, HasCondition } from "./next-config.js";
 
+/**
+ * Cache for compiled regex patterns in matchConfigPattern.
+ *
+ * Redirect/rewrite patterns are static — they come from next.config.js and
+ * never change at runtime. Without caching, every request that hits the regex
+ * branch re-runs the full tokeniser walk + isSafeRegex + new RegExp() for
+ * every rule in the array. On apps with many locale-prefixed rules (which all
+ * contain `(` and therefore enter the regex branch) this dominated profiling
+ * at ~2.4 seconds of CPU self-time.
+ *
+ * Value is `null` when safeRegExp rejected the pattern (ReDoS risk), so we
+ * skip it on subsequent requests too without re-running the scanner.
+ */
+const _compiledPatternCache = new Map<string, { re: RegExp; paramNames: string[] } | null>();
+
+/**
+ * Cache for compiled header source regexes in matchHeaders.
+ *
+ * Each NextHeader rule has a `source` that is run through escapeHeaderSource()
+ * then safeRegExp() to produce a RegExp. Both are pure functions of the source
+ * string and the result never changes. Without caching, every request
+ * re-runs the full escapeHeaderSource tokeniser + isSafeRegex scan + new RegExp()
+ * for every header rule.
+ *
+ * Value is `null` when safeRegExp rejected the pattern (ReDoS risk).
+ */
+const _compiledHeaderSourceCache = new Map<string, RegExp | null>();
+
+/**
+ * Cache for compiled has/missing condition value regexes in checkSingleCondition.
+ *
+ * Each has/missing condition may carry a `value` string that is passed directly
+ * to safeRegExp() for matching against header/cookie/query/host values. The
+ * condition objects are static (from next.config.js) so the compiled RegExp
+ * never changes. Without caching, safeRegExp() is called on every request for
+ * every condition on every rule.
+ *
+ * Value is `null` when safeRegExp rejected the pattern, or `false` when the
+ * value string was undefined (no regex needed — use exact string comparison).
+ */
+const _compiledConditionCache = new Map<string, RegExp | null>();
+
 /** Hop-by-hop headers that should not be forwarded through a proxy. */
 const HOP_BY_HOP_HEADERS = new Set([
   "connection",
@@ -330,7 +372,7 @@ function checkSingleCondition(condition: HasCondition, ctx: RequestContext): boo
       const headerValue = ctx.headers.get(condition.key);
       if (headerValue === null) return false;
       if (condition.value !== undefined) {
-        const re = safeRegExp(condition.value);
+        const re = _cachedConditionRegex(condition.value);
         if (re) return re.test(headerValue);
         return headerValue === condition.value;
       }
@@ -340,7 +382,7 @@ function checkSingleCondition(condition: HasCondition, ctx: RequestContext): boo
       const cookieValue = ctx.cookies[condition.key];
       if (cookieValue === undefined) return false;
       if (condition.value !== undefined) {
-        const re = safeRegExp(condition.value);
+        const re = _cachedConditionRegex(condition.value);
         if (re) return re.test(cookieValue);
         return cookieValue === condition.value;
       }
@@ -350,7 +392,7 @@ function checkSingleCondition(condition: HasCondition, ctx: RequestContext): boo
       const queryValue = ctx.query.get(condition.key);
       if (queryValue === null) return false;
       if (condition.value !== undefined) {
-        const re = safeRegExp(condition.value);
+        const re = _cachedConditionRegex(condition.value);
         if (re) return re.test(queryValue);
         return queryValue === condition.value;
       }
@@ -358,7 +400,7 @@ function checkSingleCondition(condition: HasCondition, ctx: RequestContext): boo
     }
     case "host": {
       if (condition.value !== undefined) {
-        const re = safeRegExp(condition.value);
+        const re = _cachedConditionRegex(condition.value);
         if (re) return re.test(ctx.host);
         return ctx.host === condition.value;
       }
@@ -367,6 +409,20 @@ function checkSingleCondition(condition: HasCondition, ctx: RequestContext): boo
     default:
       return false;
   }
+}
+
+/**
+ * Return a cached RegExp for a has/missing condition value string, compiling
+ * on first use. Returns null if safeRegExp rejected the pattern or if the
+ * value is not a valid regex (fall back to exact string comparison).
+ */
+function _cachedConditionRegex(value: string): RegExp | null {
+  let re = _compiledConditionCache.get(value);
+  if (re === undefined) {
+    re = safeRegExp(value);
+    _compiledConditionCache.set(value, re);
+  }
+  return re;
 }
 
 /**
@@ -444,49 +500,59 @@ export function matchConfigPattern(
     /:[\w-]+\./.test(pattern)
   ) {
     try {
-      // Param names may contain hyphens (e.g. :auth-method, :sign-in).
-      const paramNames: string[] = [];
-      // Single-pass conversion with procedural suffix handling. The tokenizer
-      // matches only simple, non-overlapping tokens; quantifier/constraint
-      // suffixes after :param are consumed procedurally to avoid polynomial
-      // backtracking in the regex engine.
-      let regexStr = "";
-      const tokenRe = /:([\w-]+)|[.]|[^:.]+/g; // lgtm[js/redos] — alternatives are non-overlapping (`:` and `.` excluded from `[^:.]+`)
-      let tok: RegExpExecArray | null;
-      while ((tok = tokenRe.exec(pattern)) !== null) {
-        if (tok[1] !== undefined) {
-          const name = tok[1];
-          const rest = pattern.slice(tokenRe.lastIndex);
-          // Check for quantifier (* or +) with optional constraint
-          if (rest.startsWith("*") || rest.startsWith("+")) {
-            const quantifier = rest[0];
-            tokenRe.lastIndex += 1;
-            const constraint = extractConstraint(pattern, tokenRe);
-            paramNames.push(name);
-            if (constraint !== null) {
-              regexStr += `(${constraint})`;
+      // Look up the compiled regex in the module-level cache. Patterns come
+      // from next.config.js and are static, so we only need to compile each
+      // one once across the lifetime of the worker/server process.
+      let compiled = _compiledPatternCache.get(pattern);
+      if (compiled === undefined) {
+        // Cache miss — compile the pattern now and store the result.
+        // Param names may contain hyphens (e.g. :auth-method, :sign-in).
+        const paramNames: string[] = [];
+        // Single-pass conversion with procedural suffix handling. The tokenizer
+        // matches only simple, non-overlapping tokens; quantifier/constraint
+        // suffixes after :param are consumed procedurally to avoid polynomial
+        // backtracking in the regex engine.
+        let regexStr = "";
+        const tokenRe = /:([\w-]+)|[.]|[^:.]+/g; // lgtm[js/redos] — alternatives are non-overlapping (`:` and `.` excluded from `[^:.]+`)
+        let tok: RegExpExecArray | null;
+        while ((tok = tokenRe.exec(pattern)) !== null) {
+          if (tok[1] !== undefined) {
+            const name = tok[1];
+            const rest = pattern.slice(tokenRe.lastIndex);
+            // Check for quantifier (* or +) with optional constraint
+            if (rest.startsWith("*") || rest.startsWith("+")) {
+              const quantifier = rest[0];
+              tokenRe.lastIndex += 1;
+              const constraint = extractConstraint(pattern, tokenRe);
+              paramNames.push(name);
+              if (constraint !== null) {
+                regexStr += `(${constraint})`;
+              } else {
+                regexStr += quantifier === "*" ? "(.*)" : "(.+)";
+              }
             } else {
-              regexStr += quantifier === "*" ? "(.*)" : "(.+)";
+              // Check for inline constraint without quantifier
+              const constraint = extractConstraint(pattern, tokenRe);
+              paramNames.push(name);
+              regexStr += constraint !== null ? `(${constraint})` : "([^/]+)";
             }
+          } else if (tok[0] === ".") {
+            regexStr += "\\.";
           } else {
-            // Check for inline constraint without quantifier
-            const constraint = extractConstraint(pattern, tokenRe);
-            paramNames.push(name);
-            regexStr += constraint !== null ? `(${constraint})` : "([^/]+)";
+            regexStr += tok[0];
           }
-        } else if (tok[0] === ".") {
-          regexStr += "\\.";
-        } else {
-          regexStr += tok[0];
         }
+        const re = safeRegExp("^" + regexStr + "$");
+        // Store null for rejected patterns so we don't re-run isSafeRegex.
+        compiled = re ? { re, paramNames } : null;
+        _compiledPatternCache.set(pattern, compiled);
       }
-      const re = safeRegExp("^" + regexStr + "$");
-      if (!re) return null;
-      const match = re.exec(pathname);
+      if (!compiled) return null;
+      const match = compiled.re.exec(pathname);
       if (!match) return null;
       const params: Record<string, string> = Object.create(null);
-      for (let i = 0; i < paramNames.length; i++) {
-        params[paramNames[i]] = match[i + 1] ?? "";
+      for (let i = 0; i < compiled.paramNames.length; i++) {
+        params[compiled.paramNames[i]] = match[i + 1] ?? "";
       }
       return params;
     } catch {
@@ -752,8 +818,14 @@ export function matchHeaders(
 ): Array<{ key: string; value: string }> {
   const result: Array<{ key: string; value: string }> = [];
   for (const rule of headers) {
-    const escaped = escapeHeaderSource(rule.source);
-    const sourceRegex = safeRegExp("^" + escaped + "$");
+    // Cache the compiled source regex — escapeHeaderSource() + safeRegExp() are
+    // pure functions of rule.source and the result never changes between requests.
+    let sourceRegex = _compiledHeaderSourceCache.get(rule.source);
+    if (sourceRegex === undefined) {
+      const escaped = escapeHeaderSource(rule.source);
+      sourceRegex = safeRegExp("^" + escaped + "$");
+      _compiledHeaderSourceCache.set(rule.source, sourceRegex);
+    }
     if (sourceRegex && sourceRegex.test(pathname)) {
       if (rule.has || rule.missing) {
         if (!checkHasConditions(rule.has, rule.missing, ctx)) {
