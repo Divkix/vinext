@@ -1,3 +1,8 @@
 {
-  "ignorePatterns": ["fixtures/ecosystem/**", "tests/fixtures/ecosystem/**", "examples/**"]
+  "ignorePatterns": [
+    "fixtures/ecosystem/**",
+    "tests/fixtures/ecosystem/**",
+    "examples/**",
+    "packages/create-vinext-app/templates/**"
+  ]
 }

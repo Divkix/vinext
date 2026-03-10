@@ -2,7 +2,7 @@
   "name": "vinext-monorepo",
   "private": true,
   "scripts": {
-    "build": "pnpm --filter vinext run build",
+    "build": "pnpm --filter vinext --filter create-vinext-app run build",
     "test": "vitest run",
     "test:watch": "vitest",
     "generate:google-fonts": "node scripts/generate-google-fonts.js",

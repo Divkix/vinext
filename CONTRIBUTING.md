@@ -31,6 +31,23 @@ For browser-level debugging (verifying rendered output, client-side navigation, 
 
 Check the [open issues](https://github.com/cloudflare/vinext/issues). If you're looking to contribute, those are a good place to start.
 
+### Working on create-vinext-app
+
+The `packages/create-vinext-app/` package is a standalone CLI for scaffolding new vinext projects.
+
+```bash
+# Run tests
+pnpm --filter create-vinext-app test
+
+# Build
+pnpm --filter create-vinext-app build
+
+# Test manually
+node packages/create-vinext-app/dist/index.js test-app --yes --skip-install
+```
+
+Templates live in `packages/create-vinext-app/templates/`. When updating dependency versions in templates, update both `app-router/package.json.tmpl` and `pages-router/package.json.tmpl`.
+
 ## Project structure
 
 See `AGENTS.md` for the full project structure, key files, architecture patterns, and development workflow.

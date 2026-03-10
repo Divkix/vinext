@@ -71,8 +71,18 @@ jobs:
           echo "Publishing vinext@${VERSION} (was ${LATEST})"
           echo "previous=${LATEST}" >> "$GITHUB_OUTPUT"
 
-      - name: Publish (OIDC trusted publishing)
+      - name: Bump create-vinext-app version
+        working-directory: packages/create-vinext-app
+        run: |
+          npm version "${{ steps.version.outputs.version }}" --no-git-tag-version
+          echo "Publishing create-vinext-app@${{ steps.version.outputs.version }}"
+
+      - name: Publish vinext (OIDC trusted publishing)
         working-directory: packages/vinext
+        run: npm publish --access public --provenance
+
+      - name: Publish create-vinext-app (OIDC trusted publishing)
+        working-directory: packages/create-vinext-app
         run: npm publish --access public --provenance
 
       - name: Tag release
@@ -166,7 +176,7 @@ jobs:
           PAYLOAD=$(jq -n \
             --arg version "$VERSION" \
             --arg summary "$SUMMARY" \
-            '{"text": ("*vinext v" + $version + " published to npm*\n\n" + $summary + "\n\nnpm: https://www.npmjs.com/package/vinext/v/" + $version)}')
+            '{"text": ("*vinext v" + $version + " + create-vinext-app published to npm*\n\n" + $summary + "\n\nnpm: https://www.npmjs.com/package/vinext/v/" + $version)}')
 
           echo "::group::Webhook payload"
           echo "$PAYLOAD"

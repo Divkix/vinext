@@ -110,6 +110,6 @@ These features are intentionally excluded:
 - `next export` (legacy — use `output: 'export'`)
 - Turbopack/webpack configuration
 - `next/jest` (use Vitest)
-- `create-next-app` scaffolding
+- `create-next-app` scaffolding — Replaced by `create-vinext-app` (`npm create vinext-app@latest`)
 - Bug-for-bug parity with undocumented Next.js behavior
 - Native Node modules in Workers (sharp, resvg, satori — auto-stubbed in production)

@@ -7,6 +7,16 @@ description: Migrates Next.js projects to vinext (Vite-based Next.js reimplement
 
 vinext reimplements the Next.js API surface on Vite. Existing `app/`, `pages/`, and `next.config.js` work as-is — migration is a package swap, config generation, and ESM conversion. No changes to application code required.
 
+## Starting a New Project?
+
+If you're starting from scratch (not migrating an existing Next.js app), use `create-vinext-app` instead:
+
+```bash
+npm create vinext-app@latest
+```
+
+This scaffolds a complete vinext project with Cloudflare Workers support. The rest of this skill is for migrating existing Next.js projects.
+
 ## FIRST: Verify Next.js Project
 
 Confirm `next` is in `dependencies` or `devDependencies` in `package.json`. If not found, STOP — this skill does not apply.

@@ -1,0 +1,38 @@
+{
+  "name": "create-vinext-app",
+  "version": "0.0.1",
+  "description": "Scaffold a new vinext project targeting Cloudflare Workers",
+  "keywords": [
+    "cloudflare",
+    "create",
+    "next",
+    "scaffold",
+    "vinext",
+    "vite",
+    "workers"
+  ],
+  "license": "MIT",
+  "bin": {
+    "create-vinext-app": "dist/index.js"
+  },
+  "files": [
+    "dist",
+    "templates"
+  ],
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@clack/prompts": "^0.10.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.2",
+    "vitest": "^3.2.1"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

@@ -26,6 +26,8 @@ pnpm run lint                                    # oxlint
 pnpm run fmt                                     # oxfmt (format)
 pnpm run fmt:check                               # oxfmt (check only, no writes)
 pnpm run build                                   # Build the vinext package
+pnpm --filter create-vinext-app test             # create-vinext-app tests
+pnpm --filter create-vinext-app build            # Build the CLI
 ```
 
 ### Project Structure
@@ -39,6 +41,11 @@ packages/vinext/src/
   server/               # SSR handlers, ISR, middleware
   cloudflare/           # KV cache handler
 
+packages/create-vinext-app/
+  src/                  # CLI source
+  templates/            # App Router & Pages Router scaffolding templates
+  tests/                # Unit, integration, e2e tests
+
 tests/
   *.test.ts             # Vitest tests
   fixtures/             # Test apps (pages-basic, app-basic, etc.)
@@ -49,14 +56,16 @@ examples/               # User-facing demo apps
 
 ### Key Files
 
-| File                       | Purpose                                                            |
-| -------------------------- | ------------------------------------------------------------------ |
-| `index.ts`                 | Vite plugin — resolves `next/*` imports, generates virtual modules |
-| `shims/*.ts`               | Reimplementations of `next/link`, `next/navigation`, etc.          |
-| `server/dev-server.ts`     | Pages Router SSR handler                                           |
-| `entries/app-rsc-entry.ts` | App Router RSC entry generator                                     |
-| `routing/pages-router.ts`  | Scans `pages/` directory                                           |
-| `routing/app-router.ts`    | Scans `app/` directory                                             |
+| File                                         | Purpose                                                            |
+| -------------------------------------------- | ------------------------------------------------------------------ |
+| `index.ts`                                   | Vite plugin — resolves `next/*` imports, generates virtual modules |
+| `shims/*.ts`                                 | Reimplementations of `next/link`, `next/navigation`, etc.          |
+| `server/dev-server.ts`                       | Pages Router SSR handler                                           |
+| `entries/app-rsc-entry.ts`                   | App Router RSC entry generator                                     |
+| `routing/pages-router.ts`                    | Scans `pages/` directory                                           |
+| `routing/app-router.ts`                      | Scans `app/` directory                                             |
+| `packages/create-vinext-app/src/index.ts`    | CLI entry point for `npm create vinext-app`                        |
+| `packages/create-vinext-app/src/scaffold.ts` | Template copying and variable substitution                         |
 
 ---
 
@@ -119,15 +128,16 @@ pnpm test -t "middleware"
 
 **Which test files to run** depends on what you changed:
 
-| If you changed...                              | Run these tests                                                                          |
-| ---------------------------------------------- | ---------------------------------------------------------------------------------------- |
-| A shim (`shims/*.ts`)                          | `tests/shims.test.ts` + the specific shim test (e.g., `tests/link.test.ts`)              |
-| Routing (`routing/*.ts`)                       | `tests/routing.test.ts`, `tests/route-sorting.test.ts`                                   |
-| App Router server (`entries/app-rsc-entry.ts`) | `tests/app-router.test.ts`, `tests/features.test.ts`                                     |
-| Pages Router server (`server/dev-server.ts`)   | `tests/pages-router.test.ts`                                                             |
-| Caching/ISR                                    | `tests/isr-cache.test.ts`, `tests/fetch-cache.test.ts`, `tests/kv-cache-handler.test.ts` |
-| Build/deploy                                   | `tests/deploy.test.ts`, `tests/build-optimization.test.ts`                               |
-| Next.js compat features                        | `tests/nextjs-compat/` (the relevant file)                                               |
+| If you changed...                                 | Run these tests                                                                          |
+| ------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| A shim (`shims/*.ts`)                             | `tests/shims.test.ts` + the specific shim test (e.g., `tests/link.test.ts`)              |
+| Routing (`routing/*.ts`)                          | `tests/routing.test.ts`, `tests/route-sorting.test.ts`                                   |
+| App Router server (`entries/app-rsc-entry.ts`)    | `tests/app-router.test.ts`, `tests/features.test.ts`                                     |
+| Pages Router server (`server/dev-server.ts`)      | `tests/pages-router.test.ts`                                                             |
+| Caching/ISR                                       | `tests/isr-cache.test.ts`, `tests/fetch-cache.test.ts`, `tests/kv-cache-handler.test.ts` |
+| Build/deploy                                      | `tests/deploy.test.ts`, `tests/build-optimization.test.ts`                               |
+| Next.js compat features                           | `tests/nextjs-compat/` (the relevant file)                                               |
+| create-vinext-app (`packages/create-vinext-app/`) | `pnpm --filter create-vinext-app test`                                                   |
 
 **Let CI run the full suite.** The full `pnpm test` and all 5 Playwright E2E projects run in CI on every PR. You do not need to run the full suite locally before pushing. CI will catch any cross-cutting regressions.
 

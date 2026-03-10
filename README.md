@@ -68,11 +68,20 @@ Options: `-p / --port <port>`, `-H / --hostname <host>`, `--turbopack` (accepted
 
 `vinext init` options: `--port <port>` (default: 3001), `--skip-check`, `--force`.
 
-### Starting a new vinext project
+### New Project
 
-Run `npm create next-app@latest` to create a new Next.js project, and then follow these instructions to migrate it to vinext.
+```bash
+npm create vinext-app@latest
+```
 
-In the future, we will have a proper `npm create vinext` new project workflow.
+This scaffolds a new vinext project with Cloudflare Workers support. You'll be prompted for a project name and router type (App Router or Pages Router).
+
+Options:
+
+- `--template <app|pages>` — Router template (default: app)
+- `--yes` / `-y` — Skip prompts
+- `--skip-install` — Skip dependency installation
+- `--no-git` — Skip git init
 
 ### Migrating an existing Next.js project
 
@@ -528,7 +537,7 @@ These are intentional exclusions:
 - **`next export` (legacy)** — Use `output: 'export'` in config instead.
 - **Turbopack/webpack configuration** — This runs on Vite. Use Vite plugins instead of webpack loaders/plugins.
 - **`next/jest`** — Use Vitest.
-- **`create-next-app` scaffolding** — Not a goal.
+- **`create-next-app` scaffolding** — Replaced by `create-vinext-app` (`npm create vinext-app@latest`).
 - **Bug-for-bug parity with undocumented behavior** — If it's not in the Next.js docs, we probably don't replicate it.
 
 ## Known limitations

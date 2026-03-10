@@ -99,6 +99,56 @@ jobs:
           kill "$SERVER_PID" 2>/dev/null || true
           exit 1
 
+  create-vinext-app:
+    name: create-vinext-app (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-node-pnpm
+      - name: Build packages
+        run: pnpm run build
+
+      - name: Pack vinext for local install
+        run: npm pack --pack-destination "${{ runner.temp }}"
+        working-directory: packages/vinext
+
+      - name: Scaffold a fresh create-vinext-app project
+        run: node packages/create-vinext-app/dist/index.js "${{ runner.temp }}/cva-test" --yes --skip-install
+
+      - name: Install vinext from local tarball
+        working-directory: ${{ runner.temp }}/cva-test
+        shell: bash
+        run: npm install "${{ runner.temp }}"/vinext-*.tgz
+
+      - name: Install remaining deps
+        working-directory: ${{ runner.temp }}/cva-test
+        run: npm install
+
+      - name: Start dev server and verify HTTP 200
+        working-directory: ${{ runner.temp }}/cva-test
+        shell: bash
+        run: |
+          npx vite dev --port 3098 &
+          SERVER_PID=$!
+
+          for i in $(seq 1 30); do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:3098/ || true)
+            if [ "$STATUS" = "200" ]; then
+              echo "Server responded with HTTP 200 (attempt $i)"
+              kill "$SERVER_PID" 2>/dev/null || true
+              exit 0
+            fi
+            sleep 1
+          done
+
+          echo "Server did not respond with HTTP 200 within 30 seconds"
+          kill "$SERVER_PID" 2>/dev/null || true
+          exit 1
+
   e2e:
     name: E2E (${{ matrix.project }})
     runs-on: ubuntu-latest
