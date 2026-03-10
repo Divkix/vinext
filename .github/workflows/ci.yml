@@ -120,6 +120,12 @@ jobs:
       - name: Scaffold a fresh create-vinext-app project
         run: node packages/create-vinext-app/dist/index.js "${{ runner.temp }}/cva-test" --template ${{ matrix.template }} --yes --skip-install
 
+      - name: Scaffold with plain project name
+        working-directory: ${{ runner.temp }}
+        run: |
+          node "${{ github.workspace }}/packages/create-vinext-app/dist/index.js" cva-plain-test --template ${{ matrix.template }} --yes --skip-install
+          test -f cva-plain-test/package.json
+
       - name: Install vinext from local tarball
         working-directory: ${{ runner.temp }}/cva-test
         shell: bash

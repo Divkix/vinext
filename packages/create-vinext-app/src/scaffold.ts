@@ -16,7 +16,7 @@ export interface ScaffoldOptions {
 }
 
 function defaultExec(cmd: string, args: string[], opts: { cwd: string }): void {
-  execFileSync(cmd, args, { cwd: opts.cwd, stdio: "pipe" });
+  execFileSync(cmd, args, { cwd: opts.cwd, stdio: "inherit" });
 }
 
 /**
@@ -87,6 +87,7 @@ export function scaffold(options: ScaffoldOptions): void {
   copyDir(templateDir, projectPath);
 
   // Substitute .tmpl variables
+  // Template uses "vinext": "latest" in package.json. Pin to caret range once vinext reaches 1.0.
   const workerName = sanitizeWorkerName(projectName);
   processTmplFiles(projectPath, {
     "{{PROJECT_NAME}}": projectName,

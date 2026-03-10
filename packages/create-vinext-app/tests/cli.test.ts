@@ -255,6 +255,27 @@ describe("main", () => {
     expect(opts.projectPath).toBe("/tmp/some-dir/my-app");
   });
 
+  it("extracts basename when given a relative path with ./", async () => {
+    await main(["./my-app", "-y", "--skip-install", "--no-git"]);
+    expect(mockedScaffold).toHaveBeenCalledOnce();
+    const opts = mockedScaffold.mock.calls[0][0];
+    expect(opts.projectName).toBe("my-app");
+  });
+
+  it("extracts basename when given a relative path with ../", async () => {
+    await main(["../my-app", "-y", "--skip-install", "--no-git"]);
+    expect(mockedScaffold).toHaveBeenCalledOnce();
+    const opts = mockedScaffold.mock.calls[0][0];
+    expect(opts.projectName).toBe("my-app");
+  });
+
+  it("extracts basename from nested relative path", async () => {
+    await main(["./nested/deep/my-app", "-y", "--skip-install", "--no-git"]);
+    expect(mockedScaffold).toHaveBeenCalledOnce();
+    const opts = mockedScaffold.mock.calls[0][0];
+    expect(opts.projectName).toBe("my-app");
+  });
+
   it("prints success message after scaffolding", async () => {
     await main(["my-app", "-y", "--skip-install", "--no-git"]);
     const output = consoleLogs.join("\n");

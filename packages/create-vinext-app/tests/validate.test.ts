@@ -53,6 +53,38 @@ describe("validateProjectName", () => {
     expect(result).toEqual({ valid: true });
   });
 
+  it("rejects malformed scoped name '@org/'", () => {
+    const result = validateProjectName("@org/");
+    expect(result.valid).toBe(false);
+    if (!result.valid) {
+      expect(result.message).toMatch(/scoped/i);
+    }
+  });
+
+  it("rejects malformed scoped name '@/name'", () => {
+    const result = validateProjectName("@/name");
+    expect(result.valid).toBe(false);
+    if (!result.valid) {
+      expect(result.message).toMatch(/scoped/i);
+    }
+  });
+
+  it("rejects bare '@' as scoped name", () => {
+    const result = validateProjectName("@");
+    expect(result.valid).toBe(false);
+    if (!result.valid) {
+      expect(result.message).toMatch(/scoped/i);
+    }
+  });
+
+  it("rejects double-scoped '@org/foo/bar'", () => {
+    const result = validateProjectName("@org/foo/bar");
+    expect(result.valid).toBe(false);
+    if (!result.valid) {
+      expect(result.message).toMatch(/scoped/i);
+    }
+  });
+
   it("rejects names longer than 214 characters", () => {
     const result = validateProjectName("a".repeat(215));
     expect(result.valid).toBe(false);

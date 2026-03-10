@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import path from "node:path";
-import { readFileSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { validateProjectName, resolveProjectPath, isDirectoryEmpty } from "./validate.js";
 import { detectPackageManager } from "./install.js";
@@ -134,12 +134,19 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
     template = answers.template;
   }
 
-  // When an absolute path is provided (e.g. /tmp/my-app or D:\a\my-app),
-  // use the full path for the directory and the basename as the project name.
+  // When a path is provided (absolute, or relative like ./my-app or ../my-app),
+  // use the resolved path for the directory and the basename as the project name.
   let targetDir: string | undefined;
-  if (path.isAbsolute(projectName)) {
-    targetDir = projectName;
-    projectName = path.basename(projectName);
+  const looksLikePath =
+    path.isAbsolute(projectName) ||
+    projectName.startsWith("./") ||
+    projectName.startsWith("../") ||
+    projectName.startsWith(".\\") ||
+    projectName.startsWith("..\\");
+
+  if (looksLikePath) {
+    targetDir = path.resolve(projectName);
+    projectName = path.basename(targetDir);
   }
 
   // Validate project name
@@ -202,9 +209,17 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
 const thisFile = path.resolve(fileURLToPath(import.meta.url));
 const entryFile = process.argv[1];
 if (entryFile) {
-  const resolvedEntry = path.resolve(entryFile);
+  const resolveReal = (p: string) => {
+    try {
+      return realpathSync(path.resolve(p));
+    } catch {
+      return path.resolve(p);
+    }
+  };
+  const resolvedEntry = resolveReal(entryFile);
+  const resolvedThis = resolveReal(thisFile);
   // Handle both .ts (dev) and .js (built) entry
-  if (resolvedEntry === thisFile || resolvedEntry === thisFile.replace(/\.ts$/, ".js")) {
+  if (resolvedEntry === resolvedThis || resolvedEntry === resolvedThis.replace(/\.ts$/, ".js")) {
     main().catch((err) => {
       console.error(err);
       process.exit(1);

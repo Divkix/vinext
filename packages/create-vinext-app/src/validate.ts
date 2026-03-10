@@ -56,6 +56,16 @@ export function validateProjectName(name: string): ValidationResult {
     };
   }
 
+  // Validate scoped package name structure: @scope/name
+  if (name.startsWith("@")) {
+    if (!/^@[a-z0-9-]+\/[a-z0-9][a-z0-9._-]*$/i.test(name)) {
+      return {
+        valid: false,
+        message: 'Scoped package name must be in the format "@scope/name"',
+      };
+    }
+  }
+
   // Determine the "bare" name for start-char validation.
   // For scoped names like @org/app, validate the part after the slash.
   const bareName = name.startsWith("@") ? (name.split("/").pop() ?? name) : name;

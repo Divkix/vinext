@@ -1,3 +1,6 @@
+// TODO: Extract to vinext/server/pages-router-entry (like app-router-entry)
+// to avoid duplicating this logic in scaffolded projects.
+
 /**
  * Cloudflare Worker entry point for vinext Pages Router.
  *
