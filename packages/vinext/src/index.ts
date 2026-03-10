@@ -1314,6 +1314,31 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
         }
       },
 
+      // Pre-include React CJS packages in every non-client Cloudflare
+      // environment so Vite's dep optimizer pre-bundles them before the
+      // workerd module runner tries to evaluate raw CJS. Without this,
+      // react/jsx-runtime is discovered lazily and the runner imports
+      // the CJS source directly, failing with "module is not defined".
+      configEnvironment(_name, env) {
+        if (!hasCloudflarePlugin) return;
+        // Skip the client environment — it runs in the browser, not workerd.
+        if (env.consumer === "client") return;
+
+        const reactDeps = [
+          "react",
+          "react-dom",
+          "react-dom/server.edge",
+          "react/jsx-runtime",
+          "react/jsx-dev-runtime",
+        ];
+
+        env.optimizeDeps ??= {};
+        env.optimizeDeps.include = [
+          ...(env.optimizeDeps.include ?? []),
+          ...reactDeps.filter((d) => !(env.optimizeDeps!.include ?? []).includes(d)),
+        ];
+      },
+
       resolveId: {
         // Hook filter: only invoke JS for next/* imports and virtual:vinext-* modules.
         // Matches "next/navigation", "next/router.js", "virtual:vinext-rsc-entry",
