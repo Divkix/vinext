@@ -1812,8 +1812,17 @@ describe("metadata routes integration (App Router)", () => {
     expect(res.headers.get("content-type")).toContain("application/xml");
     const xml = await res.text();
     expect(xml).toContain("<urlset");
+    expect(xml).toContain('xmlns:image="http://www.google.com/schemas/sitemap-image/1.1"');
+    expect(xml).toContain('xmlns:video="http://www.google.com/schemas/sitemap-video/1.1"');
+    expect(xml).toContain('xmlns:xhtml="http://www.w3.org/1999/xhtml"');
     expect(xml).toContain("https://example.com");
     expect(xml).toContain("https://example.com/about");
+    expect(xml).toContain(
+      '<xhtml:link rel="alternate" hreflang="fr" href="https://example.com/fr" />',
+    );
+    expect(xml).toContain("<image:loc>https://example.com/image.jpg</image:loc>");
+    expect(xml).toContain("<video:title>Homepage Video</video:title>");
+    expect(xml).toContain("<video:content_loc>https://example.com/video.mp4</video:content_loc>");
   });
 
   it("serves /robots.txt from dynamic robots.ts", async () => {
