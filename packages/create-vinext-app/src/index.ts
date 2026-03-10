@@ -134,6 +134,14 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
     template = answers.template;
   }
 
+  // When an absolute path is provided (e.g. /tmp/my-app or D:\a\my-app),
+  // use the full path for the directory and the basename as the project name.
+  let targetDir: string | undefined;
+  if (path.isAbsolute(projectName)) {
+    targetDir = projectName;
+    projectName = path.basename(projectName);
+  }
+
   // Validate project name
   const validation = validateProjectName(projectName);
   if (!validation.valid) {
@@ -146,7 +154,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
     validation.valid && validation.normalized ? validation.normalized : projectName;
 
   // Resolve project path
-  const projectPath = resolveProjectPath(normalizedName, process.cwd());
+  const projectPath = targetDir ?? resolveProjectPath(normalizedName, process.cwd());
 
   // Check if directory is empty
   if (!isDirectoryEmpty(projectPath)) {

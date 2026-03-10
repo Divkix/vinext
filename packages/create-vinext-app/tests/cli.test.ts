@@ -225,6 +225,14 @@ describe("main", () => {
     expect(mockedScaffold.mock.calls[0][0].projectName).toBe("my-app");
   });
 
+  it("extracts basename when given an absolute path", async () => {
+    await main(["/tmp/some-dir/my-app", "-y", "--skip-install", "--no-git"]);
+    expect(mockedScaffold).toHaveBeenCalledOnce();
+    const opts = mockedScaffold.mock.calls[0][0];
+    expect(opts.projectName).toBe("my-app");
+    expect(opts.projectPath).toBe("/tmp/some-dir/my-app");
+  });
+
   it("prints success message after scaffolding", async () => {
     await main(["my-app", "-y", "--skip-install", "--no-git"]);
     const output = consoleLogs.join("\n");
