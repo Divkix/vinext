@@ -1,4 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import path from "node:path";
+import fs from "node:fs";
+import os from "node:os";
 
 // Mock scaffold module before any imports that reference it
 vi.mock("../src/scaffold.js", () => ({
@@ -217,6 +220,25 @@ describe("main", () => {
     await expect(main(["node_modules", "-y"])).rejects.toThrow("process.exit(1)");
     expect(exitCode).toBe(1);
     expect(consoleErrors.join(" ")).toContain("Invalid project name");
+  });
+
+  it("'.' uses cwd basename as project name", async () => {
+    // Create an empty temp dir to act as cwd so isDirectoryEmpty passes
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "vinext-dot-test-"));
+    const originalCwd = process.cwd;
+    process.cwd = () => tmpDir;
+    try {
+      await main([".", "-y", "--skip-install", "--no-git"]);
+      expect(mockedScaffold).toHaveBeenCalledOnce();
+      const opts = mockedScaffold.mock.calls[0][0];
+      // projectName should be the basename of the temp dir, not "."
+      expect(opts.projectName).not.toBe(".");
+      expect(opts.projectName).toBe(path.basename(tmpDir));
+      expect(opts.projectPath).toBe(tmpDir);
+    } finally {
+      process.cwd = originalCwd;
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
   });
 
   it("normalizes uppercase project name", async () => {

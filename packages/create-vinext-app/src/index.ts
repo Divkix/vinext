@@ -149,6 +149,12 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
     process.exit(1);
   }
 
+  // When "." is passed, scaffold into cwd and derive the name from the directory
+  if (validation.valid && "useCwd" in validation && validation.useCwd) {
+    targetDir = process.cwd();
+    projectName = path.basename(process.cwd());
+  }
+
   // Use normalized name if available
   const normalizedName =
     validation.valid && validation.normalized ? validation.normalized : projectName;

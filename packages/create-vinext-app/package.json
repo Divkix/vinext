@@ -22,6 +22,7 @@
   "type": "module",
   "scripts": {
     "build": "tsc",
+    "pretest": "tsc",
     "test": "vitest run",
     "test:watch": "vitest"
   },

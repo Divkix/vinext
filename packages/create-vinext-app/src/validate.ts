@@ -48,14 +48,11 @@ export function validateProjectName(name: string): ValidationResult {
     };
   }
 
-  // Scoped package names: @scope/name
-  const nameToValidate = name.startsWith("@") ? name : name;
-
-  if (!/^[a-zA-Z0-9\-._@/]+$/.test(nameToValidate)) {
+  if (!/^[a-zA-Z0-9\-._@/]+$/.test(name)) {
     return {
       valid: false,
       message:
-        "Project name can only contain lowercase letters, numbers, hyphens, dots, underscores, and scoped package prefixes (@org/)",
+        "Project name can only contain letters, numbers, hyphens, dots, underscores, and scoped package prefixes (@org/)",
     };
   }
 
