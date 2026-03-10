@@ -61,6 +61,12 @@ describe("app-router template", () => {
     const content = fs.readFileSync(path.join(dir, "package.json.tmpl"), "utf-8");
     expect(content).toContain("{{PROJECT_NAME}}");
   });
+
+  it("wrangler.jsonc.tmpl uses vinext entry (no custom worker)", () => {
+    const content = fs.readFileSync(path.join(dir, "wrangler.jsonc.tmpl"), "utf-8");
+    expect(content).toContain("vinext/server/app-router-entry");
+    expect(content).not.toContain("./worker/index.ts");
+  });
 });
 
 describe("pages-router template", () => {
