@@ -1329,9 +1329,7 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
         env.optimizeDeps ??= {};
         env.optimizeDeps.include = [
           ...(env.optimizeDeps.include ?? []),
-          ...reactDeps.filter(
-            (d) => !(env.optimizeDeps!.include ?? []).includes(d),
-          ),
+          ...reactDeps.filter((d) => !(env.optimizeDeps!.include ?? []).includes(d)),
         ];
       },
 
