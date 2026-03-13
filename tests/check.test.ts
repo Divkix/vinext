@@ -286,7 +286,7 @@ describe("analyzeConfig", () => {
     expect(items.find((i) => i.name === "allowedDevOrigins")?.status).toBe("supported");
   });
 
-  it("detects i18n.domains as unsupported", () => {
+  it("detects i18n.domains as partial support", () => {
     writeFile(
       "next.config.js",
       `module.exports = {
@@ -300,7 +300,7 @@ describe("analyzeConfig", () => {
 
     const items = analyzeConfig(tmpDir);
     expect(items.find((i) => i.name === "i18n")?.status).toBe("supported");
-    expect(items.find((i) => i.name === "i18n.domains")?.status).toBe("unsupported");
+    expect(items.find((i) => i.name === "i18n.domains")?.status).toBe("partial");
   });
 
   it("reads next.config.ts files", () => {
@@ -865,8 +865,23 @@ describe("formatReport", () => {
     expect(report).toContain("vinext init");
     expect(report).toContain("Or manually");
     expect(report).toContain('"type": "module"');
+    expect(report).toContain("@vitejs/plugin-react");
+    expect(report).toContain("@vitejs/plugin-rsc");
+    expect(report).toContain("react-server-dom-webpack");
     expect(report).toContain("vite.config.ts");
     expect(report).toContain("npx vite dev");
+  });
+
+  it("does not list App Router-only packages in manual install steps for Pages Router projects", () => {
+    writeFile("pages/index.tsx", `export default function Home() { return <div />; }`);
+    writeFile("package.json", JSON.stringify({ type: "module", dependencies: {} }));
+
+    const result = runCheck(tmpDir);
+    const report = formatReport(result);
+
+    expect(report).toContain("@vitejs/plugin-react");
+    expect(report).not.toContain("@vitejs/plugin-rsc");
+    expect(report).not.toContain("react-server-dom-webpack");
   });
 });
 

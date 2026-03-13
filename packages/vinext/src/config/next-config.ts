@@ -7,8 +7,10 @@
 import path from "node:path";
 import { createRequire } from "node:module";
 import fs from "node:fs";
+import { randomUUID } from "node:crypto";
 import { PHASE_DEVELOPMENT_SERVER } from "../shims/constants.js";
 import { normalizePageExtensions } from "../routing/file-matcher.js";
+import { isExternalUrl } from "./config-matchers.js";
 
 /**
  * Parse a body size limit value (string or number) into bytes.
@@ -185,8 +187,19 @@ export interface NextConfig {
   cacheComponents?: boolean;
   /** Transpile packages (Vite handles this natively) */
   transpilePackages?: string[];
+  /**
+   * Packages that should be treated as server-external (not bundled by Vite).
+   * Corresponds to Next.js `serverExternalPackages` (or the legacy
+   * `experimental.serverComponentsExternalPackages`).
+   */
+  serverExternalPackages?: string[];
   /** Webpack config (ignored — we use Vite) */
   webpack?: unknown;
+  /**
+   * Custom build ID generator. If provided, called once at build/dev start.
+   * Must return a non-empty string, or null to use the default random ID.
+   */
+  generateBuildId?: () => string | null | Promise<string | null>;
   /** Any other options */
   [key: string]: unknown;
 }
@@ -220,6 +233,14 @@ export interface ResolvedNextConfig {
   serverActionsAllowedOrigins: string[];
   /** Parsed body size limit for server actions in bytes (from experimental.serverActions.bodySizeLimit). Defaults to 1MB. */
   serverActionsBodySizeLimit: number;
+  /**
+   * Packages that should be treated as server-external (not bundled by Vite).
+   * Sourced from `serverExternalPackages` or the legacy
+   * `experimental.serverComponentsExternalPackages` in next.config.
+   */
+  serverExternalPackages: string[];
+  /** Resolved build ID (from generateBuildId, or a random UUID if not provided). */
+  buildId: string;
 }
 
 const CONFIG_FILES = ["next.config.ts", "next.config.mjs", "next.config.js", "next.config.cjs"];
@@ -330,6 +351,48 @@ export async function loadNextConfig(
 }
 
 /**
+ * Generate a UUID that doesn't contain "ad" to avoid false-positive ad-blocker hits.
+ * Mirrors Next.js's own nanoid retry loop.
+ */
+function safeUUID(): string {
+  let id = randomUUID();
+  while (/ad/i.test(id)) id = randomUUID();
+  return id;
+}
+
+/**
+ * Call the user's generateBuildId function and validate its return value.
+ * Follows Next.js semantics: null return falls back to a random UUID; any
+ * other non-string throws. Leading/trailing whitespace is trimmed.
+ *
+ * @see https://nextjs.org/docs/app/api-reference/config/next-config-js/generateBuildId
+ */
+async function resolveBuildId(
+  generate: (() => string | null | Promise<string | null>) | undefined,
+): Promise<string> {
+  if (!generate) return safeUUID();
+
+  const result = await generate();
+
+  if (result === null) return safeUUID();
+
+  if (typeof result !== "string") {
+    throw new Error(
+      "generateBuildId did not return a string. https://nextjs.org/docs/messages/generatebuildid-not-a-string",
+    );
+  }
+
+  const trimmed = result.trim();
+  if (trimmed.length === 0) {
+    throw new Error(
+      "generateBuildId returned an empty string. https://nextjs.org/docs/messages/generatebuildid-not-a-string",
+    );
+  }
+
+  return trimmed;
+}
+
+/**
  * Resolve a NextConfig into a fully-resolved ResolvedNextConfig.
  * Awaits async functions for redirects/rewrites/headers.
  */
@@ -338,6 +401,7 @@ export async function resolveNextConfig(
   root: string = process.cwd(),
 ): Promise<ResolvedNextConfig> {
   if (!config) {
+    const buildId = await resolveBuildId(undefined);
     const resolved: ResolvedNextConfig = {
       env: {},
       basePath: "",
@@ -355,6 +419,8 @@ export async function resolveNextConfig(
       allowedDevOrigins: [],
       serverActionsAllowedOrigins: [],
       serverActionsBodySizeLimit: 1 * 1024 * 1024,
+      serverExternalPackages: [],
+      buildId,
     };
     detectNextIntlConfig(root, resolved);
     return resolved;
@@ -386,6 +452,26 @@ export async function resolveNextConfig(
     }
   }
 
+  {
+    const allRewrites = [...rewrites.beforeFiles, ...rewrites.afterFiles, ...rewrites.fallback];
+    const externalRewrites = allRewrites.filter((rewrite) => isExternalUrl(rewrite.destination));
+
+    if (externalRewrites.length > 0) {
+      const noun = externalRewrites.length === 1 ? "external rewrite" : "external rewrites";
+      const listing = externalRewrites
+        .map((rewrite) => `  ${rewrite.source} → ${rewrite.destination}`)
+        .join("\n");
+
+      console.warn(
+        `[vinext] Found ${externalRewrites.length} ${noun} that proxy requests to external origins:\n` +
+          `${listing}\n` +
+          `Request headers, including credential headers (cookie, authorization, proxy-authorization, x-api-key), ` +
+          `are forwarded to the external origin to match Next.js behavior. ` +
+          `If you do not want to forward credentials, use an API route or route handler where you control exactly which headers are sent.`,
+      );
+    }
+  }
+
   // Resolve headers
   let headers: NextHeader[] = [];
   if (config.headers) {
@@ -412,6 +498,16 @@ export async function resolveNextConfig(
   const serverActionsBodySizeLimit = parseBodySizeLimit(
     serverActionsConfig?.bodySizeLimit as string | number | undefined,
   );
+
+  // Resolve serverExternalPackages — support the current top-level key and the
+  // legacy experimental.serverComponentsExternalPackages name that Next.js still
+  // accepts (it moved out of experimental in Next.js 14.2).
+  const legacyServerComponentsExternal = experimental?.serverComponentsExternalPackages;
+  const serverExternalPackages: string[] = Array.isArray(config.serverExternalPackages)
+    ? (config.serverExternalPackages as string[])
+    : Array.isArray(legacyServerComponentsExternal)
+      ? (legacyServerComponentsExternal as string[])
+      : [];
 
   // Warn about unsupported webpack usage. We preserve alias injection and
   // extract MDX settings, but all other webpack customization is still ignored.
@@ -446,6 +542,10 @@ export async function resolveNextConfig(
     };
   }
 
+  const buildId = await resolveBuildId(
+    config.generateBuildId as (() => string | null | Promise<string | null>) | undefined,
+  );
+
   const resolved: ResolvedNextConfig = {
     env: config.env ?? {},
     basePath: config.basePath ?? "",
@@ -463,6 +563,8 @@ export async function resolveNextConfig(
     allowedDevOrigins,
     serverActionsAllowedOrigins,
     serverActionsBodySizeLimit,
+    serverExternalPackages,
+    buildId,
   };
 
   // Auto-detect next-intl (lowest priority — explicit aliases from

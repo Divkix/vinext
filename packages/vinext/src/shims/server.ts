@@ -10,6 +10,7 @@
  */
 
 import { encodeMiddlewareRequestHeaders } from "../server/middleware-request-headers.js";
+import { parseCookieHeader } from "./internal/parse-cookie-header.js";
 
 // ---------------------------------------------------------------------------
 // NextRequest
@@ -91,6 +92,15 @@ export class NextRequest extends Request {
         this.headers.get("x-vercel-ip-longitude") ??
         undefined,
     };
+  }
+
+  /**
+   * The build ID of the Next.js application.
+   * Delegates to `nextUrl.buildId` to match Next.js API surface.
+   * Can be used in middleware to detect deployment skew between client and server.
+   */
+  get buildId(): string | undefined {
+    return this._nextUrl.buildId;
   }
 }
 
@@ -259,6 +269,16 @@ export class NextURL {
   toString(): string {
     return this._url.toString();
   }
+
+  /**
+   * The build ID of the Next.js application.
+   * Set from `generateBuildId` in next.config.js, or a random UUID if not configured.
+   * Can be used in middleware to detect deployment skew between client and server.
+   * Matches the Next.js API: `request.nextUrl.buildId`.
+   */
+  get buildId(): string | undefined {
+    return process.env.__VINEXT_BUILD_ID ?? undefined;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -272,35 +292,79 @@ interface CookieEntry {
 
 export class RequestCookies {
   private _headers: Headers;
+  private _parsed: Map<string, string>;
 
   constructor(headers: Headers) {
     this._headers = headers;
-  }
-
-  private _parse(): Map<string, string> {
-    const map = new Map<string, string>();
-    const cookie = this._headers.get("cookie") ?? "";
-    for (const part of cookie.split(";")) {
-      const eq = part.indexOf("=");
-      if (eq === -1) continue;
-      const name = part.slice(0, eq).trim();
-      const value = part.slice(eq + 1).trim();
-      map.set(name, value);
-    }
-    return map;
+    this._parsed = parseCookieHeader(headers.get("cookie") ?? "");
   }
 
   get(name: string): CookieEntry | undefined {
-    const value = this._parse().get(name);
+    const value = this._parsed.get(name);
     return value !== undefined ? { name, value } : undefined;
   }
 
-  getAll(): CookieEntry[] {
-    return [...this._parse().entries()].map(([name, value]) => ({ name, value }));
+  getAll(nameOrOptions?: string | CookieEntry): CookieEntry[] {
+    const name = typeof nameOrOptions === "string" ? nameOrOptions : nameOrOptions?.name;
+    return [...this._parsed.entries()]
+      .filter(([cookieName]) => name === undefined || cookieName === name)
+      .map(([cookieName, value]) => ({ name: cookieName, value }));
   }
 
   has(name: string): boolean {
-    return this._parse().has(name);
+    return this._parsed.has(name);
+  }
+
+  set(nameOrOptions: string | CookieEntry, value?: string): this {
+    let cookieName: string;
+    let cookieValue: string;
+    if (typeof nameOrOptions === "string") {
+      cookieName = nameOrOptions;
+      cookieValue = value ?? "";
+    } else {
+      cookieName = nameOrOptions.name;
+      cookieValue = nameOrOptions.value;
+    }
+    this._parsed.set(cookieName, cookieValue);
+    this._syncHeader();
+    return this;
+  }
+
+  delete(names: string | string[]): boolean | boolean[] {
+    if (Array.isArray(names)) {
+      const results = names.map((name) => this._parsed.delete(name));
+      this._syncHeader();
+      return results;
+    }
+    const result = this._parsed.delete(names);
+    this._syncHeader();
+    return result;
+  }
+
+  clear(): this {
+    this._parsed.clear();
+    this._syncHeader();
+    return this;
+  }
+
+  get size(): number {
+    return this._parsed.size;
+  }
+
+  toString(): string {
+    return this._serialize();
+  }
+
+  private _serialize(): string {
+    return [...this._parsed.entries()].map(([n, v]) => `${n}=${encodeURIComponent(v)}`).join("; ");
+  }
+
+  private _syncHeader(): void {
+    if (this._parsed.size === 0) {
+      this._headers.delete("cookie");
+    } else {
+      this._headers.set("cookie", this._serialize());
+    }
   }
 
   [Symbol.iterator](): IterableIterator<[string, CookieEntry]> {

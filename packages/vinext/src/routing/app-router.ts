@@ -15,12 +15,14 @@
  */
 import path from "node:path";
 import fs from "node:fs";
-import { compareRoutes } from "./utils.js";
+import { compareRoutes, decodeRouteSegment, normalizePathnameForRouteMatch } from "./utils.js";
 import {
   createValidFileMatcher,
   scanWithExtensions,
   type ValidFileMatcher,
 } from "./file-matcher.js";
+import { validateRoutePatterns } from "./route-validation.js";
+import { buildRouteTrie, trieMatch, type TrieNode } from "./route-trie.js";
 
 export interface InterceptingRoute {
   /** The interception convention: "." | ".." | "../.." | "..." */
@@ -36,6 +38,8 @@ export interface InterceptingRoute {
 export interface ParallelSlot {
   /** Slot name (e.g. "team" from @team) */
   name: string;
+  /** Absolute path to the @slot directory that owns this slot. Internal routing metadata. */
+  ownerDir: string;
   /** Absolute path to the slot's page component */
   pagePath: string | null;
   /** Absolute path to the slot's default.tsx fallback */
@@ -143,27 +147,20 @@ export async function appRouter(
 
   // Find all page.tsx and route.ts files, excluding @slot directories
   // (slot pages are not standalone routes — they're rendered as props of their parent layout)
+  // and _private folders (Next.js convention for colocated non-route files).
   const routes: AppRoute[] = [];
+
+  const excludeDir = (name: string) => name.startsWith("@") || name.startsWith("_");
 
   // Process page files in a single pass
   // Use function form of exclude for Node < 22.14 compatibility (string arrays require >= 22.14)
-  for await (const file of scanWithExtensions(
-    "**/page",
-    appDir,
-    matcher.extensions,
-    (name: string) => name.startsWith("@"),
-  )) {
+  for await (const file of scanWithExtensions("**/page", appDir, matcher.extensions, excludeDir)) {
     const route = fileToAppRoute(file, appDir, "page", matcher);
     if (route) routes.push(route);
   }
 
   // Process route handler files (API routes) in a single pass
-  for await (const file of scanWithExtensions(
-    "**/route",
-    appDir,
-    matcher.extensions,
-    (name: string) => name.startsWith("@"),
-  )) {
+  for await (const file of scanWithExtensions("**/route", appDir, matcher.extensions, excludeDir)) {
     const route = fileToAppRoute(file, appDir, "route", matcher);
     if (route) routes.push(route);
   }
@@ -174,6 +171,15 @@ export async function appRouter(
   // a route at /parallel-routes/demographics.
   const slotSubRoutes = discoverSlotSubRoutes(routes, appDir, matcher);
   routes.push(...slotSubRoutes);
+
+  validateRoutePatterns(routes.map((route) => route.pattern));
+  validateRoutePatterns(
+    routes.flatMap((route) =>
+      route.parallelSlots.flatMap((slot) =>
+        slot.interceptingRoutes.map((intercept) => intercept.targetPattern),
+      ),
+    ),
+  );
 
   // Sort: static routes first, then dynamic, then catch-all
   routes.sort(compareRoutes);
@@ -201,7 +207,19 @@ function discoverSlotSubRoutes(
   matcher: ValidFileMatcher,
 ): AppRoute[] {
   const syntheticRoutes: AppRoute[] = [];
-  const existingPatterns = new Set(routes.map((r) => r.pattern));
+
+  // O(1) lookup for existing routes by pattern — avoids O(n) routes.find() per sub-path per parent.
+  // Updated as new synthetic routes are pushed so that later parents can see earlier synthetic entries.
+  const routesByPattern = new Map<string, AppRoute>(routes.map((r) => [r.pattern, r]));
+
+  const slotKey = (slotName: string, ownerDir: string): string => `${slotName}\u0000${ownerDir}`;
+
+  const applySlotSubPages = (route: AppRoute, slotPages: Map<string, string>): void => {
+    route.parallelSlots = route.parallelSlots.map((slot) => ({
+      ...slot,
+      pagePath: slotPages.get(slotKey(slot.name, slot.ownerDir)) ?? slot.pagePath,
+    }));
+  };
 
   for (const parentRoute of routes) {
     if (parentRoute.parallelSlots.length === 0) continue;
@@ -210,8 +228,19 @@ function discoverSlotSubRoutes(
     const parentPageDir = path.dirname(parentRoute.pagePath);
 
     // Collect sub-paths from all slots.
-    // Map: relative sub-path (e.g., "demographics") -> Map<slotName, pagePath>
-    const subPathMap = new Map<string, Map<string, string>>();
+    // Map: normalized visible sub-path -> slot pages, raw filesystem segments (for routeSegments),
+    // and the pre-computed convertedSubRoute (to avoid a redundant re-conversion in the merge loop).
+    const subPathMap = new Map<
+      string,
+      {
+        // Raw filesystem segments (with route groups, @slots, etc.) used for routeSegments so
+        // that useSelectedLayoutSegments() sees the correct segment list at runtime.
+        rawSegments: string[];
+        // Pre-computed URL parts, params, isDynamic from convertSegmentsToRouteParts.
+        converted: { urlSegments: string[]; params: string[]; isDynamic: boolean };
+        slotPages: Map<string, string>;
+      }
+    >();
 
     for (const slot of parentRoute.parallelSlots) {
       const slotDir = path.join(parentPageDir, `@${slot.name}`);
@@ -219,10 +248,33 @@ function discoverSlotSubRoutes(
 
       const subPages = findSlotSubPages(slotDir, matcher);
       for (const { relativePath, pagePath } of subPages) {
-        if (!subPathMap.has(relativePath)) {
-          subPathMap.set(relativePath, new Map());
+        const subSegments = relativePath.split(path.sep);
+        const convertedSubRoute = convertSegmentsToRouteParts(subSegments);
+        if (!convertedSubRoute) continue;
+
+        const { urlSegments } = convertedSubRoute;
+        const normalizedSubPath = urlSegments.join("/");
+        let subPathEntry = subPathMap.get(normalizedSubPath);
+
+        if (!subPathEntry) {
+          subPathEntry = {
+            rawSegments: subSegments,
+            converted: convertedSubRoute,
+            slotPages: new Map(),
+          };
+          subPathMap.set(normalizedSubPath, subPathEntry);
         }
-        subPathMap.get(relativePath)!.set(slot.name, pagePath);
+
+        const slotId = slotKey(slot.name, slot.ownerDir);
+        const existingSlotPage = subPathEntry.slotPages.get(slotId);
+        if (existingSlotPage) {
+          const pattern = joinRoutePattern(parentRoute.pattern, normalizedSubPath);
+          throw new Error(
+            `You cannot have two routes that resolve to the same path ("${pattern}").`,
+          );
+        }
+
+        subPathEntry.slotPages.set(slotId, pagePath);
       }
     }
 
@@ -230,59 +282,37 @@ function discoverSlotSubRoutes(
 
     // Find the default.tsx for the children slot at the parent directory
     const childrenDefault = findFile(parentPageDir, "default", matcher);
+    if (!childrenDefault) continue;
 
-    for (const [subPath, slotPages] of subPathMap) {
-      // Convert sub-path segments to URL pattern parts
-      const subSegments = subPath.split(path.sep);
-      const urlParts: string[] = [];
-      const subParams: string[] = [];
-      let subIsDynamic = false;
-
-      for (const seg of subSegments) {
-        // Route groups are transparent
-        if (seg.startsWith("(") && seg.endsWith(")")) continue;
-
-        const catchAllMatch = seg.match(/^\[\.\.\.([\w-]+)\]$/);
-        if (catchAllMatch) {
-          subIsDynamic = true;
-          subParams.push(catchAllMatch[1]);
-          urlParts.push(`:${catchAllMatch[1]}+`);
-          continue;
-        }
-        const optionalCatchAllMatch = seg.match(/^\[\[\.\.\.([\w-]+)\]\]$/);
-        if (optionalCatchAllMatch) {
-          subIsDynamic = true;
-          subParams.push(optionalCatchAllMatch[1]);
-          urlParts.push(`:${optionalCatchAllMatch[1]}*`);
-          continue;
-        }
-        const dynamicMatch = seg.match(/^\[([\w-]+)\]$/);
-        if (dynamicMatch) {
-          subIsDynamic = true;
-          subParams.push(dynamicMatch[1]);
-          urlParts.push(`:${dynamicMatch[1]}`);
-          continue;
-        }
-
-        urlParts.push(seg);
-      }
+    for (const { rawSegments, converted: convertedSubRoute, slotPages } of subPathMap.values()) {
+      const {
+        urlSegments: urlParts,
+        params: subParams,
+        isDynamic: subIsDynamic,
+      } = convertedSubRoute;
 
       const subUrlPath = urlParts.join("/");
-      const pattern =
-        parentRoute.pattern === "/" ? "/" + subUrlPath : parentRoute.pattern + "/" + subUrlPath;
+      const pattern = joinRoutePattern(parentRoute.pattern, subUrlPath);
 
-      // Skip if this pattern already exists as a regular route
-      if (existingPatterns.has(pattern)) continue;
-      if (syntheticRoutes.some((r) => r.pattern === pattern)) continue;
+      const existingRoute = routesByPattern.get(pattern);
+      if (existingRoute) {
+        if (existingRoute.routePath && !existingRoute.pagePath) {
+          throw new Error(
+            `You cannot have two routes that resolve to the same path ("${pattern}").`,
+          );
+        }
+        applySlotSubPages(existingRoute, slotPages);
+        continue;
+      }
 
       // Build parallel slots for this sub-route: matching slots get the sub-page,
       // non-matching slots get null pagePath (rendering falls back to defaultPath)
       const subSlots: ParallelSlot[] = parentRoute.parallelSlots.map((slot) => ({
         ...slot,
-        pagePath: slotPages.get(slot.name) || null,
+        pagePath: slotPages.get(slotKey(slot.name, slot.ownerDir)) || null,
       }));
 
-      syntheticRoutes.push({
+      const newRoute: AppRoute = {
         pattern,
         pagePath: childrenDefault, // children slot uses parent's default.tsx as page
         routePath: null,
@@ -296,12 +326,14 @@ function discoverSlotSubRoutes(
         notFoundPaths: parentRoute.notFoundPaths,
         forbiddenPath: parentRoute.forbiddenPath,
         unauthorizedPath: parentRoute.unauthorizedPath,
-        routeSegments: [...parentRoute.routeSegments, ...subSegments],
+        routeSegments: [...parentRoute.routeSegments, ...rawSegments],
         layoutTreePositions: parentRoute.layoutTreePositions,
         isDynamic: parentRoute.isDynamic || subIsDynamic,
         params: [...parentRoute.params, ...subParams],
         patternParts: [...parentRoute.patternParts, ...urlParts],
-      });
+      };
+      syntheticRoutes.push(newRoute);
+      routesByPattern.set(pattern, newRoute);
     }
   }
 
@@ -361,52 +393,12 @@ function fileToAppRoute(
   const params: string[] = [];
   let isDynamic = false;
 
-  // Convert segments to URL pattern, stripping route groups and parallel slots
-  const urlSegments: string[] = [];
-  for (const segment of segments) {
-    // Route groups: (group) -> skip (transparent in URL)
-    if (segment.startsWith("(") && segment.endsWith(")")) {
-      continue;
-    }
+  const convertedRoute = convertSegmentsToRouteParts(segments);
+  if (!convertedRoute) return null;
 
-    // Parallel slots: @slot -> skip (invisible in URL, content passed as layout props)
-    if (segment.startsWith("@")) {
-      continue;
-    }
-
-    // Catch-all: [...slug] (param names may contain hyphens, e.g. [...sign-in])
-    const catchAllMatch = segment.match(/^\[\.\.\.([\w-]+)\]$/);
-    if (catchAllMatch) {
-      isDynamic = true;
-      params.push(catchAllMatch[1]);
-      urlSegments.push(`:${catchAllMatch[1]}+`);
-      continue;
-    }
-
-    // Optional catch-all: [[...slug]] (param names may contain hyphens, e.g. [[...sign-in]])
-    const optionalCatchAllMatch = segment.match(/^\[\[\.\.\.([\w-]+)\]\]$/);
-    if (optionalCatchAllMatch) {
-      isDynamic = true;
-      params.push(optionalCatchAllMatch[1]);
-      urlSegments.push(`:${optionalCatchAllMatch[1]}*`);
-      continue;
-    }
-
-    // Dynamic segment: [id] (param names may contain hyphens, e.g. [my-param])
-    const dynamicMatch = segment.match(/^\[([\w-]+)\]$/);
-    if (dynamicMatch) {
-      isDynamic = true;
-      params.push(dynamicMatch[1]);
-      urlSegments.push(`:${dynamicMatch[1]}`);
-      continue;
-    }
-
-    try {
-      urlSegments.push(decodeURIComponent(segment));
-    } catch {
-      urlSegments.push(segment);
-    }
-  }
+  const { urlSegments, params: routeParams, isDynamic: routeIsDynamic } = convertedRoute;
+  params.push(...routeParams);
+  isDynamic = routeIsDynamic;
 
   const pattern = "/" + urlSegments.join("/");
 
@@ -706,6 +698,7 @@ function discoverParallelSlots(
 
     slots.push({
       name: slotName,
+      ownerDir: slotDir,
       pagePath,
       defaultPath,
       layoutPath: findFile(slotDir, "layout", matcher),
@@ -773,6 +766,8 @@ function scanForInterceptingPages(
 
   for (const entry of entries) {
     if (!entry.isDirectory()) continue;
+    // Skip private folders (prefixed with _)
+    if (entry.name.startsWith("_")) continue;
 
     // Check if this directory name starts with an interception convention
     const interceptMatch = matchInterceptConvention(entry.name);
@@ -859,6 +854,8 @@ function collectInterceptingPages(
   const entries = fs.readdirSync(currentDir, { withFileTypes: true });
   for (const entry of entries) {
     if (!entry.isDirectory()) continue;
+    // Skip private folders (prefixed with _)
+    if (entry.name.startsWith("_")) continue;
     collectInterceptingPages(
       path.join(currentDir, entry.name),
       interceptRoot,
@@ -873,11 +870,28 @@ function collectInterceptingPages(
 }
 
 /**
+ * Check whether a path segment is invisible in the URL (route groups, parallel slots, ".").
+ *
+ * Used by computeInterceptTarget, convertSegmentsToRouteParts, and
+ * hasRemainingVisibleSegments — keep this the single source of truth.
+ */
+function isInvisibleSegment(segment: string): boolean {
+  if (segment === ".") return true;
+  if (segment.startsWith("(") && segment.endsWith(")")) return true;
+  if (segment.startsWith("@")) return true;
+  return false;
+}
+
+/**
  * Compute the target URL pattern for an intercepting route.
  *
+ * Interception conventions (..), (..)(..)" climb by *visible route segments*
+ * (not filesystem directories). Route groups like (marketing) and parallel
+ * slots like @modal are invisible and must be skipped when counting levels.
+ *
  * - (.) same level: resolve relative to routeDir
- * - (..) one level up: resolve relative to parent of routeDir
- * - (..)(..)" two levels up: resolve relative to grandparent of routeDir
+ * - (..) one level up: climb 1 visible segment
+ * - (..)(..) two levels up: climb 2 visible segments
  * - (...) root: resolve from appDir
  */
 function computeInterceptTarget(
@@ -888,69 +902,45 @@ function computeInterceptTarget(
   routeDir: string,
   appDir: string,
 ): { pattern: string; params: string[] } | null {
-  // Determine the base directory for target resolution
-  let baseDir: string;
+  // Determine the base segments for target resolution.
+  // We work on route segments (not filesystem paths) so that route groups
+  // and parallel slots are properly skipped when climbing.
+  const routeSegments = path.relative(appDir, routeDir).split(path.sep).filter(Boolean);
+
+  let baseParts: string[];
   switch (convention) {
     case ".":
-      baseDir = routeDir;
+      baseParts = routeSegments;
       break;
     case "..":
-      baseDir = path.dirname(routeDir);
+    case "../..": {
+      const levelsToClimb = convention === ".." ? 1 : 2;
+      let climbed = 0;
+      let cutIndex = routeSegments.length;
+      while (cutIndex > 0 && climbed < levelsToClimb) {
+        cutIndex--;
+        if (!isInvisibleSegment(routeSegments[cutIndex])) {
+          climbed++;
+        }
+      }
+      baseParts = routeSegments.slice(0, cutIndex);
       break;
-    case "../..":
-      baseDir = path.dirname(path.dirname(routeDir));
-      break;
+    }
     case "...":
-      baseDir = appDir;
+      baseParts = [];
       break;
     default:
       return null;
   }
 
-  // Build the target URL segments from baseDir relative to appDir
-  const baseParts = path.relative(appDir, baseDir).split(path.sep).filter(Boolean);
-
   // Add the intercept segment and any nested path segments
   const nestedParts = path.relative(interceptRoot, currentDir).split(path.sep).filter(Boolean);
   const allSegments = [...baseParts, interceptSegment, ...nestedParts];
 
-  // Convert segments to URL pattern
-  const urlSegments: string[] = [];
-  const params: string[] = [];
+  const convertedTarget = convertSegmentsToRouteParts(allSegments);
+  if (!convertedTarget) return null;
 
-  for (const segment of allSegments) {
-    if (segment === ".") continue;
-    // Route groups and @ slots are transparent
-    if (segment.startsWith("(") && segment.endsWith(")")) continue;
-    if (segment.startsWith("@")) continue;
-
-    // Dynamic segments
-    const catchAllMatch = segment.match(/^\[\.\.\.([\w-]+)\]$/);
-    if (catchAllMatch) {
-      params.push(catchAllMatch[1]);
-      urlSegments.push(`:${catchAllMatch[1]}+`);
-      continue;
-    }
-    const optionalCatchAllMatch = segment.match(/^\[\[\.\.\.([\w-]+)\]\]$/);
-    if (optionalCatchAllMatch) {
-      params.push(optionalCatchAllMatch[1]);
-      urlSegments.push(`:${optionalCatchAllMatch[1]}*`);
-      continue;
-    }
-    const dynamicMatch = segment.match(/^\[([\w-]+)\]$/);
-    if (dynamicMatch) {
-      params.push(dynamicMatch[1]);
-      urlSegments.push(`:${dynamicMatch[1]}`);
-      continue;
-    }
-
-    // Decode URL-encoded directory names (e.g., %5Fsites -> _sites)
-    try {
-      urlSegments.push(decodeURIComponent(segment));
-    } catch {
-      urlSegments.push(segment);
-    }
-  }
+  const { urlSegments, params } = convertedTarget;
 
   const pattern = "/" + urlSegments.join("/");
   return { pattern: pattern === "/" ? "/" : pattern, params };
@@ -969,6 +959,80 @@ function findFile(dir: string, name: string, matcher: ValidFileMatcher): string 
 }
 
 /**
+ * Convert filesystem path segments to URL route parts, skipping invisible segments
+ * (route groups, @slots, ".") and converting dynamic segment syntax to Express-style
+ * patterns (e.g. "[id]" → ":id", "[...slug]" → ":slug+").
+ */
+function convertSegmentsToRouteParts(
+  segments: string[],
+): { urlSegments: string[]; params: string[]; isDynamic: boolean } | null {
+  const urlSegments: string[] = [];
+  const params: string[] = [];
+  let isDynamic = false;
+
+  for (let i = 0; i < segments.length; i++) {
+    const segment = segments[i];
+
+    if (isInvisibleSegment(segment)) continue;
+
+    // Catch-all segments are only valid in terminal URL position.
+    const catchAllMatch = segment.match(/^\[\.\.\.([\w-]+)\]$/);
+    if (catchAllMatch) {
+      if (hasRemainingVisibleSegments(segments, i + 1)) return null;
+      isDynamic = true;
+      params.push(catchAllMatch[1]);
+      urlSegments.push(`:${catchAllMatch[1]}+`);
+      continue;
+    }
+
+    const optionalCatchAllMatch = segment.match(/^\[\[\.\.\.([\w-]+)\]\]$/);
+    if (optionalCatchAllMatch) {
+      if (hasRemainingVisibleSegments(segments, i + 1)) return null;
+      isDynamic = true;
+      params.push(optionalCatchAllMatch[1]);
+      urlSegments.push(`:${optionalCatchAllMatch[1]}*`);
+      continue;
+    }
+
+    const dynamicMatch = segment.match(/^\[([\w-]+)\]$/);
+    if (dynamicMatch) {
+      isDynamic = true;
+      params.push(dynamicMatch[1]);
+      urlSegments.push(`:${dynamicMatch[1]}`);
+      continue;
+    }
+
+    urlSegments.push(decodeRouteSegment(segment));
+  }
+
+  return { urlSegments, params, isDynamic };
+}
+
+function hasRemainingVisibleSegments(segments: string[], startIndex: number): boolean {
+  for (let i = startIndex; i < segments.length; i++) {
+    if (!isInvisibleSegment(segments[i])) return true;
+  }
+  return false;
+}
+
+// Trie cache — keyed by route array identity (same array = same trie)
+const appTrieCache = new WeakMap<AppRoute[], TrieNode<AppRoute>>();
+
+function getOrBuildAppTrie(routes: AppRoute[]): TrieNode<AppRoute> {
+  let trie = appTrieCache.get(routes);
+  if (!trie) {
+    trie = buildRouteTrie(routes);
+    appTrieCache.set(routes, trie);
+  }
+  return trie;
+}
+
+function joinRoutePattern(basePattern: string, subPath: string): string {
+  if (!subPath) return basePattern;
+  return basePattern === "/" ? `/${subPath}` : `${basePattern}/${subPath}`;
+}
+
+/**
  * Match a URL against App Router routes.
  */
 export function matchAppRoute(
@@ -977,60 +1041,10 @@ export function matchAppRoute(
 ): { route: AppRoute; params: Record<string, string | string[]> } | null {
   const pathname = url.split("?")[0];
   let normalizedUrl = pathname === "/" ? "/" : pathname.replace(/\/$/, "");
-  try {
-    normalizedUrl = decodeURIComponent(normalizedUrl);
-  } catch {
-    /* malformed percent-encoding — match as-is */
-  }
+  normalizedUrl = normalizePathnameForRouteMatch(normalizedUrl);
 
-  // Split URL once, reuse across all route match attempts
+  // Split URL once, look up via trie
   const urlParts = normalizedUrl.split("/").filter(Boolean);
-
-  for (const route of routes) {
-    const params = matchPattern(urlParts, route.patternParts);
-    if (params !== null) {
-      return { route, params };
-    }
-  }
-
-  return null;
-}
-
-function matchPattern(
-  urlParts: string[],
-  patternParts: string[],
-): Record<string, string | string[]> | null {
-  const params: Record<string, string | string[]> = Object.create(null);
-
-  for (let i = 0; i < patternParts.length; i++) {
-    const pp = patternParts[i];
-
-    if (pp.endsWith("+")) {
-      const paramName = pp.slice(1, -1);
-      const remaining = urlParts.slice(i);
-      if (remaining.length === 0) return null;
-      params[paramName] = remaining;
-      return params;
-    }
-
-    if (pp.endsWith("*")) {
-      const paramName = pp.slice(1, -1);
-      const remaining = urlParts.slice(i);
-      params[paramName] = remaining;
-      return params;
-    }
-
-    if (pp.startsWith(":")) {
-      const paramName = pp.slice(1);
-      if (i >= urlParts.length) return null;
-      params[paramName] = urlParts[i];
-      continue;
-    }
-
-    if (i >= urlParts.length || urlParts[i] !== pp) return null;
-  }
-
-  if (urlParts.length !== patternParts.length) return null;
-
-  return params;
+  const trie = getOrBuildAppTrie(routes);
+  return trieMatch(trie, urlParts);
 }

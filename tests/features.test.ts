@@ -2,7 +2,15 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } 
 import { createServer, type ViteDevServer } from "vite";
 import path from "node:path";
 import vinext from "../packages/vinext/src/index.js";
-import { PAGES_FIXTURE_DIR, startFixtureServer } from "./helpers.js";
+import {
+  APP_FIXTURE_DIR,
+  PAGES_FIXTURE_DIR,
+  PAGES_I18N_DOMAINS_BASEPATH_FIXTURE_DIR,
+  PAGES_I18N_DOMAINS_FIXTURE_DIR,
+  createIsolatedFixture,
+  requestNodeServerWithHost,
+  startFixtureServer,
+} from "./helpers.js";
 
 const FIXTURE_DIR = PAGES_FIXTURE_DIR;
 
@@ -489,6 +497,48 @@ describe("ISR (Pages Router)", () => {
     expect(res3.headers.get("x-vinext-cache")).toBe("HIT");
   });
 
+  it("background regeneration re-renders HTML with fresh props", async () => {
+    // Ensure cache is populated (may already be from prior tests)
+    await fetch(`${baseUrl}/isr-test`);
+
+    // Wait for TTL to expire (revalidate: 1 second)
+    await new Promise((r) => setTimeout(r, 1200));
+
+    // Trigger background regeneration via STALE request and capture old HTML
+    const staleRes = await fetch(`${baseUrl}/isr-test`);
+    expect(staleRes.headers.get("x-vinext-cache")).toBe("STALE");
+    const staleHtml = await staleRes.text();
+    const staleTimestamp = staleHtml.match(/data-testid="timestamp">(\d+)</);
+    expect(staleTimestamp).toBeTruthy();
+    const oldTimestamp = Number(staleTimestamp![1]);
+
+    // Wait for background regeneration to complete
+    await new Promise((r) => setTimeout(r, 500));
+
+    // The regenerated HIT should have DIFFERENT HTML — the page must have been
+    // re-rendered with fresh getStaticProps data, not just the old HTML cached
+    // again with new pageData.
+    const hitRes = await fetch(`${baseUrl}/isr-test`);
+    expect(hitRes.headers.get("x-vinext-cache")).toBe("HIT");
+    const hitHtml = await hitRes.text();
+    const hitTimestamp = hitHtml.match(/data-testid="timestamp">(\d+)</);
+    expect(hitTimestamp).toBeTruthy();
+    const newTimestamp = Number(hitTimestamp![1]);
+
+    // The HTML timestamp must have changed — proves the page was re-rendered,
+    // not just getStaticProps re-run with old HTML cached again.
+    expect(newTimestamp).toBeGreaterThan(oldTimestamp);
+
+    // __NEXT_DATA__ must also contain the fresh timestamp, proving both the
+    // server-rendered HTML and the hydration data are in sync.
+    const nextDataMatch = hitHtml.match(
+      /window\.__NEXT_DATA__\s*=\s*(\{[\s\S]*?\})(?:;|<\/script>)/,
+    );
+    expect(nextDataMatch).toBeTruthy();
+    const nextData = JSON.parse(nextDataMatch![1]);
+    expect(nextData.props.pageProps.timestamp).toBe(newTimestamp);
+  });
+
   it("sets Cache-Control header for ISR pages", async () => {
     const res = await fetch(`${baseUrl}/isr-test`);
     const cacheControl = res.headers.get("cache-control");
@@ -505,6 +555,83 @@ describe("ISR (Pages Router)", () => {
 });
 
 // ---------------------------------------------------------------------------
+// ISR (App Router)
+// ---------------------------------------------------------------------------
+
+describe("ISR (App Router)", () => {
+  let server: ViteDevServer;
+  let baseUrl: string;
+
+  beforeAll(async () => {
+    ({ server, baseUrl } = await startFixtureServer(APP_FIXTURE_DIR, { appRouter: true }));
+  }, 30000);
+
+  afterAll(async () => {
+    await server?.close();
+  });
+
+  // ── Dev mode ──────────────────────────────────────────────────────────────
+  // NOTE: The Vite plugin statically replaces `process.env.NODE_ENV` at
+  // transform time using `define`, so it cannot be mutated at runtime in
+  // integration tests. Production ISR cache behavior (MISS/HIT/STALE/regen) is
+  // covered by Playwright E2E tests. These integration tests verify dev-mode
+  // behavior: correct headers emitted, no ISR cache reads/writes.
+
+  it("dev: renders ISR page and emits Cache-Control header", async () => {
+    const res = await fetch(`${baseUrl}/isr-test`);
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    expect(html).toContain("App Router ISR Test");
+    expect(html).toContain("Hello from ISR");
+    expect(res.headers.get("cache-control")).toContain("s-maxage=1");
+    expect(res.headers.get("cache-control")).toContain("stale-while-revalidate");
+  });
+
+  it("dev: does NOT write to or read from ISR cache (no X-Vinext-Cache header)", async () => {
+    // In dev mode the production guard (statically compiled) prevents cache
+    // reads and writes, so X-Vinext-Cache is absent on every request.
+    const res1 = await fetch(`${baseUrl}/isr-test`);
+    expect(res1.headers.get("x-vinext-cache")).toBeNull();
+
+    const res2 = await fetch(`${baseUrl}/isr-test`);
+    expect(res2.headers.get("x-vinext-cache")).toBeNull();
+  });
+
+  it("dev: RSC requests (.rsc suffix) return RSC stream with Cache-Control but no X-Vinext-Cache", async () => {
+    const res = await fetch(`${baseUrl}/isr-test.rsc`, {
+      headers: { Accept: "text/x-component" },
+    });
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toContain("text/x-component");
+    // ISR cache reads/writes are prod-only, so no X-Vinext-Cache in dev
+    expect(res.headers.get("x-vinext-cache")).toBeNull();
+    // Cache-Control IS still emitted for RSC responses on ISR pages
+    expect(res.headers.get("cache-control")).toContain("s-maxage=1");
+    expect(res.headers.get("cache-control")).toContain("stale-while-revalidate");
+  });
+
+  it("dev: RSC prefetch requests (Next-Router-Prefetch header) return RSC stream with Cache-Control", async () => {
+    const res = await fetch(`${baseUrl}/isr-test.rsc`, {
+      headers: { Accept: "text/x-component", "Next-Router-Prefetch": "1" },
+    });
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toContain("text/x-component");
+    // Prefetch RSC requests should also get Cache-Control (no X-Vinext-Cache in dev)
+    expect(res.headers.get("cache-control")).toContain("s-maxage=1");
+    expect(res.headers.get("x-vinext-cache")).toBeNull();
+  });
+
+  it("dev: pages without revalidate export emit no Cache-Control or X-Vinext-Cache headers", async () => {
+    // The home page does not export `revalidate`, so it is treated as dynamic
+    const res = await fetch(`${baseUrl}/`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("x-vinext-cache")).toBeNull();
+    // No ISR Cache-Control on dynamic pages
+    expect(res.headers.get("cache-control") ?? "").not.toContain("s-maxage");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // ISR cache internals
 // ---------------------------------------------------------------------------
 
@@ -516,7 +643,7 @@ describe("ISR cache internals", () => {
     // Set an entry with a very short TTL
     await handler.set(
       "test-stale",
-      { kind: "FETCH", data: { headers: {}, body: "test", url: "" }, tags: [], revalidate: 0 },
+      { kind: "FETCH", data: { headers: {}, body: "test", url: "" }, tags: [], revalidate: 0.001 },
       { revalidate: 0.001 },
     );
 
@@ -555,7 +682,7 @@ describe("ISR cache internals", () => {
         kind: "FETCH",
         data: { headers: {}, body: "test", url: "" },
         tags: ["mytag"],
-        revalidate: 0,
+        revalidate: 60,
       },
       { revalidate: 60, tags: ["mytag"] },
     );
@@ -566,6 +693,52 @@ describe("ISR cache internals", () => {
     // Should return null (hard invalidation, not stale)
     const result = await handler.get("test-tag");
     expect(result).toBeNull();
+  });
+
+  it("MemoryCacheHandler skips storage when data.revalidate is 0", async () => {
+    const { MemoryCacheHandler } = await import("../packages/vinext/src/shims/cache.js");
+    const handler = new MemoryCacheHandler();
+
+    // revalidate: 0 means "don't cache" — entry should not be stored at all
+    await handler.set(
+      "revalidate-zero-data",
+      { kind: "FETCH", data: { headers: {}, body: "test", url: "" }, tags: [], revalidate: 0 },
+      { tags: [] },
+    );
+
+    const result = await handler.get("revalidate-zero-data");
+    expect(result).toBeNull();
+  });
+
+  it("MemoryCacheHandler skips storage when ctx.revalidate is 0", async () => {
+    const { MemoryCacheHandler } = await import("../packages/vinext/src/shims/cache.js");
+    const handler = new MemoryCacheHandler();
+
+    // revalidate: 0 via ctx should also skip storage
+    await handler.set(
+      "revalidate-zero-ctx",
+      { kind: "FETCH", data: { headers: {}, body: "test", url: "" }, tags: [], revalidate: false },
+      { revalidate: 0 },
+    );
+
+    const result = await handler.get("revalidate-zero-ctx");
+    expect(result).toBeNull();
+  });
+
+  it("MemoryCacheHandler stores entry when ctx.revalidate is 0 but data.revalidate is positive", async () => {
+    const { MemoryCacheHandler } = await import("../packages/vinext/src/shims/cache.js");
+    const handler = new MemoryCacheHandler();
+
+    // data.revalidate overrides ctx — positive value should store
+    await handler.set(
+      "ctx-zero-data-positive",
+      { kind: "FETCH", data: { headers: {}, body: "test", url: "" }, tags: [], revalidate: 60 },
+      { revalidate: 0 },
+    );
+
+    const result = await handler.get("ctx-zero-data-positive");
+    expect(result).not.toBeNull();
+    expect(result!.cacheState).toBeUndefined();
   });
 });
 
@@ -920,9 +1093,9 @@ export default function About({ locale, locales, defaultLocale }) {
       redirect: "manual",
       headers: { "Accept-Language": "fr-FR,fr;q=0.9,en;q=0.8" },
     });
-    // Should 307 redirect to /fr/about
-    expect(res.status).toBe(307);
-    expect(res.headers.get("location")).toBe("/fr/about");
+    // Next.js only auto-detects locale on the application root.
+    expect(res.status).toBe(200);
+    expect(res.headers.get("location")).toBeNull();
   });
 
   it("redirects to /de for Accept-Language: de on root", async () => {
@@ -972,6 +1145,165 @@ export default function About({ locale, locales, defaultLocale }) {
     // "es" is not in locales — should not match as a locale
     // The URL /es/about won't match any page
     expect(res.status).toBe(404);
+  });
+});
+
+async function startDomainFixtureServer(
+  fixtureDir: string,
+  prefix: string,
+): Promise<{
+  port: number;
+  server: ViteDevServer;
+  tmpDir: string;
+}> {
+  const tmpDir = await createIsolatedFixture(fixtureDir, prefix);
+  const { server } = await startFixtureServer(tmpDir, {
+    server: {
+      host: "127.0.0.1",
+      allowedHosts: ["example.com", "example.fr"],
+    },
+  });
+  const addr = server.httpServer?.address();
+  if (!addr || typeof addr === "string") {
+    throw new Error(`Failed to start dev server for fixture ${fixtureDir}`);
+  }
+  return { port: addr.port, server, tmpDir };
+}
+
+describe("i18n domain routing (Pages Router)", () => {
+  let domainServer: ViteDevServer;
+  let domainTmpDir: string;
+  let domainPort: number;
+
+  beforeAll(async () => {
+    ({
+      server: domainServer,
+      tmpDir: domainTmpDir,
+      port: domainPort,
+    } = await startDomainFixtureServer(PAGES_I18N_DOMAINS_FIXTURE_DIR, "vinext-i18n-domain-"));
+  }, 30000);
+
+  afterAll(async () => {
+    try {
+      (domainServer?.httpServer as any)?.closeAllConnections?.();
+      await Promise.race([
+        domainServer?.close(),
+        new Promise((resolve) => setTimeout(resolve, 5000)),
+      ]);
+    } catch {
+      /* ignore */
+    }
+    const fsp = await import("node:fs/promises");
+    await fsp.rm(domainTmpDir, { recursive: true, force: true }).catch(() => {});
+  }, 15000);
+
+  it("redirects the root path to the preferred locale domain", async () => {
+    const res = await requestNodeServerWithHost(domainPort, "/", "example.com", {
+      "Accept-Language": "fr-FR,fr;q=0.9,en;q=0.8",
+    });
+
+    expect(res.status).toBe(307);
+    expect(res.headers.location).toBe("http://example.fr/");
+  });
+
+  it("uses Accept-Language rather than NEXT_LOCALE to pick the preferred domain", async () => {
+    const res = await requestNodeServerWithHost(domainPort, "/", "example.com", {
+      "Accept-Language": "fr-FR,fr;q=0.9,en;q=0.8",
+      Cookie: "NEXT_LOCALE=en",
+    });
+
+    expect(res.status).toBe(307);
+    expect(res.headers.location).toBe("http://example.fr/");
+  });
+
+  it("preserves the search string on root locale redirects", async () => {
+    const res = await requestNodeServerWithHost(
+      domainPort,
+      "/?utm=campaign&next=%2Fcheckout",
+      "example.com",
+      {
+        "Accept-Language": "fr-FR,fr;q=0.9,en;q=0.8",
+      },
+    );
+
+    expect(res.status).toBe(307);
+    expect(res.headers.location).toBe("http://example.fr/?utm=campaign&next=%2Fcheckout");
+  });
+
+  it("does not redirect unprefixed non-root paths for locale detection", async () => {
+    const res = await requestNodeServerWithHost(domainPort, "/about", "example.com", {
+      "Accept-Language": "fr-FR,fr;q=0.9,en;q=0.8",
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.headers.location).toBeUndefined();
+  });
+
+  it("renders locale-switcher links with the target locale domain during SSR", async () => {
+    const res = await requestNodeServerWithHost(domainPort, "/about", "example.com");
+
+    expect(res.status).toBe(200);
+    expect(res.body).toContain('href="http://example.fr/about" id="switch-locale"');
+  });
+
+  it("uses the matched domain default locale in request context and __NEXT_DATA__", async () => {
+    const res = await requestNodeServerWithHost(domainPort, "/about", "example.fr");
+
+    expect(res.status).toBe(200);
+    expect(res.body).toContain('<p id="locale">fr</p>');
+    expect(res.body).toContain('<p id="defaultLocale">fr</p>');
+    expect(res.body).toContain('href="/about" id="switch-locale"');
+    expect(res.body).toContain('"defaultLocale":"fr"');
+    expect(res.body).toContain(
+      '"domainLocales":[{"domain":"example.com","defaultLocale":"en"},{"domain":"example.fr","defaultLocale":"fr","http":true}]',
+    );
+  });
+});
+
+describe("i18n domain routing with basePath (Pages Router)", () => {
+  let domainServer: ViteDevServer;
+  let domainTmpDir: string;
+  let domainPort: number;
+
+  beforeAll(async () => {
+    ({
+      server: domainServer,
+      tmpDir: domainTmpDir,
+      port: domainPort,
+    } = await startDomainFixtureServer(
+      PAGES_I18N_DOMAINS_BASEPATH_FIXTURE_DIR,
+      "vinext-i18n-domain-basepath-",
+    ));
+  }, 30000);
+
+  afterAll(async () => {
+    try {
+      (domainServer?.httpServer as any)?.closeAllConnections?.();
+      await Promise.race([
+        domainServer?.close(),
+        new Promise((resolve) => setTimeout(resolve, 5000)),
+      ]);
+    } catch {
+      /* ignore */
+    }
+    const fsp = await import("node:fs/promises");
+    await fsp.rm(domainTmpDir, { recursive: true, force: true }).catch(() => {});
+  }, 15000);
+
+  it("preserves basePath and trailingSlash in root locale redirects", async () => {
+    const res = await requestNodeServerWithHost(domainPort, "/app/?utm=campaign", "example.com", {
+      "Accept-Language": "fr-FR,fr;q=0.9,en;q=0.8",
+    });
+
+    expect(res.status).toBe(307);
+    expect(res.headers.location).toBe("http://example.fr/app/?utm=campaign");
+  });
+
+  it("renders locale-switcher links with basePath on cross-domain hrefs", async () => {
+    const res = await requestNodeServerWithHost(domainPort, "/app/about/", "example.com");
+
+    expect(res.status).toBe(200);
+    expect(res.body).toContain('href="http://example.fr/app/about" id="switch-locale"');
   });
 });
 
@@ -1885,6 +2217,20 @@ describe("MetadataHead rendering", () => {
     );
     expect(html).toContain('href="https://acme.com/about"');
     expect(html).toContain('content="https://acme.com/og.png"');
+  });
+
+  it("accepts URL objects for canonical and openGraph.url", () => {
+    // Next.js allows string | URL for URL fields; passing a URL object must not throw
+    const html = renderToStaticMarkup(
+      React.createElement(MetadataHead, {
+        metadata: {
+          alternates: { canonical: new URL("https://example.com/page") },
+          openGraph: { url: new URL("https://example.com/og") },
+        },
+      }),
+    );
+    expect(html).toContain('href="https://example.com/page"');
+    expect(html).toContain('content="https://example.com/og"');
   });
 
   it("renders OG video and audio tags", () => {
@@ -3358,10 +3704,13 @@ describe("applyNavigationLocale", () => {
     // Set up window globals that applyNavigationLocale reads
     (globalThis as any).window = globalThis;
     (globalThis as any).__VINEXT_DEFAULT_LOCALE__ = "en";
+    (globalThis as any).__NEXT_DATA__ = undefined;
   });
 
   afterEach(() => {
     delete (globalThis as any).__VINEXT_DEFAULT_LOCALE__;
+    delete (globalThis as any).__NEXT_DATA__;
+    delete (globalThis as any).location;
     delete (globalThis as any).window;
   });
 
@@ -3407,6 +3756,57 @@ describe("applyNavigationLocale", () => {
 
   it("preserves hash when prefixing locale", () => {
     expect(applyNavigationLocale("/docs#intro", "de")).toBe("/de/docs#intro");
+  });
+
+  it("returns an absolute cross-domain URL when the locale belongs to another domain", () => {
+    (globalThis as any).__NEXT_DATA__ = {
+      domainLocales: [
+        { domain: "example.com", defaultLocale: "en" },
+        { domain: "example.fr", defaultLocale: "fr", http: true },
+      ],
+    };
+    (globalThis as any).location = {
+      protocol: "https:",
+      hostname: "example.com",
+      host: "example.com",
+    };
+
+    expect(applyNavigationLocale("/about", "fr")).toBe("http://example.fr/about");
+  });
+
+  it("includes basePath in cross-domain locale navigation URLs", async () => {
+    const originalBasePath = process.env.__NEXT_ROUTER_BASEPATH;
+    process.env.__NEXT_ROUTER_BASEPATH = "/app";
+    vi.resetModules();
+
+    try {
+      (globalThis as any).window = {
+        __NEXT_DATA__: {
+          domainLocales: [
+            { domain: "example.com", defaultLocale: "en" },
+            { domain: "example.fr", defaultLocale: "fr", http: true },
+          ],
+        },
+        __VINEXT_DEFAULT_LOCALE__: "en",
+        location: {
+          hostname: "example.com",
+          pathname: "/app/about",
+          search: "",
+        },
+        addEventListener() {},
+        removeEventListener() {},
+      };
+      const mod = await import("../packages/vinext/src/shims/router.js");
+
+      expect(mod.applyNavigationLocale("/about", "fr")).toBe("http://example.fr/app/about");
+    } finally {
+      if (originalBasePath === undefined) {
+        delete process.env.__NEXT_ROUTER_BASEPATH;
+      } else {
+        process.env.__NEXT_ROUTER_BASEPATH = originalBasePath;
+      }
+      vi.resetModules();
+    }
   });
 });
 
@@ -3540,8 +3940,8 @@ describe("NEXT_LOCALE cookie redirect behavior", () => {
       redirect: "manual",
       headers: { Cookie: "NEXT_LOCALE=de" },
     });
-    expect(res.status).toBe(307);
-    expect(res.headers.get("location")).toBe("/de/about");
+    expect(res.status).toBe(200);
+    expect(res.headers.get("location")).toBeNull();
   });
 
   it("NEXT_LOCALE cookie matching default locale does NOT redirect", async () => {

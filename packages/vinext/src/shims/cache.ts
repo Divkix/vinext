@@ -20,6 +20,11 @@
 import { markDynamicUsage as _markDynamic } from "./headers.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { fnv1a64 } from "../utils/hash.js";
+import {
+  isInsideUnifiedScope,
+  getRequestContext,
+  runWithUnifiedStateMutation,
+} from "./unified-request-context.js";
 
 // ---------------------------------------------------------------------------
 // Lazy accessor for cache context — avoids circular imports with cache-runtime.
@@ -192,17 +197,24 @@ export class MemoryCacheHandler implements CacheHandler {
       tags.push(...(ctx.tags as string[]));
     }
 
-    let revalidateAt: number | null = null;
+    // Resolve effective revalidate — data overrides ctx.
+    // revalidate: 0 means "don't cache", so skip storage entirely.
+    let effectiveRevalidate: number | undefined;
     if (ctx) {
-      // Handle both old-style { revalidate } and new-style { cacheControl: { revalidate } }
       const revalidate = (ctx as any).cacheControl?.revalidate ?? (ctx as any).revalidate;
-      if (typeof revalidate === "number" && revalidate > 0) {
-        revalidateAt = Date.now() + revalidate * 1000;
+      if (typeof revalidate === "number") {
+        effectiveRevalidate = revalidate;
       }
     }
     if (data && "revalidate" in data && typeof data.revalidate === "number") {
-      revalidateAt = Date.now() + data.revalidate * 1000;
+      effectiveRevalidate = data.revalidate;
     }
+    if (effectiveRevalidate === 0) return;
+
+    const revalidateAt =
+      typeof effectiveRevalidate === "number" && effectiveRevalidate > 0
+        ? Date.now() + effectiveRevalidate * 1000
+        : null;
 
     this.store.set(key, {
       value: data,
@@ -227,11 +239,34 @@ export class MemoryCacheHandler implements CacheHandler {
 }
 
 // ---------------------------------------------------------------------------
-// Active cache handler — the singleton used by next/cache API functions.
-// Defaults to MemoryCacheHandler, can be swapped at runtime.
+// Request-scoped ExecutionContext ALS
+//
+// Re-exported from request-context.ts — the canonical implementation.
+// These exports are kept here for backward compatibility with any code that
+// imports them from "next/cache".
 // ---------------------------------------------------------------------------
 
-let activeHandler: CacheHandler = new MemoryCacheHandler();
+export type { ExecutionContextLike } from "./request-context.js";
+export { runWithExecutionContext, getRequestExecutionContext } from "./request-context.js";
+
+// ---------------------------------------------------------------------------
+// Active cache handler — the singleton used by next/cache API functions.
+// Defaults to MemoryCacheHandler, can be swapped at runtime.
+//
+// Stored on globalThis via Symbol.for so that setCacheHandler() called in the
+// Cloudflare Worker environment (worker/index.ts) is visible to getCacheHandler()
+// called in the RSC environment (generated RSC entry). Without this, the two
+// environments load separate module instances and operate on different
+// `activeHandler` variables — setCacheHandler sets KVCacheHandler in one copy,
+// but getCacheHandler returns MemoryCacheHandler from the other copy.
+// ---------------------------------------------------------------------------
+
+const _HANDLER_KEY = Symbol.for("vinext.cacheHandler");
+const _gHandler = globalThis as unknown as Record<PropertyKey, CacheHandler>;
+
+function _getActiveHandler(): CacheHandler {
+  return _gHandler[_HANDLER_KEY] ?? (_gHandler[_HANDLER_KEY] = new MemoryCacheHandler());
+}
 
 /**
  * Set a custom CacheHandler. Call this during server startup to
@@ -241,14 +276,14 @@ let activeHandler: CacheHandler = new MemoryCacheHandler();
  * as Next.js 16's CacheHandler class).
  */
 export function setCacheHandler(handler: CacheHandler): void {
-  activeHandler = handler;
+  _gHandler[_HANDLER_KEY] = handler;
 }
 
 /**
  * Get the active CacheHandler (for internal use or testing).
  */
 export function getCacheHandler(): CacheHandler {
-  return activeHandler;
+  return _getActiveHandler();
 }
 
 // ---------------------------------------------------------------------------
@@ -285,7 +320,7 @@ export async function revalidateTag(
   } else if (profile && typeof profile === "object") {
     durations = profile;
   }
-  await activeHandler.revalidateTag(tag, durations);
+  await _getActiveHandler().revalidateTag(tag, durations);
 }
 
 /**
@@ -297,7 +332,7 @@ export async function revalidateTag(
 export async function revalidatePath(path: string, _type?: "page" | "layout"): Promise<void> {
   // Next.js internally converts paths to tags with a prefix
   const pathTag = `_N_T_${path}`;
-  await activeHandler.revalidateTag([path, pathTag]);
+  await _getActiveHandler().revalidateTag([path, pathTag]);
 }
 
 /**
@@ -314,7 +349,7 @@ export async function revalidatePath(path: string, _type?: "page" | "layout"): P
  */
 export async function updateTag(tag: string): Promise<void> {
   // Expire the tag immediately (same as revalidateTag without SWR)
-  await activeHandler.revalidateTag(tag);
+  await _getActiveHandler().revalidateTag(tag);
 }
 
 /**
@@ -360,7 +395,7 @@ export { unstable_noStore as noStore };
 //
 // Uses AsyncLocalStorage for request isolation on concurrent workers.
 // ---------------------------------------------------------------------------
-interface CacheState {
+export interface CacheState {
   requestScopedCacheLife: CacheLifeConfig | null;
 }
 
@@ -375,6 +410,9 @@ const _cacheFallbackState = (_g[_FALLBACK_KEY] ??= {
 } satisfies CacheState) as CacheState;
 
 function _getCacheState(): CacheState {
+  if (isInsideUnifiedScope()) {
+    return getRequestContext();
+  }
   return _cacheAls.getStore() ?? _cacheFallbackState;
 }
 
@@ -385,6 +423,11 @@ function _getCacheState(): CacheState {
  * @internal
  */
 export function _runWithCacheState<T>(fn: () => T | Promise<T>): T | Promise<T> {
+  if (isInsideUnifiedScope()) {
+    return runWithUnifiedStateMutation((uCtx) => {
+      uCtx.requestScopedCacheLife = null;
+    }, fn);
+  }
   const state: CacheState = {
     requestScopedCacheLife: null,
   };
@@ -397,12 +440,7 @@ export function _runWithCacheState<T>(fn: () => T | Promise<T>): T | Promise<T> 
  * @internal
  */
 export function _initRequestScopedCacheState(): void {
-  const state = _cacheAls.getStore();
-  if (state) {
-    state.requestScopedCacheLife = null;
-  } else {
-    _cacheFallbackState.requestScopedCacheLife = null;
-  }
+  _getCacheState().requestScopedCacheLife = null;
 }
 
 /**
@@ -615,7 +653,7 @@ export function unstable_cache<T extends (...args: any[]) => Promise<any>>(
 
     // Try to get from cache. Check cacheState so time-expired entries
     // trigger a re-fetch instead of being served indefinitely.
-    const existing = await activeHandler.get(cacheKey, {
+    const existing = await _getActiveHandler().get(cacheKey, {
       kind: "FETCH",
       tags,
     });
@@ -648,7 +686,7 @@ export function unstable_cache<T extends (...args: any[]) => Promise<any>>(
       revalidate: typeof revalidateSeconds === "number" ? revalidateSeconds : false,
     };
 
-    await activeHandler.set(cacheKey, cacheValue, {
+    await _getActiveHandler().set(cacheKey, cacheValue, {
       fetchCache: true,
       tags,
       revalidate: revalidateSeconds,

@@ -26,8 +26,10 @@ import {
   findInNodeModules,
   ensureViteConfigCompatibility,
 } from "../packages/vinext/src/utils/project.js";
+import { manifestFileWithBase } from "../packages/vinext/src/utils/manifest-paths.js";
 import { computeLazyChunks } from "../packages/vinext/src/index.js";
 import { mergeHeaders } from "../packages/vinext/src/server/worker-utils.js";
+import { domainCandidates, parseWranglerConfig } from "../packages/vinext/src/cloudflare/tpr.js";
 
 // ─── Test Helpers ────────────────────────────────────────────────────────────
 
@@ -356,7 +358,7 @@ describe("generateAppRouterWorkerEntry", () => {
   it("generates valid TypeScript", () => {
     const content = generateAppRouterWorkerEntry();
     expect(content).toContain("export default");
-    expect(content).toContain("async fetch(request: Request, env: Env)");
+    expect(content).toContain("async fetch(request: Request, env: Env, ctx: ExecutionContext)");
     expect(content).toContain("Promise<Response>");
   });
 
@@ -365,9 +367,9 @@ describe("generateAppRouterWorkerEntry", () => {
     expect(content).toContain('import handler from "vinext/server/app-router-entry"');
   });
 
-  it("delegates to handler.fetch", () => {
+  it("delegates to handler.fetch with ctx", () => {
     const content = generateAppRouterWorkerEntry();
-    expect(content).toContain("handler.fetch(request)");
+    expect(content).toContain("handler.fetch(request, env, ctx)");
   });
 
   it("includes auto-generated comment", () => {
@@ -394,6 +396,12 @@ describe("generateAppRouterWorkerEntry", () => {
     expect(content).toContain("ASSETS");
   });
 
+  it("declares ExecutionContext interface", () => {
+    const content = generateAppRouterWorkerEntry();
+    expect(content).toContain("interface ExecutionContext");
+    expect(content).toContain("waitUntil");
+  });
+
   it("passes image handlers inline to handleImageOptimization", () => {
     const content = generateAppRouterWorkerEntry();
     expect(content).toContain("fetchAsset:");
@@ -407,6 +415,22 @@ describe("generateAppRouterWorkerEntry", () => {
     // The App Router generated entry delegates to handleImageOptimization
     // which calls parseImageParams. Verify the comment documents this.
     expect(content).toContain("parseImageParams");
+  });
+
+  it("does not include KV wiring when hasISR is false", () => {
+    const content = generateAppRouterWorkerEntry(false);
+    expect(content).not.toContain("KVCacheHandler");
+    expect(content).not.toContain("setCacheHandler");
+    expect(content).not.toContain("VINEXT_CACHE");
+  });
+
+  it("includes KV wiring when hasISR is true", () => {
+    const content = generateAppRouterWorkerEntry(true);
+    expect(content).toContain('import { KVCacheHandler } from "vinext/cloudflare"');
+    expect(content).toContain('import { setCacheHandler } from "vinext/shims/cache"');
+    expect(content).toContain("VINEXT_CACHE: KVNamespace");
+    expect(content).toContain("new KVCacheHandler(env.VINEXT_CACHE)");
+    expect(content).toContain("setCacheHandler(");
   });
 });
 
@@ -459,6 +483,15 @@ describe("generatePagesRouterWorkerEntry", () => {
     expect(middlewarePos).toBeLessThan(apiRoutePos);
   });
 
+  it("applies next.config.js redirects before middleware", () => {
+    const content = generatePagesRouterWorkerEntry();
+    const redirectPos = content.indexOf("matchRedirect(pathname, configRedirects, reqCtx)");
+    const middlewarePos = content.indexOf("runMiddleware(request, ctx)");
+    expect(redirectPos).toBeGreaterThan(-1);
+    expect(middlewarePos).toBeGreaterThan(-1);
+    expect(redirectPos).toBeLessThan(middlewarePos);
+  });
+
   it("handles middleware redirects", () => {
     const content = generatePagesRouterWorkerEntry();
     expect(content).toContain("result.redirectUrl");
@@ -491,7 +524,7 @@ describe("generatePagesRouterWorkerEntry", () => {
   it("applies next.config.js redirects", () => {
     const content = generatePagesRouterWorkerEntry();
     expect(content).toContain("configRedirects");
-    expect(content).toContain("matchRedirect(resolvedPathname");
+    expect(content).toContain("matchRedirect(pathname");
   });
 
   it("applies next.config.js rewrites (beforeFiles, afterFiles, fallback)", () => {
@@ -505,7 +538,7 @@ describe("generatePagesRouterWorkerEntry", () => {
   it("applies next.config.js custom headers", () => {
     const content = generatePagesRouterWorkerEntry();
     expect(content).toContain("configHeaders");
-    expect(content).toContain("matchHeaders(resolvedPathname");
+    expect(content).toContain("matchHeaders(pathname");
   });
 
   it("handles basePath stripping and creates a new request with stripped URL for middleware", () => {
@@ -686,6 +719,17 @@ describe("generatePagesRouterViteConfig", () => {
 // ─── getMissingDeps ──────────────────────────────────────────────────────────
 
 describe("getMissingDeps", () => {
+  it("reports missing @vitejs/plugin-react", () => {
+    mkdir(tmpDir, "pages");
+    const info = detectProject(tmpDir);
+    info.hasCloudflarePlugin = true;
+    info.hasWrangler = true;
+
+    const notResolvable = () => false;
+    const missing = getMissingDeps(info, notResolvable);
+    expect(missing).toContainEqual(expect.objectContaining({ name: "@vitejs/plugin-react" }));
+  });
+
   it("reports missing @cloudflare/vite-plugin", () => {
     mkdir(tmpDir, "app");
     const info = detectProject(tmpDir);
@@ -1472,8 +1516,20 @@ describe("getMissingDeps — MDX", () => {
     info.hasCloudflarePlugin = true;
     info.hasWrangler = true;
     info.hasRscPlugin = true;
-    const missing = getMissingDeps(info);
+    const missing = getMissingDeps(info, (root, pkg) => pkg !== "@mdx-js/rollup");
     expect(missing).toContainEqual(expect.objectContaining({ name: "@mdx-js/rollup" }));
+  });
+
+  it("does not report @mdx-js/rollup when it is resolvable", () => {
+    mkdir(tmpDir, "app");
+    writeFile(tmpDir, "app/about/page.mdx", "# About");
+    const info = detectProject(tmpDir);
+    info.hasCloudflarePlugin = true;
+    info.hasWrangler = true;
+    info.hasRscPlugin = true;
+
+    const missing = getMissingDeps(info, () => true);
+    expect(missing).not.toContainEqual(expect.objectContaining({ name: "@mdx-js/rollup" }));
   });
 });
 
@@ -1622,7 +1678,7 @@ describe("Cloudflare closeBundle lazy chunk injection", () => {
    * is at dist/server/index.js. The RSC plugin handles __VINEXT_CLIENT_ENTRY__,
    * but we still need to inject __VINEXT_LAZY_CHUNKS__ and __VINEXT_SSR_MANIFEST__.
    */
-  function simulateCloseBundleAppRouter(buildRoot: string): void {
+  function simulateCloseBundleAppRouter(buildRoot: string, base = "/"): void {
     const distDir = path.resolve(buildRoot, "dist");
     if (!fs.existsSync(distDir)) return;
 
@@ -1634,7 +1690,9 @@ describe("Cloudflare closeBundle lazy chunk injection", () => {
     if (fs.existsSync(buildManifestPath)) {
       try {
         const buildManifest = JSON.parse(fs.readFileSync(buildManifestPath, "utf-8"));
-        const lazy = computeLazyChunks(buildManifest);
+        const lazy = computeLazyChunks(buildManifest).map((file) =>
+          manifestFileWithBase(file, base),
+        );
         if (lazy.length > 0) lazyChunksData = lazy;
       } catch {
         /* ignore */
@@ -1673,7 +1731,7 @@ describe("Cloudflare closeBundle lazy chunk injection", () => {
    * The worker entry is found by scanning dist/ for a directory containing
    * wrangler.json. All three globals are injected.
    */
-  function simulateCloseBundlePagesRouter(buildRoot: string): void {
+  function simulateCloseBundlePagesRouter(buildRoot: string, base = "/"): void {
     const distDir = path.resolve(buildRoot, "dist");
     if (!fs.existsSync(distDir)) return;
 
@@ -1706,11 +1764,13 @@ describe("Cloudflare closeBundle lazy chunk injection", () => {
         const buildManifest = JSON.parse(fs.readFileSync(buildManifestPath, "utf-8"));
         for (const [, value] of Object.entries(buildManifest) as [string, any][]) {
           if (value && value.isEntry && value.file) {
-            clientEntryFile = value.file;
+            clientEntryFile = manifestFileWithBase(value.file, base);
             break;
           }
         }
-        const lazy = computeLazyChunks(buildManifest);
+        const lazy = computeLazyChunks(buildManifest).map((file) =>
+          manifestFileWithBase(file, base),
+        );
         if (lazy.length > 0) lazyChunksData = lazy;
       } catch {
         /* ignore */
@@ -1947,6 +2007,21 @@ describe("Cloudflare closeBundle lazy chunk injection", () => {
     expect(lazyChunks).toContain("assets/mermaid-vendor.js");
     expect(lazyChunks).not.toContain("assets/app-entry.js");
     expect(lazyChunks).not.toContain("assets/framework.js");
+  });
+
+  it("Pages Router: prefixes client entry and lazy chunks with basePath", () => {
+    setupPagesRouterBuildOutput(tmpDir, manifestWithLazyChunks);
+
+    simulateCloseBundlePagesRouter(tmpDir, "/docs/");
+
+    const code = fs.readFileSync(path.join(tmpDir, "dist", "worker", "index.js"), "utf-8");
+    expect(code).toContain('globalThis.__VINEXT_CLIENT_ENTRY__ = "docs/assets/app-entry.js";');
+
+    const match = code.match(/globalThis\.__VINEXT_LAZY_CHUNKS__\s*=\s*(\[.*?\]);/);
+    expect(match).not.toBeNull();
+    const lazyChunks = JSON.parse(match![1]);
+    expect(lazyChunks).toContain("docs/assets/mermaid-chart.js");
+    expect(lazyChunks).toContain("docs/assets/mermaid-vendor.js");
   });
 
   it("Pages Router: finds worker entry via wrangler.json directory scan", () => {
@@ -2242,5 +2317,68 @@ describe("ensureViteConfigCompatibility — issue #184", () => {
     // Only the workspace package should be modified
     expect(webPkg.type).toBe("module");
     expect(rootPkg.type).toBeUndefined();
+  });
+});
+
+// ─── domainCandidates ────────────────────────────────────────────────────────
+
+describe("domainCandidates", () => {
+  it("returns a single candidate for a bare domain", () => {
+    expect(domainCandidates("example.com")).toEqual(["example.com"]);
+  });
+
+  it("starts from the shortest suffix for a simple subdomain", () => {
+    expect(domainCandidates("shop.example.com")).toEqual(["example.com", "shop.example.com"]);
+  });
+
+  it("handles multi-part TLDs by trying progressively longer candidates", () => {
+    expect(domainCandidates("shop.example.co.uk")).toEqual([
+      "co.uk",
+      "example.co.uk",
+      "shop.example.co.uk",
+    ]);
+  });
+
+  it("handles deeply nested subdomains", () => {
+    expect(domainCandidates("a.b.c.example.com")).toEqual([
+      "example.com",
+      "c.example.com",
+      "b.c.example.com",
+      "a.b.c.example.com",
+    ]);
+  });
+});
+
+// ─── parseWranglerConfig — TPR fields ────────────────────────────────────────
+
+describe("parseWranglerConfig — custom domain extraction", () => {
+  it("extracts custom domain from routes array (string form)", () => {
+    writeFile(tmpDir, "wrangler.jsonc", JSON.stringify({ routes: ["example.co.uk/*"] }));
+    const config = parseWranglerConfig(tmpDir);
+    expect(config?.customDomain).toBe("example.co.uk");
+  });
+
+  it("extracts custom domain from custom_domains array", () => {
+    writeFile(tmpDir, "wrangler.json", JSON.stringify({ custom_domains: ["shop.example.com.au"] }));
+    const config = parseWranglerConfig(tmpDir);
+    expect(config?.customDomain).toBe("shop.example.com.au");
+  });
+
+  it("ignores workers.dev domains", () => {
+    writeFile(tmpDir, "wrangler.json", JSON.stringify({ routes: ["my-app.workers.dev/*"] }));
+    const config = parseWranglerConfig(tmpDir);
+    expect(config?.customDomain).toBeUndefined();
+  });
+
+  it("extracts KV namespace ID for VINEXT_CACHE", () => {
+    writeFile(
+      tmpDir,
+      "wrangler.json",
+      JSON.stringify({
+        kv_namespaces: [{ binding: "VINEXT_CACHE", id: "abc123" }],
+      }),
+    );
+    const config = parseWranglerConfig(tmpDir);
+    expect(config?.kvNamespaceId).toBe("abc123");
   });
 });
