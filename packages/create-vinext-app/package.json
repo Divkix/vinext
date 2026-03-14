@@ -30,8 +30,8 @@
     "@clack/prompts": "^0.10.0"
   },
   "devDependencies": {
-    "typescript": "^5.8.2",
-    "vitest": "^3.2.1"
+    "typescript": "catalog:",
+    "vitest": "catalog:"
   },
   "engines": {
     "node": ">=18"
