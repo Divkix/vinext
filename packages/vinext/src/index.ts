@@ -1805,15 +1805,9 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
             dedupe: ["react", "react-dom", "react/jsx-runtime", "react/jsx-dev-runtime"],
             ...(shouldEnableNativeTsconfigPaths ? { tsconfigPaths: true } : {}),
           },
-          // Exclude vinext from dependency optimization so esbuild doesn't
-          // scan dist files containing virtual module imports (virtual:vinext-*)
-          // that only resolve at Vite plugin time, not during pre-bundling.
-          // Exclude @vercel/og so Vite's esbuild pre-bundler doesn't cache it
-          // before our vinext:og-font-patch transform can inline the font and
-          // patch the yoga WASM instantiation for workerd compatibility.
-          optimizeDeps: {
-            exclude: ["vinext", "@vercel/og"],
-          },
+          // NOTE: top-level optimizeDeps is now set below (after capturing
+          // incoming values from earlier plugins) so both Pages Router and
+          // App Router builds merge correctly.
           // Enable JSX in .tsx/.jsx files
           // Vite 7 uses `esbuild` for transforms, Vite 8+ uses `oxc`
           ...(viteMajorVersion >= 8
@@ -1848,6 +1842,23 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
           : config.ssr?.external === true
             ? true
             : nextServerExternal;
+
+        // Capture top-level optimizeDeps populated by earlier plugins
+        // (e.g. @lingui/vite-plugin) so we merge rather than overwrite.
+        // Moved above the hasAppDir branch so both Pages Router and App
+        // Router code paths can use these values.
+        const incomingExclude: string[] =
+          (config.optimizeDeps?.exclude as string[] | undefined) ?? [];
+        const incomingInclude: string[] =
+          (config.optimizeDeps?.include as string[] | undefined) ?? [];
+
+        // Merge incoming excludes into the top-level optimizeDeps so
+        // Pages Router builds (which don't set per-environment configs)
+        // also preserve entries from earlier plugins.
+        viteConfig.optimizeDeps = {
+          exclude: [...new Set([...incomingExclude, "vinext", "@vercel/og"])],
+          ...(incomingInclude.length > 0 ? { include: incomingInclude } : {}),
+        };
 
         // If app/ directory exists, configure RSC environments
         if (hasAppDir) {
@@ -1886,7 +1897,7 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
                     },
                   }),
               optimizeDeps: {
-                exclude: ["vinext", "@vercel/og"],
+                exclude: [...new Set([...incomingExclude, "vinext", "@vercel/og"])],
                 entries: appEntries,
               },
               build: {
@@ -1911,7 +1922,7 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
                     },
                   }),
               optimizeDeps: {
-                exclude: ["vinext", "@vercel/og"],
+                exclude: [...new Set([...incomingExclude, "vinext", "@vercel/og"])],
                 entries: appEntries,
               },
               build: {
@@ -1938,7 +1949,9 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
                 // `fileTypeFromFile` only from its `node` condition via `index.js`,
                 // but the browser optimizer resolves to `core.js` which lacks it,
                 // causing MISSING_EXPORT build failures).
-                exclude: ["vinext", "@vercel/og", ...nextServerExternal],
+                exclude: [
+                  ...new Set([...incomingExclude, "vinext", "@vercel/og", ...nextServerExternal]),
+                ],
                 // Crawl app/ source files up front so client-only deps imported
                 // by user components are discovered during startup instead of
                 // triggering a late re-optimisation + full page reload.
@@ -1946,11 +1959,14 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
                 // React packages aren't crawled from app/ source files,
                 // so must be pre-included to avoid late discovery (#25).
                 include: [
-                  "react",
-                  "react-dom",
-                  "react-dom/client",
-                  "react/jsx-runtime",
-                  "react/jsx-dev-runtime",
+                  ...new Set([
+                    ...incomingInclude,
+                    "react",
+                    "react-dom",
+                    "react-dom/client",
+                    "react/jsx-runtime",
+                    "react/jsx-dev-runtime",
+                  ]),
                 ],
               },
               build: {
