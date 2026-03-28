@@ -2139,7 +2139,7 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
         markDynamicUsage,
         method,
         middlewareContext: _mwCtx,
-        params,
+        params: makeThenableParams(params),
         reportRequestError: _reportRequestError,
         request,
         revalidateSeconds,
