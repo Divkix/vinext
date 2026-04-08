@@ -315,6 +315,7 @@ describe("app page response helpers", () => {
     middlewareHeaders.append("set-cookie", "mw=1; Path=/");
     middlewareHeaders.set("vary", "Next-Router-State-Tree");
     middlewareHeaders.append("x-extra", "present");
+    middlewareHeaders.set("cache-control", "private, max-age=5");
 
     const response = buildAppPageHtmlResponse(createBody("<h1>page</h1>"), {
       draftCookie: "__prerender_bypass=token; Path=/",
