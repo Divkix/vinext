@@ -150,9 +150,7 @@ export function generateRscEntry(
     if (route.pagePath) getImportVar(route.pagePath);
     if (route.routePath) getImportVar(route.routePath);
     for (const layout of route.layouts) getImportVar(layout);
-    for (const tmpl of route.templates) {
-      if (tmpl) getImportVar(tmpl);
-    }
+    for (const tmpl of route.templates) getImportVar(tmpl);
     if (route.loadingPath) getImportVar(route.loadingPath);
     if (route.errorPath) getImportVar(route.errorPath);
     if (route.layoutErrorPaths)
@@ -182,7 +180,7 @@ export function generateRscEntry(
   // Build route table as serialized JS
   const routeEntries = routes.map((route) => {
     const layoutVars = route.layouts.map((l) => getImportVar(l));
-    const templateVars = route.templates.map((t) => (t ? getImportVar(t) : "null"));
+    const templateVars = route.templates.map((t) => getImportVar(t));
     const notFoundVars = (route.notFoundPaths || []).map((nf) => (nf ? getImportVar(nf) : "null"));
     const slotEntries = route.parallelSlots.map((slot) => {
       const interceptEntries = slot.interceptingRoutes.map(
@@ -193,7 +191,8 @@ export function generateRscEntry(
           params: ${JSON.stringify(ir.params)},
         }`,
       );
-      return `      ${JSON.stringify(slot.name)}: {
+      return `      ${JSON.stringify(slot.key)}: {
+        name: ${JSON.stringify(slot.name)},
         page: ${slot.pagePath ? getImportVar(slot.pagePath) : "null"},
         default: ${slot.defaultPath ? getImportVar(slot.defaultPath) : "null"},
         layout: ${slot.layoutPath ? getImportVar(slot.layoutPath) : "null"},
@@ -218,6 +217,7 @@ ${interceptEntries.join(",\n")}
     routeHandler: ${route.routePath ? getImportVar(route.routePath) : "null"},
     layouts: [${layoutVars.join(", ")}],
     routeSegments: ${JSON.stringify(route.routeSegments)},
+    templateTreePositions: ${JSON.stringify(route.templateTreePositions)},
     layoutTreePositions: ${JSON.stringify(route.layoutTreePositions)},
     templates: [${templateVars.join(", ")}],
     errors: [${layoutErrorVars.join(", ")}],
@@ -386,7 +386,8 @@ import {
   renderAppPageHttpAccessFallback as __renderAppPageHttpAccessFallback,
 } from ${JSON.stringify(appPageBoundaryRenderPath)};
 import {
-  buildAppPageRouteElement as __buildAppPageRouteElement,
+  buildAppPageElements as __buildAppPageElements,
+  createAppPageTreePath as __createAppPageTreePath,
   resolveAppPageChildSegments as __resolveAppPageChildSegments,
 } from ${JSON.stringify(appPageRouteWiringPath)};
 import {
@@ -875,17 +876,17 @@ function matchPattern(urlParts, patternParts) {
 }
 
 // Build a global intercepting route lookup for RSC navigation.
-// Maps target URL patterns to { sourceRouteIndex, slotName, interceptPage, params }.
+// Maps target URL patterns to { sourceRouteIndex, slotKey, interceptPage, params }.
 const interceptLookup = [];
 for (let ri = 0; ri < routes.length; ri++) {
   const r = routes[ri];
   if (!r.slots) continue;
-  for (const [slotName, slotMod] of Object.entries(r.slots)) {
+  for (const [slotKey, slotMod] of Object.entries(r.slots)) {
     if (!slotMod.intercepts) continue;
     for (const intercept of slotMod.intercepts) {
       interceptLookup.push({
         sourceRouteIndex: ri,
-        slotName,
+        slotKey,
         targetPattern: intercept.targetPattern,
         targetPatternParts: intercept.targetPattern.split("/").filter(Boolean),
         page: intercept.page,
@@ -910,10 +911,22 @@ function findIntercept(pathname) {
   return null;
 }
 
-async function buildPageElement(route, params, opts, searchParams) {
+async function buildPageElements(route, params, routePath, opts, searchParams) {
   const PageComponent = route.page?.default;
   if (!PageComponent) {
-    return createElement("div", null, "Page has no default export");
+    const _noExportRouteId = "route:" + routePath;
+    let _noExportRootLayout = null;
+    if (route.layouts?.length > 0) {
+      // Compute the root layout tree path for this error payload using the
+      // canonical helper so it stays aligned with buildAppPageElements().
+      const _tp = route.layoutTreePositions?.[0] ?? 0;
+      _noExportRootLayout = __createAppPageTreePath(route.routeSegments, _tp);
+    }
+    return {
+      __route: _noExportRouteId,
+      __rootLayout: _noExportRootLayout,
+      [_noExportRouteId]: createElement("div", null, "Page has no default export"),
+    };
   }
 
   // Resolve metadata and viewport from layouts and page.
@@ -1011,19 +1024,20 @@ async function buildPageElement(route, params, opts, searchParams) {
     // dynamic, and this avoids false positives from React internals.
     if (hasSearchParams) markDynamicUsage();
   }
-  return __buildAppPageRouteElement({
+  return __buildAppPageElements({
     element: createElement(PageComponent, pageProps),
     globalErrorModule: ${globalErrorVar ? globalErrorVar : "null"},
     makeThenableParams,
     matchedParams: params,
     resolvedMetadata,
     resolvedViewport,
+    routePath,
     rootNotFoundModule: ${rootNotFoundVar ? rootNotFoundVar : "null"},
     route,
     slotOverrides:
-      opts && opts.interceptSlot && opts.interceptPage
+      opts && opts.interceptSlotKey && opts.interceptPage
         ? {
-            [opts.interceptSlot]: {
+            [opts.interceptSlotKey]: {
               pageModule: opts.interceptPage,
               params: opts.interceptParams || params,
             },
@@ -1686,10 +1700,7 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
           returnValue = { ok: true, data };
         } catch (e) {
           // Detect redirect() / permanentRedirect() called inside the action.
-          // These throw errors with digest "NEXT_REDIRECT;<type>;<url>[;<status>]".
-          // The type field is empty when redirect() was called without an explicit
-          // type argument. In Server Action context, Next.js defaults to "push" so
-          // the Back button works after form submissions.
+          // These throw errors with digest "NEXT_REDIRECT;replace;url[;status]".
           // The URL is encodeURIComponent-encoded to prevent semicolons in the URL
           // from corrupting the delimiter-based digest format.
           if (e && typeof e === "object" && "digest" in e) {
@@ -1698,7 +1709,7 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
               const parts = digest.split(";");
               actionRedirect = {
                 url: decodeURIComponent(parts[2]),
-                type: parts[1] || "push",          // Server Action → default "push"
+                type: parts[1] || "push",          // "push" or "replace"
                 status: parts[3] ? parseInt(parts[3], 10) : 307,
               };
               returnValue = { ok: true, data: undefined };
@@ -1735,9 +1746,6 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
           "Content-Type": "text/x-component; charset=utf-8",
           "Vary": "RSC, Accept",
         });
-        // Merge middleware headers first so the framework's own redirect control
-        // headers below are always authoritative and cannot be clobbered by
-        // middleware that happens to set x-action-redirect* keys.
         __mergeMiddlewareResponseHeaders(redirectHeaders, _mwCtx.headers);
         redirectHeaders.set("x-action-redirect", actionRedirect.url);
         redirectHeaders.set("x-action-redirect-type", actionRedirect.type);
@@ -1761,9 +1769,20 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
           searchParams: url.searchParams,
           params: actionParams,
         });
-        element = await buildPageElement(actionRoute, actionParams, undefined, url.searchParams);
+        element = buildPageElements(
+          actionRoute,
+          actionParams,
+          cleanPathname,
+          undefined,
+          url.searchParams,
+        );
       } else {
-        element = createElement("div", null, "Page not found");
+        const _actionRouteId = "route:" + cleanPathname;
+        element = {
+          __route: _actionRouteId,
+          __rootLayout: null,
+          [_actionRouteId]: createElement("div", null, "Page not found"),
+        };
       }
 
       const onRenderError = createRscOnErrorHandler(
@@ -1784,15 +1803,22 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
       const actionPendingCookies = getAndClearPendingCookies();
       const actionDraftCookie = getDraftModeCookieHeader();
 
-      const actionHeaders = new Headers({ "Content-Type": "text/x-component; charset=utf-8", "Vary": "RSC, Accept" });
+      const actionHeaders = new Headers({
+        "Content-Type": "text/x-component; charset=utf-8",
+        "Vary": "RSC, Accept",
+      });
       __mergeMiddlewareResponseHeaders(actionHeaders, _mwCtx.headers);
+      const actionResponse = new Response(rscStream, {
+        status: _mwCtx.status ?? 200,
+        headers: actionHeaders,
+      });
       if (actionPendingCookies.length > 0 || actionDraftCookie) {
         for (const cookie of actionPendingCookies) {
-          actionHeaders.append("Set-Cookie", cookie);
+          actionResponse.headers.append("Set-Cookie", cookie);
         }
-        if (actionDraftCookie) actionHeaders.append("Set-Cookie", actionDraftCookie);
+        if (actionDraftCookie) actionResponse.headers.append("Set-Cookie", actionDraftCookie);
       }
-      return new Response(rscStream, { status: _mwCtx.status ?? 200, headers: actionHeaders });
+      return actionResponse;
     } catch (err) {
       getAndClearPendingCookies(); // Clear pending cookies on error
       console.error("[vinext] Server action error:", err);
@@ -2116,7 +2142,13 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
         return _runWithUnifiedCtx(__revalUCtx, async () => {
           _ensureFetchPatch();
           setNavigationContext({ pathname: cleanPathname, searchParams: new URLSearchParams(), params });
-          const __revalElement = await buildPageElement(route, params, undefined, new URLSearchParams());
+          const __revalElement = await buildPageElements(
+            route,
+            params,
+            cleanPathname,
+            undefined,
+            new URLSearchParams(),
+          );
           const __revalOnError = createRscOnErrorHandler(request, cleanPathname, route.pattern);
           const __revalRscStream = renderToReadableStream(__revalElement, { onError: __revalOnError });
           const __revalRscCapture = __teeAppPageRscStreamForCapture(__revalRscStream, true);
@@ -2165,44 +2197,25 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
   // If the target URL matches an intercepting route in a parallel slot,
   // render the source route with the intercepting page in the slot.
   const __interceptResult = await __resolveAppPageIntercept({
-    buildPageElement,
+    buildPageElement(interceptRoute, interceptParams, interceptOpts, interceptSearchParams) {
+      return buildPageElements(
+        interceptRoute,
+        interceptParams,
+        cleanPathname,
+        interceptOpts,
+        interceptSearchParams,
+      );
+    },
     cleanPathname,
     currentRoute: route,
     findIntercept,
-    getRoutePattern(sourceRoute) {
-      return sourceRoute.pattern;
+    getRouteParamNames(sourceRoute) {
+      return sourceRoute.params;
     },
     getSourceRoute(sourceRouteIndex) {
       return routes[sourceRouteIndex];
     },
     isRscRequest,
-    matchSourceRouteParams(pattern) {
-      // Extract actual URL param values by prefix-matching the request pathname
-      // against the source route's pattern. This handles all interception conventions:
-      // (.) same-level, (..) one-level-up, and (...) root — the source pattern's
-      // dynamic segments that align with the URL get their real values extracted.
-      // We must NOT use matchRoute(pattern) here: the trie would match the literal
-      // ":param" strings as dynamic segment values, returning e.g. {id: ":id"}.
-      const patternParts = pattern.split("/").filter(Boolean);
-      const urlParts = cleanPathname.split("/").filter(Boolean);
-      const params = Object.create(null);
-      for (let i = 0; i < patternParts.length; i++) {
-        const pp = patternParts[i];
-        if (pp.endsWith("+") || pp.endsWith("*")) {
-          // urlParts.slice(i) safely returns [] when i >= urlParts.length,
-          // which is the correct value for optional catch-all with zero segments.
-          params[pp.slice(1, -1)] = urlParts.slice(i);
-          break;
-        }
-        if (i >= urlParts.length) break;
-        if (pp.startsWith(":")) {
-          params[pp.slice(1)] = urlParts[i];
-        } else if (pp !== urlParts[i]) {
-          break;
-        }
-      }
-      return params;
-    },
     renderInterceptResponse(sourceRoute, interceptElement) {
       const interceptOnError = createRscOnErrorHandler(
         request,
@@ -2216,7 +2229,10 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
       // by the client, and async server components that run during consumption need the
       // context to still be live. The AsyncLocalStorage scope from runWithRequestContext
       // handles cleanup naturally when all async continuations complete.
-      const interceptHeaders = new Headers({ "Content-Type": "text/x-component; charset=utf-8", "Vary": "RSC, Accept" });
+      const interceptHeaders = new Headers({
+        "Content-Type": "text/x-component; charset=utf-8",
+        "Vary": "RSC, Accept",
+      });
       __mergeMiddlewareResponseHeaders(interceptHeaders, _mwCtx.headers);
       return new Response(interceptStream, {
         status: _mwCtx.status ?? 200,
@@ -2227,7 +2243,7 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
     setNavigationContext,
     toInterceptOpts(intercept) {
       return {
-        interceptSlot: intercept.slotName,
+        interceptSlotKey: intercept.slotKey,
         interceptPage: intercept.page,
         interceptParams: intercept.matchedParams,
       };
@@ -2240,7 +2256,7 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
 
   const __pageBuildResult = await __buildAppPageElement({
     buildPageElement() {
-      return buildPageElement(route, params, interceptOpts, url.searchParams);
+      return buildPageElements(route, params, cleanPathname, interceptOpts, url.searchParams);
     },
     renderErrorBoundaryPage(buildErr) {
       return renderErrorBoundaryPage(route, buildErr, isRscRequest, request, params, _scriptNonce);
@@ -2278,19 +2294,6 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
   // rscCssTransform — no manual loadCss() call needed.
   const _hasLoadingBoundary = !!(route.loading && route.loading.default);
   const _asyncLayoutParams = makeThenableParams(params);
-  // Convert URLSearchParams to a plain object then wrap in makeThenableParams()
-  // so probePage() passes the same shape that buildPageElement() gives to the
-  // real render. Without this, pages that destructure await-ed searchParams
-  // throw TypeError during probe.
-  const _probeSearchObj = {};
-  url.searchParams.forEach(function(v, k) {
-    if (k in _probeSearchObj) {
-      _probeSearchObj[k] = Array.isArray(_probeSearchObj[k]) ? _probeSearchObj[k].concat(v) : [_probeSearchObj[k], v];
-    } else {
-      _probeSearchObj[k] = v;
-    }
-  });
-  const _asyncSearchParams = makeThenableParams(_probeSearchObj);
   return __renderAppPageLifecycle({
     cleanPathname,
     clearRequestContext() {
@@ -2336,6 +2339,17 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
       return LayoutComp({ params: _asyncLayoutParams, children: null });
     },
     probePage() {
+      const _probeSearchObj = {};
+      url.searchParams.forEach(function(v, k) {
+        if (k in _probeSearchObj) {
+          _probeSearchObj[k] = Array.isArray(_probeSearchObj[k])
+            ? _probeSearchObj[k].concat(v)
+            : [_probeSearchObj[k], v];
+        } else {
+          _probeSearchObj[k] = v;
+        }
+      });
+      const _asyncSearchParams = makeThenableParams(_probeSearchObj);
       return PageComponent({ params: _asyncLayoutParams, searchParams: _asyncSearchParams });
     },
     revalidateSeconds,

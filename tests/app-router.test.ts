@@ -128,6 +128,24 @@ describe("App Router integration", () => {
     expect(text.length).toBeGreaterThan(0);
   });
 
+  it("returns flat payload metadata for app route RSC responses", async () => {
+    const res = await fetch(`${baseUrl}/dashboard.rsc`, {
+      headers: { Accept: "text/x-component" },
+    });
+    const rscText = await res.text();
+    if (res.status !== 200) {
+      throw new Error(rscText);
+    }
+    expect(res.headers.get("content-type")).toContain("text/x-component");
+    expect(rscText).toContain("__route");
+    expect(rscText).toContain("__rootLayout");
+    expect(rscText).toContain("route:/dashboard");
+    expect(rscText).toContain("layout:/");
+    expect(rscText).toContain("layout:/dashboard");
+    expect(rscText).toContain("slot:team:/dashboard");
+    expect(rscText).toContain("slot:analytics:/dashboard");
+  });
+
   it("wraps pages in the root layout", async () => {
     const res = await fetch(`${baseUrl}/about`);
     const html = await res.text();
@@ -280,6 +298,20 @@ describe("App Router integration", () => {
     expect(html).toContain("Team Nav");
     // Default content should be present
     expect(html).toContain('data-testid="team-default"');
+  });
+
+  it("keeps same-named parallel slots from parent and child layouts", async () => {
+    const res = await fetch(`${baseUrl}/slot-collision/child`);
+    expect(res.status).toBe(200);
+
+    const html = await res.text();
+    expect(html).toContain('data-testid="slot-collision-parent-layout"');
+    expect(html).toContain('data-testid="slot-collision-child-layout"');
+    expect(html).toContain('data-testid="slot-collision-parent-default"');
+    expect(html).toContain("Parent modal default");
+    expect(html).toContain('data-testid="slot-collision-child-default"');
+    expect(html).toContain("Child modal default");
+    expect(html).toContain('data-testid="slot-collision-page"');
   });
 
   it("parallel slots do not affect URL routing", async () => {
@@ -463,7 +495,7 @@ describe("App Router integration", () => {
   });
 
   // --- Intercepting routes with dynamic source route ---
-  // Regression: matchSourceRouteParams must extract actual URL param values
+  // Regression: pickRouteParams must extract actual URL param values
   // (e.g. "42") from the request pathname, not the literal pattern strings
   // (e.g. ":teamId") that result from feeding the pattern into the route trie.
 
@@ -504,7 +536,7 @@ describe("App Router integration", () => {
     expect(rscPayload).toContain("Settings Modal");
     expect(rscPayload).toContain("settings-modal");
     // The source route (members page) should render with the actual teamId value.
-    // The source page component receives params from matchSourceRouteParams.
+    // The source page component receives params from pickRouteParams.
     expect(rscPayload).toContain("members-page");
     // The literal pattern string ":teamId" must NOT appear as a param value anywhere
     expect(rscPayload).not.toContain('":teamId"');
@@ -4190,6 +4222,13 @@ describe("generateRscEntry ISR code generation", () => {
     const redirectEnd = code.indexOf('return new Response(""', redirectStart);
     const redirectBody = code.slice(redirectStart, redirectEnd);
     expect(redirectBody).toContain("mergeMiddlewareResponseHeaders");
+    // Framework-owned redirect headers must be written after the middleware merge
+    // so middleware cannot clobber the target URL or redirect type.
+    const mergeIndex = redirectBody.indexOf("__mergeMiddlewareResponseHeaders");
+    const redirectHeaderIndex = redirectBody.indexOf('redirectHeaders.set("x-action-redirect"');
+    expect(mergeIndex).toBeGreaterThan(-1);
+    expect(redirectHeaderIndex).toBeGreaterThan(-1);
+    expect(mergeIndex).toBeLessThan(redirectHeaderIndex);
   });
 
   // Ported from Next.js: packages/next/src/client/components/redirect.ts
