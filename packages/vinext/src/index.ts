@@ -416,13 +416,8 @@ const clientManualChunks = createClientManualChunks(_shimsDir);
 const clientOutputConfig = createClientOutputConfig(clientManualChunks);
 const clientCodeSplittingConfig = createClientCodeSplittingConfig(clientManualChunks);
 
-function getClientOutputConfigForVite(viteMajorVersion: number, hashSalt?: string) {
-  const base =
-    viteMajorVersion >= 8 ? { codeSplitting: clientCodeSplittingConfig } : clientOutputConfig;
-  if (hashSalt) {
-    return { ...base, hashSalt };
-  }
-  return base;
+function getClientOutputConfigForVite(viteMajorVersion: number) {
+  return viteMajorVersion >= 8 ? { codeSplitting: clientCodeSplittingConfig } : clientOutputConfig;
 }
 
 export type VinextOptions = {
@@ -1160,7 +1155,7 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
               // manualChunks is set per-environment on the client env below
               // to avoid leaking into RSC/SSR environments.
               ...(!isSSR && !isMultiEnv
-                ? { output: getClientOutputConfigForVite(viteMajorVersion, nextConfig.hashSalt) }
+                ? { output: getClientOutputConfigForVite(viteMajorVersion) }
                 : {}),
             }),
           },
@@ -1413,7 +1408,7 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
                 ...(hasCloudflarePlugin ? { manifest: true } : {}),
                 ...withBuildBundlerOptions(viteMajorVersion, {
                   input: { index: VIRTUAL_APP_BROWSER_ENTRY },
-                  output: getClientOutputConfigForVite(viteMajorVersion, nextConfig.hashSalt),
+                  output: getClientOutputConfigForVite(viteMajorVersion),
                   treeshake: getClientTreeshakeConfigForVite(viteMajorVersion),
                 }),
               },
@@ -1434,7 +1429,7 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
                 ssrManifest: true,
                 ...withBuildBundlerOptions(viteMajorVersion, {
                   input: { index: VIRTUAL_CLIENT_ENTRY },
-                  output: getClientOutputConfigForVite(viteMajorVersion, nextConfig.hashSalt),
+                  output: getClientOutputConfigForVite(viteMajorVersion),
                   treeshake: getClientTreeshakeConfigForVite(viteMajorVersion),
                 }),
               },
@@ -1460,7 +1455,7 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
                 ssrManifest: true,
                 ...withBuildBundlerOptions(viteMajorVersion, {
                   input: { index: VIRTUAL_CLIENT_ENTRY },
-                  output: getClientOutputConfigForVite(viteMajorVersion, nextConfig.hashSalt),
+                  output: getClientOutputConfigForVite(viteMajorVersion),
                   treeshake: getClientTreeshakeConfigForVite(viteMajorVersion),
                 }),
               },
@@ -3212,6 +3207,22 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
         },
       };
     })(),
+    // Mix experimental.outputHashSalt / NEXT_HASH_SALT into chunk content hashes.
+    // This changes output filenames (e.g., index-[hash].js) without modifying source.
+    // Uses augmentChunkHash — supported by both Rollup (via crypto hash.update())
+    // and Rolldown (via xxhash_base64_url) — instead of the unsupported output.hashSalt.
+    {
+      name: "vinext:hash-salt",
+      apply: "build",
+      augmentChunkHash() {
+        // Only apply to client environment; SSR/RSC don't use content hashing
+        if (this.environment?.name !== "client") return;
+        const salt = nextConfig?.hashSalt;
+        if (salt) {
+          return salt;
+        }
+      },
+    },
     // Write vinext-server.json to dist/server/ with a per-build prerender secret.
     // The prerender secret is used by prod-server.ts to authenticate requests to
     // the internal /__vinext/prerender/* endpoints, which are only reachable during
