@@ -1633,7 +1633,7 @@ ${prerenderPagesLoaderOption}
           );
           __clearRequestContext();
           const __freshHtml = await __readAppPageTextStream(__revalHtmlStream);
-          const __freshRscData = await __revalCapturedRscRef.value;
+          const __freshRscData = __revalCapturedRscRef.value ? await __revalCapturedRscRef.value : null;
           const __pageTags = buildPageCacheTags(cleanPathname, getCollectedFetchTags(), route.routeSegments, "page");
           return { html: __freshHtml, rscData: __freshRscData, tags: __pageTags };
         });

@@ -208,9 +208,6 @@ export async function handleSsr(
         const [s1, s2] = rscStream.tee();
         ssrStream = s1;
         rscEmbed = createRscEmbedTransform(s2, options?.scriptNonce);
-        if (options?.capturedRscDataRef) {
-          options.capturedRscDataRef.value = null;
-        }
       }
 
       let flightRoot: PromiseLike<AppWireElements> | null = null;

@@ -97,6 +97,7 @@ export function createRscEmbedTransform(
         buffer.set(chunk, offset);
         offset += chunk.byteLength;
       }
+      rawChunks.length = 0;
       return buffer.buffer;
     },
   };
