@@ -90,7 +90,7 @@ export async function renderAppPageHtmlStream(
     options.rscStream,
     options.navigationContext,
     options.fontData,
-    options.sideStream ? ssrOptions : undefined,
+    ssrOptions,
   );
 }
 
