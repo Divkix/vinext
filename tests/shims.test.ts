@@ -1188,7 +1188,8 @@ describe("next/headers shim", () => {
     expect(dm2.isEnabled).toBe(false);
 
     const cookieHeader = getDraftModeCookieHeader();
-    expect(cookieHeader).toContain("Max-Age=0");
+    expect(cookieHeader).toContain("Expires=Thu, 01 Jan 1970 00:00:00 GMT");
+    expect(cookieHeader).not.toContain("Max-Age=0");
     setHeadersContext(null);
   });
 
@@ -3617,7 +3618,9 @@ describe("double-encoded path handling in middleware", () => {
         layoutErrorPaths: [],
         notFoundPath: null,
         notFoundPaths: [],
+        forbiddenPaths: [],
         forbiddenPath: null,
+        unauthorizedPaths: [],
         unauthorizedPath: null,
         parallelSlots: [],
       },
@@ -12380,6 +12383,69 @@ describe("cache scope guards for dynamic APIs", () => {
     expect(callCount).toBe(1); // Cached, not called again
 
     setCacheHandler(new MemoryCacheHandler());
+  });
+
+  // Ported from Next.js: workStore.invalidDynamicUsageError in
+  // packages/next/src/server/app-render/app-render.tsx
+  // https://github.com/vercel/next.js/commit/f5e54c06726b571a042fce67417e40a29f6b8689
+  it("records invalid dynamic usage error on request context (survives try/catch)", async () => {
+    const { cacheContextStorage } = await import("../packages/vinext/src/shims/cache-runtime.js");
+    const { setHeadersContext, throwIfInsideCacheScope, consumeInvalidDynamicUsageError } =
+      await import("../packages/vinext/src/shims/headers.js");
+    const { createRequestContext, runWithRequestContext } =
+      await import("../packages/vinext/src/shims/unified-request-context.js");
+
+    setHeadersContext({ headers: new Headers(), cookies: new Map() });
+
+    const ctx = createRequestContext({
+      headersContext: { headers: new Headers(), cookies: new Map() },
+    });
+    let recordedError: unknown = null;
+
+    await runWithRequestContext(ctx, async () => {
+      try {
+        await cacheContextStorage.run(
+          { tags: [], lifeConfigs: [], variant: "default" },
+          async () => {
+            throwIfInsideCacheScope("cookies()");
+          },
+        );
+      } catch {
+        // User try/catch — the error should still be recorded on the context
+      }
+      recordedError = consumeInvalidDynamicUsageError();
+    });
+
+    expect(recordedError).toBeInstanceOf(Error);
+    expect((recordedError as Error).message).toContain('cannot be called inside "use cache"');
+
+    // After consumption, the error is cleared
+    expect(consumeInvalidDynamicUsageError()).toBeNull();
+
+    setHeadersContext(null);
+  });
+
+  it("consumeInvalidDynamicUsageError returns null when no error was recorded", async () => {
+    const { consumeInvalidDynamicUsageError } =
+      await import("../packages/vinext/src/shims/headers.js");
+    const { createRequestContext, runWithRequestContext } =
+      await import("../packages/vinext/src/shims/unified-request-context.js");
+
+    const ctx = createRequestContext();
+    let result: unknown;
+
+    await runWithRequestContext(ctx, async () => {
+      result = consumeInvalidDynamicUsageError();
+    });
+
+    expect(result!).toBeNull();
+  });
+
+  it("consumeInvalidDynamicUsageError works outside unified request scope", async () => {
+    const { consumeInvalidDynamicUsageError } =
+      await import("../packages/vinext/src/shims/headers.js");
+    // Should return null without throwing when no unified scope is active
+    expect(consumeInvalidDynamicUsageError()).toBeNull();
   });
 });
 
