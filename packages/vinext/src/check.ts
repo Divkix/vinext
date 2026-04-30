@@ -177,6 +177,11 @@ const CONFIG_SUPPORT: Record<string, { status: Status; detail?: string }> = {
     status: "supported",
     detail: "salt mixed into output content hashes for cache-busting",
   },
+  "experimental.swcEnvOptions": {
+    status: "unsupported",
+    detail:
+      "not applicable; vinext uses Vite instead of SWC. A Vite-compatible polyfill solution may be explored in the future.",
+  },
   "i18n.domains": {
     status: "partial",
     detail: "supported for Pages Router; App Router unchanged",

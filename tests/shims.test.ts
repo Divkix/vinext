@@ -1188,7 +1188,8 @@ describe("next/headers shim", () => {
     expect(dm2.isEnabled).toBe(false);
 
     const cookieHeader = getDraftModeCookieHeader();
-    expect(cookieHeader).toContain("Max-Age=0");
+    expect(cookieHeader).toContain("Expires=Thu, 01 Jan 1970 00:00:00 GMT");
+    expect(cookieHeader).not.toContain("Max-Age=0");
     setHeadersContext(null);
   });
 
@@ -3617,7 +3618,9 @@ describe("double-encoded path handling in middleware", () => {
         layoutErrorPaths: [],
         notFoundPath: null,
         notFoundPaths: [],
+        forbiddenPaths: [],
         forbiddenPath: null,
+        unauthorizedPaths: [],
         unauthorizedPath: null,
         parallelSlots: [],
       },
