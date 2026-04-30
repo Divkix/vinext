@@ -7,6 +7,7 @@ import {
 } from "./app-page-cache.js";
 import {
   buildAppPageFontLinkHeader,
+  readAppPageBinaryStream,
   resolveAppPageSpecialError,
   teeAppPageRscStreamForCapture,
   type AppPageFontPreload,
@@ -172,8 +173,17 @@ export async function renderAppPageLifecycle(
       revalidateSeconds !== Infinity &&
       !options.isForceDynamic,
   );
-  const rscForResponse = rscCapture.responseStream;
-  const isrRscDataPromise = rscCapture.capturedRscDataPromise;
+  const rscForResponse = rscCapture.ssrStream;
+
+  // When the fused tee (#981) is active, the sideStream carries both the embed
+  // transform AND the raw RSC byte accumulation. For RSC requests, we consume
+  // the sideStream directly. For HTML requests, handleSsr creates an embed
+  // transform from it and fills capturedRscDataRef. The ref object is threaded
+  // through so .value is read lazily after handleSsr completes.
+  const capturedRscDataRef: { value: Promise<ArrayBuffer> | null } = { value: null };
+  if (rscCapture.sideStream && options.isRscRequest) {
+    capturedRscDataRef.value = readAppPageBinaryStream(rscCapture.sideStream);
+  }
 
   if (options.isRscRequest) {
     const dynamicUsedDuringBuild = options.consumeDynamicUsage();
@@ -199,7 +209,7 @@ export async function renderAppPageLifecycle(
     });
 
     return finalizeAppPageRscCacheResponse(rscResponse, {
-      capturedRscDataPromise: options.isProduction ? isrRscDataPromise : null,
+      capturedRscDataPromise: options.isProduction ? capturedRscDataRef.value : null,
       cleanPathname: options.cleanPathname,
       consumeDynamicUsage: options.consumeDynamicUsage,
       dynamicUsedDuringBuild,
@@ -237,10 +247,12 @@ export async function renderAppPageLifecycle(
     async renderHtmlStream() {
       const ssrHandler = await options.loadSsrHandler();
       return renderAppPageHtmlStream({
+        capturedRscDataRef,
         fontData,
         navigationContext: options.getNavigationContext(),
         rscStream: rscForResponse,
         scriptNonce: options.scriptNonce,
+        sideStream: rscCapture.sideStream,
         ssrHandler,
       });
     },
@@ -315,7 +327,7 @@ export async function renderAppPageLifecycle(
       timing: htmlResponseTiming,
     });
     return finalizeAppPageHtmlCacheResponse(isrResponse, {
-      capturedRscDataPromise: isrRscDataPromise,
+      capturedRscDataPromise: capturedRscDataRef.value,
       cleanPathname: options.cleanPathname,
       consumeDynamicUsage: options.consumeDynamicUsage,
       getPageTags() {

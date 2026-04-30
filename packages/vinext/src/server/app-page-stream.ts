@@ -28,6 +28,11 @@ type RenderAppPageHtmlStreamOptions = {
   rscStream: ReadableStream<Uint8Array>;
   scriptNonce?: string;
   ssrHandler: AppPageSsrHandler;
+  /** Pre-split side stream for fused embed+capture (#981). When set,
+   *  handleSsr skips its internal tee and accumulates raw RSC bytes. */
+  sideStream?: ReadableStream<Uint8Array>;
+  /** Out-parameter filled with accumulated raw RSC bytes after stream consumption. */
+  capturedRscDataRef?: { value: Promise<ArrayBuffer> | null };
 };
 
 type RenderAppPageHtmlResponseOptions = {
@@ -71,14 +76,16 @@ export function createAppPageFontData(options: CreateAppPageFontDataOptions): Ap
 export async function renderAppPageHtmlStream(
   options: RenderAppPageHtmlStreamOptions,
 ): Promise<ReadableStream<Uint8Array>> {
-  const ssrOptions =
-    options.scriptNonce === undefined ? undefined : { scriptNonce: options.scriptNonce };
+  const ssrOptions: Record<string, unknown> = {};
+  if (options.scriptNonce !== undefined) ssrOptions.scriptNonce = options.scriptNonce;
+  if (options.sideStream) ssrOptions.sideStream = options.sideStream;
+  if (options.capturedRscDataRef) ssrOptions.capturedRscDataRef = options.capturedRscDataRef;
 
   return options.ssrHandler.handleSsr(
     options.rscStream,
     options.navigationContext,
     options.fontData,
-    ssrOptions,
+    Object.keys(ssrOptions).length > 0 ? ssrOptions : undefined,
   );
 }
 
