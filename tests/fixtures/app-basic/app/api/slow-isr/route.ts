@@ -1,7 +1,7 @@
 /**
  * Slow GET route handler for SWR non-blocking test.
  *
- * Ported from Next.js test:
+ * Test pattern adapted from Next.js fixture:
  * test/e2e/app-dir/use-cache-swr/app/delayed-route/route.ts
  * https://github.com/vercel/next.js/blob/canary/test/e2e/app-dir/use-cache-swr/app/delayed-route/route.ts
  *

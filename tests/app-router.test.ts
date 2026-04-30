@@ -2298,9 +2298,10 @@ describe("App Router Production server (startProdServer)", () => {
     expect(freshBody.timestamp).not.toBe(cachedTimestamp); // New data
   });
 
-  // Ported from Next.js:
+  // Test pattern ported from Next.js:
   // test/e2e/app-dir/use-cache-swr/use-cache-swr.test.ts
   // https://github.com/vercel/next.js/blob/canary/test/e2e/app-dir/use-cache-swr/use-cache-swr.test.ts
+  // (adapted from "use cache" SWR to route handler ISR with export const revalidate)
   it("route handler ISR: STALE completes quickly without blocking on background regen", async () => {
     // /api/slow-isr has revalidate=1 and a 1s handler delay.
     // Populate the cache (cold request, takes ~1s).
