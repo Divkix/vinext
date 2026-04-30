@@ -36,19 +36,41 @@ const _g = globalThis as unknown as Record<PropertyKey, unknown>;
 function _throwIfInsideCacheScope(apiName: string): void {
   const cacheAls = _g[_USE_CACHE_ALS_KEY] as { getStore(): unknown } | undefined;
   if (cacheAls?.getStore() != null) {
-    throw new Error(
+    const error = new Error(
       `\`${apiName}\` cannot be called inside "use cache". ` +
         `If you need this data inside a cached function, call \`${apiName}\` ` +
         "outside and pass the required data as an argument.",
     );
+    // Record the error on the request context so it survives user try/catch
+    // and can be forwarded to the dev overlay on client-side navigations.
+    try {
+      const _unifiedAls = _g[Symbol.for("vinext.unifiedRequestContext.als")] as
+        | { getStore(): unknown }
+        | undefined;
+      const ctx = _unifiedAls?.getStore() as Record<string, unknown> | undefined;
+      if (ctx) ctx.invalidDynamicUsageError = error;
+    } catch {
+      // Ignore — best-effort recording for dev diagnostics
+    }
+    throw error;
   }
   const unstableAls = _g[_UNSTABLE_CACHE_ALS_KEY] as { getStore(): unknown } | undefined;
   if (unstableAls?.getStore() === true) {
-    throw new Error(
+    const error = new Error(
       `\`${apiName}\` cannot be called inside a function cached with \`unstable_cache()\`. ` +
         `If you need this data inside a cached function, call \`${apiName}\` ` +
         "outside and pass the required data as an argument.",
     );
+    try {
+      const _unifiedAls = _g[Symbol.for("vinext.unifiedRequestContext.als")] as
+        | { getStore(): unknown }
+        | undefined;
+      const ctx = _unifiedAls?.getStore() as Record<string, unknown> | undefined;
+      if (ctx) ctx.invalidDynamicUsageError = error;
+    } catch {
+      // Ignore
+    }
+    throw error;
   }
 }
 
