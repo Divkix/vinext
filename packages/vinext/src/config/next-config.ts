@@ -273,6 +273,13 @@ export type ResolvedNextConfig = {
    * Set to 0 to disable in-memory caching entirely.
    */
   cacheMaxMemorySize: number | undefined;
+  /**
+   * Concatenated hash salt from `experimental.outputHashSalt` config option
+   * and `NEXT_HASH_SALT` environment variable. Empty string when neither is set.
+   * When non-empty, mix into content-addressed output filenames so hash values
+   * change without modifying source — useful for cache-busting after CDN poisoning.
+   */
+  hashSalt: string;
 };
 
 const CONFIG_FILES = ["next.config.ts", "next.config.mjs", "next.config.js", "next.config.cjs"];
@@ -502,6 +509,7 @@ export async function resolveNextConfig(
       serverExternalPackages: [],
       cacheHandler: undefined,
       cacheMaxMemorySize: undefined,
+      hashSalt: process.env.NEXT_HASH_SALT ?? "",
       buildId,
     };
     detectNextIntlConfig(root, resolved);
@@ -580,6 +588,11 @@ export async function resolveNextConfig(
   const serverActionsBodySizeLimit = parseBodySizeLimit(
     serverActionsConfig?.bodySizeLimit as string | number | undefined,
   );
+
+  // Resolve hashSalt from experimental.outputHashSalt config + NEXT_HASH_SALT env var.
+  // Next.js concatenates them: config value first, then env var.
+  const configOutputHashSalt = experimental?.outputHashSalt as string | undefined;
+  const hashSalt = (configOutputHashSalt ?? "") + (process.env.NEXT_HASH_SALT ?? "");
 
   // Resolve optimizePackageImports from experimental config
   const rawOptimize = experimental?.optimizePackageImports;
@@ -674,6 +687,7 @@ export async function resolveNextConfig(
     serverExternalPackages,
     cacheHandler,
     cacheMaxMemorySize,
+    hashSalt,
     buildId,
   };
 

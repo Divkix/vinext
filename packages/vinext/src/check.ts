@@ -173,6 +173,10 @@ const CONFIG_SUPPORT: Record<string, { status: Status; detail?: string }> = {
     detail:
       "config recognized; vinext uses unified RSC navigation payloads so per-segment prefetch inlining is a no-op",
   },
+  "experimental.outputHashSalt": {
+    status: "supported",
+    detail: "salt mixed into output content hashes for cache-busting",
+  },
   "experimental.swcEnvOptions": {
     status: "unsupported",
     detail:

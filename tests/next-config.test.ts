@@ -398,6 +398,55 @@ describe("resolveNextConfig serverActionsBodySizeLimit", () => {
   });
 });
 
+describe("resolveNextConfig hashSalt", () => {
+  const OLD_ENV = process.env.NEXT_HASH_SALT;
+
+  afterEach(() => {
+    if (OLD_ENV !== undefined) {
+      process.env.NEXT_HASH_SALT = OLD_ENV;
+    } else {
+      delete process.env.NEXT_HASH_SALT;
+    }
+  });
+
+  it("defaults to empty string when no config or env is set", async () => {
+    const resolved = await resolveNextConfig(null);
+    expect(resolved.hashSalt).toBe("");
+  });
+
+  it("defaults to empty string when config has no experimental", async () => {
+    const resolved = await resolveNextConfig({ env: {} });
+    expect(resolved.hashSalt).toBe("");
+  });
+
+  it("reads outputHashSalt from experimental config", async () => {
+    const resolved = await resolveNextConfig({
+      experimental: { outputHashSalt: "v1" },
+    });
+    expect(resolved.hashSalt).toBe("v1");
+  });
+
+  it("reads NEXT_HASH_SALT from env var", async () => {
+    process.env.NEXT_HASH_SALT = "envsalt";
+    const resolved = await resolveNextConfig(null);
+    expect(resolved.hashSalt).toBe("envsalt");
+  });
+
+  it("concatenates config salt and env salt (config first)", async () => {
+    process.env.NEXT_HASH_SALT = "envsalt";
+    const resolved = await resolveNextConfig({
+      experimental: { outputHashSalt: "configsalt" },
+    });
+    expect(resolved.hashSalt).toBe("configsaltenvsalt");
+  });
+
+  it("handles only env var without config salt", async () => {
+    process.env.NEXT_HASH_SALT = "onlyenv";
+    const resolved = await resolveNextConfig({ env: {} });
+    expect(resolved.hashSalt).toBe("onlyenv");
+  });
+});
+
 describe("detectNextIntlConfig", () => {
   let tmpDir: string;
 
@@ -429,6 +478,7 @@ describe("detectNextIntlConfig", () => {
       serverExternalPackages: [],
       cacheHandler: undefined,
       cacheMaxMemorySize: undefined,
+      hashSalt: "",
       buildId: "test-build-id",
       ...overrides,
     };
