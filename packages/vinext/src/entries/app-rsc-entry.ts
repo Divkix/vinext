@@ -1309,14 +1309,18 @@ ${prerenderPagesLoaderOption}
           const __revalRscCapture = __teeAppPageRscStreamForCapture(__revalRscStream, true);
           const __revalFontData = { links: _getSSRFontLinks(), styles: _getSSRFontStyles(), preloads: _getSSRFontPreloads() };
           const __revalSsrEntry = await import.meta.viteRsc.loadModule("ssr", "index");
+          const __revalCapturedRscRef = { value: null };
           const __revalHtmlStream = await __revalSsrEntry.handleSsr(
-            __revalRscCapture.responseStream,
+            __revalRscCapture.ssrStream,
             _getNavigationContext(),
             __revalFontData,
+            __revalRscCapture.sideStream
+              ? { sideStream: __revalRscCapture.sideStream, capturedRscDataRef: __revalCapturedRscRef }
+              : undefined,
           );
           __clearRequestContext();
           const __freshHtml = await __readAppPageTextStream(__revalHtmlStream);
-          const __freshRscData = await __revalRscCapture.capturedRscDataPromise;
+          const __freshRscData = __revalCapturedRscRef.value ? await __revalCapturedRscRef.value : null;
           const __pageTags = buildPageCacheTags(cleanPathname, getCollectedFetchTags(), route.routeSegments, "page");
           return { html: __freshHtml, rscData: __freshRscData, tags: __pageTags };
         });
