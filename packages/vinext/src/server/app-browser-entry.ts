@@ -1478,6 +1478,17 @@ function bootstrapHydration(rscStream: ReadableStream<Uint8Array>): void {
   if (import.meta.hot) {
     import.meta.hot.on("rsc:update", async () => {
       try {
+        // HMR can fire before BrowserRoot's layout effect publishes
+        // browserRouterStateRef (e.g. saving a file while the initial RSC
+        // stream is still suspended), or while it is between unmount and
+        // remount. Wait for readiness, then re-check the ref — readiness can
+        // race with cleanup, which nulls the ref again. Skip silently when
+        // the tree is not currently mounted; the next HMR push or full
+        // reload will reconcile.
+        await waitForBrowserRouterStateReady();
+        if (!browserRouterStateRef) {
+          return;
+        }
         clearClientNavigationCaches();
         const navigationSnapshot = createClientNavigationRenderSnapshot(
           window.location.href,
@@ -1497,6 +1508,13 @@ function bootstrapHydration(rscStream: ReadableStream<Uint8Array>): void {
           renderId: ++nextNavigationRenderId,
           type: "replace",
         });
+        // createPendingNavigationCommit awaits the new RSC payload. While
+        // suspended, the prior broken render can unmount BrowserRoot, which
+        // clears setBrowserRouterState. Re-check before dispatching so a
+        // racing unmount doesn't surface as "setter is not initialized".
+        if (!setBrowserRouterState) {
+          return;
+        }
         dispatchBrowserTree(
           pending.action.elements,
           navigationSnapshot,
