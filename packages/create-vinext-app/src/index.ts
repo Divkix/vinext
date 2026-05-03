@@ -144,13 +144,14 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
   // Handle path-like project names
   let targetDir: string | undefined;
   const looksLikePath =
-    path.isAbsolute(projectNameStr) ||
-    projectNameStr.startsWith("./") ||
-    projectNameStr.startsWith("../") ||
-    projectNameStr.startsWith(".\\") ||
-    projectNameStr.startsWith("..\\") ||
-    projectNameStr.includes(path.sep) ||
-    projectNameStr.includes("/");
+    !projectNameStr.startsWith("@") &&
+    (path.isAbsolute(projectNameStr) ||
+      projectNameStr.startsWith("./") ||
+      projectNameStr.startsWith("../") ||
+      projectNameStr.startsWith(".\\") ||
+      projectNameStr.startsWith("..\\") ||
+      projectNameStr.includes(path.sep) ||
+      projectNameStr.includes("/"));
 
   let finalProjectName = projectNameStr;
 

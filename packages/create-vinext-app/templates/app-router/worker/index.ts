@@ -2,7 +2,11 @@
 import handler from "vinext/server/app-router-entry";
 
 export default {
-  async fetch(request: Request): Promise<Response> {
-    return handler.fetch(request);
+  async fetch(
+    request: Request,
+    env: Record<string, unknown>,
+    ctx: ExecutionContext,
+  ): Promise<Response> {
+    return handler.fetch(request, env, ctx);
   },
 };

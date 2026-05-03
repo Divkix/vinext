@@ -132,7 +132,17 @@ async function handleRequest(request: Request, env?: WorkerAssetEnv): Promise<Re
       }
     }
 
-    // ── 5. Run middleware ────────────────────────────────────────────────
+    // ── 5. Stripped request for middleware ───────────────────────────────
+    // Middleware matchers must evaluate against the basePath-free pathname,
+    // matching prod-server and deploy.ts behavior. Rebuild request with
+    // the stripped pathname so runMiddleware sees e.g. /about, not /docs/about.
+    if (basePath) {
+      const strippedUrl = new URL(request.url);
+      strippedUrl.pathname = pathname;
+      request = new Request(strippedUrl, request);
+    }
+
+    // ── 6. Run middleware ────────────────────────────────────────────────
     const middlewareHeaders: Record<string, string | string[]> = {};
     let middlewareRewriteStatus: number | undefined;
     if (typeof runMiddleware === "function") {
@@ -174,7 +184,7 @@ async function handleRequest(request: Request, env?: WorkerAssetEnv): Promise<Re
       middlewareRewriteStatus = result.rewriteStatus;
     }
 
-    // ── 6. Unpack x-middleware-request-* headers ─────────────────────────
+    // ── 7. Unpack x-middleware-request-* headers ─────────────────────────
     // These internal headers carry request header modifications from middleware.
     // applyMiddlewareRequestHeaders strips them from middlewareHeaders and
     // rebuilds the Request object with the forwarded header values.
@@ -186,7 +196,7 @@ async function handleRequest(request: Request, env?: WorkerAssetEnv): Promise<Re
 
     let resolvedPathname = resolvedUrl.split("?")[0];
 
-    // ── 7. Apply config headers ──────────────────────────────────────────
+    // ── 8. Apply config headers ──────────────────────────────────────────
     // Header match conditions use the original (pre-middleware) request context.
     // Middleware response headers win for the same key; multi-value headers
     // (Set-Cookie, Vary) are additive.
@@ -202,7 +212,7 @@ async function handleRequest(request: Request, env?: WorkerAssetEnv): Promise<Re
       return proxyExternalRequest(request, resolvedUrl);
     }
 
-    // ── 8. Apply beforeFiles rewrites ────────────────────────────────────
+    // ── 9. Apply beforeFiles rewrites ────────────────────────────────────
     if (configRewrites.beforeFiles?.length) {
       const rewritten = matchRewrite(resolvedPathname, configRewrites.beforeFiles, postMwReqCtx);
       if (rewritten) {
@@ -214,7 +224,7 @@ async function handleRequest(request: Request, env?: WorkerAssetEnv): Promise<Re
       }
     }
 
-    // ── 9. API routes ───────────────────────────────────────────────────
+    // ── 10. API routes ──────────────────────────────────────────────────
     if (resolvedPathname.startsWith("/api/") || resolvedPathname === "/api") {
       const response =
         typeof handleApiRoute === "function"
@@ -223,7 +233,7 @@ async function handleRequest(request: Request, env?: WorkerAssetEnv): Promise<Re
       return mergeHeaders(response, middlewareHeaders, middlewareRewriteStatus);
     }
 
-    // ── 10. Apply afterFiles rewrites ────────────────────────────────────
+    // ── 11. Apply afterFiles rewrites ────────────────────────────────────
     if (configRewrites.afterFiles?.length) {
       const rewritten = matchRewrite(resolvedPathname, configRewrites.afterFiles, postMwReqCtx);
       if (rewritten) {
@@ -235,12 +245,12 @@ async function handleRequest(request: Request, env?: WorkerAssetEnv): Promise<Re
       }
     }
 
-    // ── 11. SSR page rendering ──────────────────────────────────────────
+    // ── 12. SSR page rendering ──────────────────────────────────────────
     let response: Response | undefined;
     if (typeof renderPage === "function") {
       response = await renderPage(request, resolvedUrl, null);
 
-      // ── 12. Fallback rewrites (if SSR returned 404) ───────────────────
+      // ── 13. Fallback rewrites (if SSR returned 404) ───────────────────
       if (response && response.status === 404 && configRewrites.fallback?.length) {
         const fallbackRewrite = matchRewrite(
           resolvedPathname,
@@ -260,7 +270,7 @@ async function handleRequest(request: Request, env?: WorkerAssetEnv): Promise<Re
       return new Response("404 - Not found", { status: 404 });
     }
 
-    // ── 13. Merge middleware headers, handle static file signals ─────────
+    // ── 14. Merge middleware headers, handle static file signals ─────────
     response = mergeHeaders(response, middlewareHeaders, middlewareRewriteStatus);
 
     // If an ASSETS binding is available, check for x-vinext-static-file
