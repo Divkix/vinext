@@ -1,7 +1,9 @@
+// @ts-nocheck -- template file, modules resolved in scaffolded project
 import type { ReactNode } from "react";
+import "./globals.css";
 
 export const metadata = {
-  title: "{{PROJECT_NAME}}",
+  title: "{{DISPLAY_NAME}}",
   description: "Built with vinext",
 };
 

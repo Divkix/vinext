@@ -205,15 +205,9 @@ describe("parseArgs", () => {
   });
 
   test("exits on invalid template", () => {
-    const prevExit = process.exit;
-    process.exit = (code?: number) => {
-      throw new Error(`exit ${code}`);
-    };
-    try {
-      expect(() => parseArgs(["--template", "invalid"])).toThrow("exit 1");
-    } finally {
-      process.exit = prevExit;
-    }
+    const opts = parseArgs(["--template", "invalid"]);
+    expect(opts.error).toBeDefined();
+    expect(opts.error).toContain("Invalid template");
   });
 
   test("parses combined flags", () => {
@@ -225,14 +219,8 @@ describe("parseArgs", () => {
   });
 
   test("rejects unknown flags", () => {
-    const prevExit = process.exit;
-    process.exit = (code?: number) => {
-      throw new Error(`exit ${code}`);
-    };
-    try {
-      expect(() => parseArgs(["--unknown"])).toThrow("exit 1");
-    } finally {
-      process.exit = prevExit;
-    }
+    const opts = parseArgs(["--unknown"]);
+    expect(opts.error).toBeDefined();
+    expect(opts.error).toContain("Unknown option");
   });
 });

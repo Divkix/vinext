@@ -18,7 +18,7 @@
   "main": "dist/index.mjs",
   "scripts": {
     "dev": "tsx src/index.ts",
-    "build": "vp pack",
+    "build": "vp pack && node scripts/bake-versions.mjs",
     "test": "vp test"
   },
   "dependencies": {
@@ -27,7 +27,6 @@
   },
   "devDependencies": {
     "@types/node": "catalog:",
-    "vite-plus": "catalog:",
-    "vitest": "catalog:"
+    "vite-plus": "catalog:"
   }
 }

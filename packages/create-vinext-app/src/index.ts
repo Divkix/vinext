@@ -19,6 +19,7 @@ export type CliOptions = {
   version: boolean;
   projectName?: string;
   template?: "app" | "pages";
+  error?: string;
 };
 
 export type { PromptDefaults, PromptAnswers } from "./prompts.js";
@@ -58,16 +59,14 @@ export function parseArgs(argv: string[]): CliOptions {
         i++;
         const tmpl = argv[i];
         if (tmpl !== "app" && tmpl !== "pages") {
-          console.error(`Invalid template: "${tmpl}". Must be "app" or "pages".`);
-          process.exit(1);
+          return { ...opts, error: `Invalid template: "${tmpl}". Must be "app" or "pages".` };
         }
         opts.template = tmpl;
         break;
       }
       default:
         if (arg.startsWith("-")) {
-          console.error(`Unknown option: ${arg}`);
-          process.exit(1);
+          return { ...opts, error: `Unknown option: ${arg}` };
         }
         if (!opts.projectName) {
           opts.projectName = arg;
@@ -106,6 +105,11 @@ Examples:
 
 export async function main(argv: string[] = process.argv.slice(2)): Promise<void> {
   const opts = parseArgs(argv);
+
+  if (opts.error) {
+    console.error(opts.error);
+    process.exit(1);
+  }
 
   if (opts.help) {
     printHelp();
@@ -189,14 +193,19 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
   const pm = detectPackageManager();
   const catalogVars = getTemplateVersions();
 
+  const displayName = normalizedName.startsWith("@")
+    ? (normalizedName.split("/").pop() ?? normalizedName)
+    : normalizedName;
+
   scaffold({
     projectPath,
     projectName: normalizedName,
+    displayName,
     template,
     install: !opts.skipInstall,
     git: !opts.noGit,
     pm,
-    vinextVersion: `^${VERSION}`,
+    vinextVersion: VERSION,
     versionVars: catalogVars,
   });
 

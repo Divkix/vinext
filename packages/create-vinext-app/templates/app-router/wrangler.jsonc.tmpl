@@ -3,6 +3,9 @@
   "name": "{{WORKER_NAME}}",
   "compatibility_date": "2026-05-02",
   "compatibility_flags": ["nodejs_compat"],
-  "main": "vinext/server/app-router-entry",
-  "preview_urls": true
+  "main": "./worker/index.ts",
+  "preview_urls": true,
+  "assets": {
+    "not_found_handling": "none"
+  }
 }

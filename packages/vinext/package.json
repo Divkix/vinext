@@ -49,6 +49,10 @@
       "types": "./dist/server/app-router-entry.d.ts",
       "import": "./dist/server/app-router-entry.js"
     },
+    "./server/pages-router-entry": {
+      "types": "./dist/server/pages-router-entry.d.ts",
+      "import": "./dist/server/pages-router-entry.js"
+    },
     "./config/config-matchers": {
       "types": "./dist/config/config-matchers.d.ts",
       "import": "./dist/config/config-matchers.js"

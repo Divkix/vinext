@@ -2,10 +2,12 @@ import fs from "node:fs";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { buildInstallCommand } from "./install.js";
 
 export type ScaffoldOptions = {
   projectPath: string;
   projectName: string;
+  displayName?: string;
   template: "app" | "pages";
   install: boolean;
   git: boolean;
@@ -60,7 +62,16 @@ function processTmplFiles(dir: string, vars: Record<string, string>): void {
 }
 
 export function scaffold(options: ScaffoldOptions): void {
-  const { projectPath, projectName, template, install, git, vinextVersion, versionVars } = options;
+  const {
+    projectPath,
+    projectName,
+    displayName,
+    template,
+    install,
+    git,
+    vinextVersion,
+    versionVars,
+  } = options;
   const exec = options._exec ?? defaultExec;
 
   // Create project directory
@@ -85,6 +96,7 @@ export function scaffold(options: ScaffoldOptions): void {
     processTmplFiles(projectPath, {
       ...versionVars, // Catalog versions (RSC, React, Vite, etc.)
       "{{PROJECT_NAME}}": projectName,
+      "{{DISPLAY_NAME}}": displayName ?? projectName,
       "{{WORKER_NAME}}": workerName,
       "{{VINEXT_VERSION}}": vinextVersion,
     });
@@ -104,20 +116,7 @@ export function scaffold(options: ScaffoldOptions): void {
 
   // Install deps (if requested)
   if (install) {
-    const installCmd = getInstallCommand(options.pm);
-    exec(installCmd.cmd, installCmd.args, { cwd: projectPath });
-  }
-}
-
-function getInstallCommand(pm: "npm" | "pnpm" | "yarn" | "bun"): { cmd: string; args: string[] } {
-  switch (pm) {
-    case "npm":
-      return { cmd: "npm", args: ["install"] };
-    case "pnpm":
-      return { cmd: "pnpm", args: ["install"] };
-    case "yarn":
-      return { cmd: "yarn", args: [] };
-    case "bun":
-      return { cmd: "bun", args: ["install"] };
+    const [cmd, ...args] = buildInstallCommand(options.pm);
+    exec(cmd, args, { cwd: projectPath });
   }
 }

@@ -171,7 +171,7 @@ describe("integration: Pages Router template", () => {
     expect(pkgContent.name).toBe("my-website");
   });
 
-  test("worker entry contains middleware and routing logic", () => {
+  test("worker entry delegates to vinext pages-router handler", () => {
     const projectPath = path.join(tmpDir, "test-pages");
     const versionVars = getTemplateVersions();
 
@@ -188,10 +188,9 @@ describe("integration: Pages Router template", () => {
 
     const workerContent = fs.readFileSync(path.join(projectPath, "worker", "index.ts"), "utf-8");
 
-    // Should contain key middleware/routing keywords
-    expect(workerContent).toContain("middleware");
-    expect(workerContent).toContain("redirects");
-    expect(workerContent).toContain("rewrites");
+    // Should delegate to vinext/server/pages-router-entry
+    expect(workerContent).toContain("vinext/server/pages-router-entry");
+    expect(workerContent).toContain("handler.fetch");
     expect(workerContent).toContain("export default");
   });
 
