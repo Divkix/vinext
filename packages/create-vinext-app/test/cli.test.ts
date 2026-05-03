@@ -1,6 +1,7 @@
 import { expect, test, describe } from "vite-plus/test";
 import { detectPackageManager, buildInstallCommand } from "../src/install.js";
 import { validateProjectName, resolveProjectPath } from "../src/validate.js";
+import { getTemplateVersions } from "../src/catalog.js";
 
 describe("detectPackageManager", () => {
   test("returns npm when npm_config_user_agent is missing", () => {
@@ -132,5 +133,35 @@ describe("resolveProjectPath", () => {
 
   test("returns absolute paths as-is", () => {
     expect(resolveProjectPath("/tmp/my-app", "/home/user")).toBe("/tmp/my-app");
+  });
+});
+
+describe("getTemplateVersions", () => {
+  test("returns an object with expected keys (or empty object)", () => {
+    const versions = getTemplateVersions();
+    // When running in monorepo, should have all keys
+    // When running standalone, returns empty object (no-op)
+    if (Object.keys(versions).length > 0) {
+      expect(versions["{{VINEXT_VERSION}}"]).toBeDefined();
+      expect(versions["{{RSC_VERSION}}"]).toBeDefined();
+      expect(versions["{{RSDW_VERSION}}"]).toBeDefined();
+      expect(versions["{{REACT_VERSION}}"]).toBeDefined();
+      expect(versions["{{REACT_DOM_VERSION}}"]).toBeDefined();
+      expect(versions["{{PLUGIN_REACT_VERSION}}"]).toBeDefined();
+      expect(versions["{{CF_PLUGIN_VERSION}}"]).toBeDefined();
+      expect(versions["{{CF_TYPES_VERSION}}"]).toBeDefined();
+      expect(versions["{{VITE_VERSION}}"]).toBeDefined();
+      expect(versions["{{VITE_PLUS_VERSION}}"]).toBeDefined();
+      expect(versions["{{WRANGLER_VERSION}}"]).toBeDefined();
+      expect(versions["{{TS_VERSION}}"]).toBeDefined();
+    }
+  });
+
+  test("returns version values that look like reasonable strings", () => {
+    const versions = getTemplateVersions();
+    for (const [, value] of Object.entries(versions)) {
+      expect(typeof value).toBe("string");
+      expect(value.length).toBeGreaterThan(0);
+    }
   });
 });
