@@ -2,6 +2,7 @@ import { expect, test, describe } from "vite-plus/test";
 import { detectPackageManager, buildInstallCommand } from "../src/install.js";
 import { validateProjectName, resolveProjectPath } from "../src/validate.js";
 import { getTemplateVersions } from "../src/catalog.js";
+import { parseArgs } from "../src/index.js";
 
 describe("detectPackageManager", () => {
   test("returns npm when npm_config_user_agent is missing", () => {
@@ -162,6 +163,76 @@ describe("getTemplateVersions", () => {
     for (const [, value] of Object.entries(versions)) {
       expect(typeof value).toBe("string");
       expect(value.length).toBeGreaterThan(0);
+    }
+  });
+});
+
+describe("parseArgs", () => {
+  test("parses project name", () => {
+    const opts = parseArgs(["my-app"]);
+    expect(opts.projectName).toBe("my-app");
+  });
+
+  test("parses --yes flag", () => {
+    expect(parseArgs(["--yes"]).yes).toBe(true);
+    expect(parseArgs(["-y"]).yes).toBe(true);
+  });
+
+  test("parses --skip-install flag", () => {
+    expect(parseArgs(["--skip-install"]).skipInstall).toBe(true);
+  });
+
+  test("parses --no-git flag", () => {
+    expect(parseArgs(["--no-git"]).noGit).toBe(true);
+  });
+
+  test("parses --help flag", () => {
+    expect(parseArgs(["--help"]).help).toBe(true);
+    expect(parseArgs(["-h"]).help).toBe(true);
+  });
+
+  test("parses --version flag", () => {
+    expect(parseArgs(["--version"]).version).toBe(true);
+    expect(parseArgs(["-v"]).version).toBe(true);
+  });
+
+  test("parses --template app", () => {
+    expect(parseArgs(["--template", "app"]).template).toBe("app");
+  });
+
+  test("parses --template pages", () => {
+    expect(parseArgs(["--template", "pages"]).template).toBe("pages");
+  });
+
+  test("exits on invalid template", () => {
+    const prevExit = process.exit;
+    process.exit = (code?: number) => {
+      throw new Error(`exit ${code}`);
+    };
+    try {
+      expect(() => parseArgs(["--template", "invalid"])).toThrow("exit 1");
+    } finally {
+      process.exit = prevExit;
+    }
+  });
+
+  test("parses combined flags", () => {
+    const opts = parseArgs(["--template", "pages", "--yes", "--skip-install", "my-app"]);
+    expect(opts.template).toBe("pages");
+    expect(opts.yes).toBe(true);
+    expect(opts.skipInstall).toBe(true);
+    expect(opts.projectName).toBe("my-app");
+  });
+
+  test("rejects unknown flags", () => {
+    const prevExit = process.exit;
+    process.exit = (code?: number) => {
+      throw new Error(`exit ${code}`);
+    };
+    try {
+      expect(() => parseArgs(["--unknown"])).toThrow("exit 1");
+    } finally {
+      process.exit = prevExit;
     }
   });
 });
