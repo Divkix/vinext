@@ -8,14 +8,14 @@
     "url": "git+https://github.com/cloudflare/vinext.git"
   },
   "bin": {
-    "create-vinext-app": "dist/index.js"
+    "create-vinext-app": "dist/index.mjs"
   },
   "files": [
     "dist",
     "templates"
   ],
   "type": "module",
-  "main": "dist/index.js",
+  "main": "dist/index.mjs",
   "scripts": {
     "dev": "tsx src/index.ts",
     "build": "vp pack",

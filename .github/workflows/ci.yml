@@ -155,7 +155,7 @@ jobs:
 
       - name: Scaffold a fresh create-vinext-app project
         run: |
-          node dist/index.js "${{ runner.temp }}/cva-test-${{ matrix.template }}" --yes --skip-install --no-git --template ${{ matrix.template }}
+          node dist/index.mjs "${{ runner.temp }}/cva-test-${{ matrix.template }}" --yes --skip-install --no-git --template ${{ matrix.template }}
         working-directory: packages/create-vinext-app
 
       - name: Verify project structure
