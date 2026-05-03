@@ -150,12 +150,13 @@ jobs:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/setup
       - name: Build create-vinext-app
-        run: vp run build
+        run: vp pack
         working-directory: packages/create-vinext-app
 
       - name: Scaffold a fresh create-vinext-app project
         run: |
-          node packages/create-vinext-app/dist/index.js "${{ runner.temp }}/cva-test-${{ matrix.template }}" --yes --skip-install --no-git --template ${{ matrix.template }}
+          node dist/index.js "${{ runner.temp }}/cva-test-${{ matrix.template }}" --yes --skip-install --no-git --template ${{ matrix.template }}
+        working-directory: packages/create-vinext-app
 
       - name: Verify project structure
         run: |

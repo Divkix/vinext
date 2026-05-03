@@ -68,8 +68,18 @@ export default {
       ],
       project: ["src/**/*.{ts,tsx}"],
     },
+    "packages/create-vinext-app": {
+      entry: ["src/index.ts"],
+      project: ["src/**/*.ts", "test/**/*.ts"],
+      ignoreFiles: ["templates/**"],
+    },
   },
-  ignoreWorkspaces: ["examples/**", "tests/fixtures/**", "benchmarks/**"],
+  ignoreWorkspaces: [
+    "examples/**",
+    "tests/fixtures/**",
+    "benchmarks/**",
+    "packages/create-vinext-app/templates/**",
+  ],
   ignoreDependencies: [
     "@typescript/native-preview",
 
@@ -92,6 +102,8 @@ export default {
   ignoreBinaries: [
     // workspace's own bin, invoked in CI
     "vinext",
+    // used in dev script of create-vinext-app
+    "tsx",
   ],
   ignoreFiles: [
     "tests/e2e/app-router/nextjs-compat/playwright.nextjs-compat.config.ts",

@@ -21,6 +21,9 @@ export type CliOptions = {
   template?: "app" | "pages";
 };
 
+export type { PromptDefaults, PromptAnswers } from "./prompts.js";
+export type { ScaffoldOptions } from "./scaffold.js";
+
 export function parseArgs(argv: string[]): CliOptions {
   const opts: CliOptions = {
     yes: false,
