@@ -263,10 +263,10 @@ importers:
         version: '@voidzero-dev/vite-plus-core@0.1.17(@types/node@25.2.3)(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3)'
       vite-plus:
         specifier: 'catalog:'
-        version: 0.1.17(@opentelemetry/api@1.9.1)(@types/node@25.2.3)(@vitest/coverage-istanbul@4.1.5(@voidzero-dev/vite-plus-test@0.1.17))(@voidzero-dev/vite-plus-core@0.1.17(@types/node@25.2.3)(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3))(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3)
+        version: 0.1.17(@opentelemetry/api@1.9.1)(@types/node@25.2.3)(@vitest/coverage-istanbul@4.1.5(@voidzero-dev/vite-plus-test@0.1.17))(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3)
       vitest:
         specifier: npm:@voidzero-dev/vite-plus-test@0.1.17
-        version: '@voidzero-dev/vite-plus-test@0.1.17(@opentelemetry/api@1.9.1)(@types/node@25.2.3)(@vitest/coverage-istanbul@4.1.5(@voidzero-dev/vite-plus-test@0.1.17))(@voidzero-dev/vite-plus-core@0.1.17(@types/node@25.2.3)(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3))(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3)'
+        version: '@voidzero-dev/vite-plus-test@0.1.17(@opentelemetry/api@1.9.1)(@types/node@25.2.3)(@vitest/coverage-istanbul@4.1.5(@voidzero-dev/vite-plus-test@0.1.17))(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3)'
 
   benchmarks/vinext:
     dependencies:
@@ -294,7 +294,7 @@ importers:
         version: '@voidzero-dev/vite-plus-core@0.1.17(@types/node@25.2.3)(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3)'
       vite-plus:
         specifier: 'catalog:'
-        version: 0.1.17(@opentelemetry/api@1.9.1)(@types/node@25.2.3)(@vitest/coverage-istanbul@4.1.5(@voidzero-dev/vite-plus-test@0.1.17))(@voidzero-dev/vite-plus-core@0.1.17(@types/node@25.2.3)(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3))(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3)
+        version: 0.1.17(@opentelemetry/api@1.9.1)(@types/node@25.2.3)(@vitest/coverage-istanbul@4.1.5(@voidzero-dev/vite-plus-test@0.1.17))(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3)
 
   examples/app-router-cloudflare:
     dependencies:
@@ -331,7 +331,7 @@ importers:
         version: 4.20260313.1
       vite-plus:
         specifier: 'catalog:'
-        version: 0.1.17(@opentelemetry/api@1.9.1)(@types/node@25.2.3)(@vitest/coverage-istanbul@4.1.5(@voidzero-dev/vite-plus-test@0.1.17))(@voidzero-dev/vite-plus-core@0.1.17(@types/node@25.2.3)(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3))(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3)
+        version: 0.1.17(@opentelemetry/api@1.9.1)(@types/node@25.2.3)(@vitest/coverage-istanbul@4.1.5(@voidzero-dev/vite-plus-test@0.1.17))(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3)
 
   examples/app-router-nitro:
     dependencies:
@@ -356,7 +356,7 @@ importers:
     devDependencies:
       vite-plus:
         specifier: 'catalog:'
-        version: 0.1.17(@opentelemetry/api@1.9.1)(@types/node@25.2.3)(@vitest/coverage-istanbul@4.1.5(@voidzero-dev/vite-plus-test@0.1.17))(@voidzero-dev/vite-plus-core@0.1.17(@types/node@25.2.3)(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3))(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3)
+        version: 0.1.17(@opentelemetry/api@1.9.1)(@types/node@25.2.3)(@vitest/coverage-istanbul@4.1.5(@voidzero-dev/vite-plus-test@0.1.17))(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3)
 
   examples/app-router-playground:
     dependencies:
@@ -441,7 +441,7 @@ importers:
         version: '@voidzero-dev/vite-plus-core@0.1.17(@types/node@25.2.3)(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3)'
       vite-plus:
         specifier: 'catalog:'
-        version: 0.1.17(@opentelemetry/api@1.9.1)(@types/node@25.2.3)(@vitest/coverage-istanbul@4.1.5(@voidzero-dev/vite-plus-test@0.1.17))(@voidzero-dev/vite-plus-core@0.1.17(@types/node@25.2.3)(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3))(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3)
+        version: 0.1.17(@opentelemetry/api@1.9.1)(@types/node@25.2.3)(@vitest/coverage-istanbul@4.1.5(@voidzero-dev/vite-plus-test@0.1.17))(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3)
       wrangler:
         specifier: 'catalog:'
         version: 4.80.0(@cloudflare/workers-types@4.20260313.1)
@@ -490,7 +490,7 @@ importers:
     devDependencies:
       vite-plus:
         specifier: 'catalog:'
-        version: 0.1.17(@opentelemetry/api@1.9.1)(@types/node@25.2.3)(@vitest/coverage-istanbul@4.1.5(@voidzero-dev/vite-plus-test@0.1.17))(@voidzero-dev/vite-plus-core@0.1.17(@types/node@25.2.3)(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3))(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3)
+        version: 0.1.17(@opentelemetry/api@1.9.1)(@types/node@25.2.3)(@vitest/coverage-istanbul@4.1.5(@voidzero-dev/vite-plus-test@0.1.17))(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3)
 
   examples/fumadocs-docs-template:
     dependencies:
@@ -615,7 +615,7 @@ importers:
         version: 4.20260313.1
       vite-plus:
         specifier: 'catalog:'
-        version: 0.1.17(@opentelemetry/api@1.9.1)(@types/node@25.2.3)(@vitest/coverage-istanbul@4.1.5(@voidzero-dev/vite-plus-test@0.1.17))(@voidzero-dev/vite-plus-core@0.1.17(@types/node@25.2.3)(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3))(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3)
+        version: 0.1.17(@opentelemetry/api@1.9.1)(@types/node@25.2.3)(@vitest/coverage-istanbul@4.1.5(@voidzero-dev/vite-plus-test@0.1.17))(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3)
 
   examples/nextra-docs-template:
     dependencies:
@@ -661,7 +661,7 @@ importers:
         version: '@voidzero-dev/vite-plus-core@0.1.17(@types/node@25.2.3)(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3)'
       vite-plus:
         specifier: 'catalog:'
-        version: 0.1.17(@opentelemetry/api@1.9.1)(@types/node@25.2.3)(@vitest/coverage-istanbul@4.1.5(@voidzero-dev/vite-plus-test@0.1.17))(@voidzero-dev/vite-plus-core@0.1.17(@types/node@25.2.3)(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3))(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3)
+        version: 0.1.17(@opentelemetry/api@1.9.1)(@types/node@25.2.3)(@vitest/coverage-istanbul@4.1.5(@voidzero-dev/vite-plus-test@0.1.17))(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3)
       wrangler:
         specifier: 'catalog:'
         version: 4.80.0(@cloudflare/workers-types@4.20260313.1)
@@ -692,7 +692,7 @@ importers:
     devDependencies:
       vite-plus:
         specifier: 'catalog:'
-        version: 0.1.17(@opentelemetry/api@1.9.1)(@types/node@25.2.3)(@vitest/coverage-istanbul@4.1.5(@voidzero-dev/vite-plus-test@0.1.17))(@voidzero-dev/vite-plus-core@0.1.17(@types/node@25.2.3)(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3))(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3)
+        version: 0.1.17(@opentelemetry/api@1.9.1)(@types/node@25.2.3)(@vitest/coverage-istanbul@4.1.5(@voidzero-dev/vite-plus-test@0.1.17))(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3)
 
   examples/realworld-api-rest:
     dependencies:
@@ -732,7 +732,7 @@ importers:
         version: 5.9.3
       vite-plus:
         specifier: 'catalog:'
-        version: 0.1.17(@opentelemetry/api@1.9.1)(@types/node@25.2.3)(@vitest/coverage-istanbul@4.1.5(@voidzero-dev/vite-plus-test@0.1.17))(@voidzero-dev/vite-plus-core@0.1.17(@types/node@25.2.3)(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3))(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3)
+        version: 0.1.17(@opentelemetry/api@1.9.1)(@types/node@25.2.3)(@vitest/coverage-istanbul@4.1.5(@voidzero-dev/vite-plus-test@0.1.17))(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3)
       wrangler:
         specifier: 'catalog:'
         version: 4.80.0(@cloudflare/workers-types@4.20260313.1)
@@ -775,7 +775,26 @@ importers:
         version: 5.9.3
       vite-plus:
         specifier: 'catalog:'
-        version: 0.1.17(@opentelemetry/api@1.9.1)(@types/node@25.2.3)(@vitest/coverage-istanbul@4.1.5(@voidzero-dev/vite-plus-test@0.1.17))(@voidzero-dev/vite-plus-core@0.1.17(@types/node@25.2.3)(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3))(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3)
+        version: 0.1.17(@opentelemetry/api@1.9.1)(@types/node@25.2.3)(@vitest/coverage-istanbul@4.1.5(@voidzero-dev/vite-plus-test@0.1.17))(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3)
+
+  packages/create-vinext-app:
+    dependencies:
+      '@clack/prompts':
+        specifier: ^1.3.0
+        version: 1.3.0
+      yaml:
+        specifier: ^2.8.0
+        version: 2.8.3
+    devDependencies:
+      '@types/node':
+        specifier: 'catalog:'
+        version: 25.2.3
+      vite-plus:
+        specifier: 'catalog:'
+        version: 0.1.17(@opentelemetry/api@1.9.1)(@types/node@25.2.3)(@vitest/coverage-istanbul@4.1.5(@voidzero-dev/vite-plus-test@0.1.17))(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3)
+      vitest:
+        specifier: npm:@voidzero-dev/vite-plus-test@0.1.17
+        version: '@voidzero-dev/vite-plus-test@0.1.17(@opentelemetry/api@1.9.1)(@types/node@25.2.3)(@vitest/coverage-istanbul@4.1.5(@voidzero-dev/vite-plus-test@0.1.17))(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3)'
 
   packages/vinext:
     dependencies:
@@ -821,7 +840,7 @@ importers:
         version: 19.2.5(react-dom@19.2.5(react@19.2.5))(react@19.2.5)
       vite-plus:
         specifier: 'catalog:'
-        version: 0.1.17(@opentelemetry/api@1.9.1)(@types/node@25.2.3)(@vitest/coverage-istanbul@4.1.5(@voidzero-dev/vite-plus-test@0.1.17))(@voidzero-dev/vite-plus-core@0.1.17(@types/node@25.2.3)(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3))(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3)
+        version: 0.1.17(@opentelemetry/api@1.9.1)(@types/node@25.2.3)(@vitest/coverage-istanbul@4.1.5(@voidzero-dev/vite-plus-test@0.1.17))(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3)
 
   tests/fixtures/app-basic:
     dependencies:
@@ -855,7 +874,7 @@ importers:
     devDependencies:
       vite-plus:
         specifier: 'catalog:'
-        version: 0.1.17(@opentelemetry/api@1.9.1)(@types/node@25.2.3)(@vitest/coverage-istanbul@4.1.5(@voidzero-dev/vite-plus-test@0.1.17))(@voidzero-dev/vite-plus-core@0.1.17(@types/node@25.2.3)(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3))(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3)
+        version: 0.1.17(@opentelemetry/api@1.9.1)(@types/node@25.2.3)(@vitest/coverage-istanbul@4.1.5(@voidzero-dev/vite-plus-test@0.1.17))(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3)
 
   tests/fixtures/app-cjs-violation:
     dependencies:
@@ -880,7 +899,7 @@ importers:
     devDependencies:
       vite-plus:
         specifier: 'catalog:'
-        version: 0.1.17(@opentelemetry/api@1.9.1)(@types/node@25.2.3)(@vitest/coverage-istanbul@4.1.5(@voidzero-dev/vite-plus-test@0.1.17))(@voidzero-dev/vite-plus-core@0.1.17(@types/node@25.2.3)(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3))(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3)
+        version: 0.1.17(@opentelemetry/api@1.9.1)(@types/node@25.2.3)(@vitest/coverage-istanbul@4.1.5(@voidzero-dev/vite-plus-test@0.1.17))(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3)
 
   tests/fixtures/app-with-src:
     dependencies:
@@ -905,7 +924,7 @@ importers:
     devDependencies:
       vite-plus:
         specifier: 'catalog:'
-        version: 0.1.17(@opentelemetry/api@1.9.1)(@types/node@25.2.3)(@vitest/coverage-istanbul@4.1.5(@voidzero-dev/vite-plus-test@0.1.17))(@voidzero-dev/vite-plus-core@0.1.17(@types/node@25.2.3)(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3))(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3)
+        version: 0.1.17(@opentelemetry/api@1.9.1)(@types/node@25.2.3)(@vitest/coverage-istanbul@4.1.5(@voidzero-dev/vite-plus-test@0.1.17))(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3)
 
   tests/fixtures/cf-app-basic:
     dependencies:
@@ -939,7 +958,7 @@ importers:
     devDependencies:
       vite-plus:
         specifier: 'catalog:'
-        version: 0.1.17(@opentelemetry/api@1.9.1)(@types/node@25.2.3)(@vitest/coverage-istanbul@4.1.5(@voidzero-dev/vite-plus-test@0.1.17))(@voidzero-dev/vite-plus-core@0.1.17(@types/node@25.2.3)(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3))(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3)
+        version: 0.1.17(@opentelemetry/api@1.9.1)(@types/node@25.2.3)(@vitest/coverage-istanbul@4.1.5(@voidzero-dev/vite-plus-test@0.1.17))(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3)
 
   tests/fixtures/ecosystem/better-auth:
     dependencies:
@@ -951,7 +970,7 @@ importers:
         version: 0.5.23(@voidzero-dev/vite-plus-core@0.1.17(@types/node@25.2.3)(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3))(react-dom@19.2.5(react@19.2.5))(react-server-dom-webpack@19.2.5(react-dom@19.2.5(react@19.2.5))(react@19.2.5))(react@19.2.5)
       better-auth:
         specifier: 'catalog:'
-        version: 1.5.6(@cloudflare/workers-types@4.20260313.1)(@opentelemetry/api@1.9.1)(@types/node@25.2.3)(@vitest/coverage-istanbul@4.1.5(@voidzero-dev/vite-plus-test@0.1.17))(@voidzero-dev/vite-plus-core@0.1.17(@types/node@25.2.3)(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3))(better-sqlite3@12.6.2)(esbuild@0.27.3)(jiti@2.6.1)(next@16.2.3(@opentelemetry/api@1.9.1)(@playwright/test@1.58.2)(react-dom@19.2.5(react@19.2.5))(react@19.2.5))(react-dom@19.2.5(react@19.2.5))(react@19.2.5)(typescript@5.9.3)(yaml@2.8.3)
+        version: 1.5.6(@cloudflare/workers-types@4.20260313.1)(@opentelemetry/api@1.9.1)(@types/node@25.2.3)(@vitest/coverage-istanbul@4.1.5(@voidzero-dev/vite-plus-test@0.1.17))(better-sqlite3@12.6.2)(esbuild@0.27.3)(jiti@2.6.1)(next@16.2.3(@opentelemetry/api@1.9.1)(@playwright/test@1.58.2)(react-dom@19.2.5(react@19.2.5))(react@19.2.5))(react-dom@19.2.5(react@19.2.5))(react@19.2.5)(typescript@5.9.3)(yaml@2.8.3)
       better-sqlite3:
         specifier: 'catalog:'
         version: 12.6.2
@@ -973,7 +992,7 @@ importers:
         version: '@voidzero-dev/vite-plus-core@0.1.17(@types/node@25.2.3)(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3)'
       vite-plus:
         specifier: 'catalog:'
-        version: 0.1.17(@opentelemetry/api@1.9.1)(@types/node@25.2.3)(@vitest/coverage-istanbul@4.1.5(@voidzero-dev/vite-plus-test@0.1.17))(@voidzero-dev/vite-plus-core@0.1.17(@types/node@25.2.3)(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3))(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3)
+        version: 0.1.17(@opentelemetry/api@1.9.1)(@types/node@25.2.3)(@vitest/coverage-istanbul@4.1.5(@voidzero-dev/vite-plus-test@0.1.17))(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3)
 
   tests/fixtures/ecosystem/next-intl:
     dependencies:
@@ -1001,7 +1020,7 @@ importers:
         version: '@voidzero-dev/vite-plus-core@0.1.17(@types/node@25.2.3)(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3)'
       vite-plus:
         specifier: 'catalog:'
-        version: 0.1.17(@opentelemetry/api@1.9.1)(@types/node@25.2.3)(@vitest/coverage-istanbul@4.1.5(@voidzero-dev/vite-plus-test@0.1.17))(@voidzero-dev/vite-plus-core@0.1.17(@types/node@25.2.3)(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3))(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3)
+        version: 0.1.17(@opentelemetry/api@1.9.1)(@types/node@25.2.3)(@vitest/coverage-istanbul@4.1.5(@voidzero-dev/vite-plus-test@0.1.17))(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3)
 
   tests/fixtures/ecosystem/next-themes:
     dependencies:
@@ -1029,7 +1048,7 @@ importers:
         version: '@voidzero-dev/vite-plus-core@0.1.17(@types/node@25.2.3)(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3)'
       vite-plus:
         specifier: 'catalog:'
-        version: 0.1.17(@opentelemetry/api@1.9.1)(@types/node@25.2.3)(@vitest/coverage-istanbul@4.1.5(@voidzero-dev/vite-plus-test@0.1.17))(@voidzero-dev/vite-plus-core@0.1.17(@types/node@25.2.3)(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3))(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3)
+        version: 0.1.17(@opentelemetry/api@1.9.1)(@types/node@25.2.3)(@vitest/coverage-istanbul@4.1.5(@voidzero-dev/vite-plus-test@0.1.17))(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3)
 
   tests/fixtures/ecosystem/next-view-transitions:
     dependencies:
@@ -1057,7 +1076,7 @@ importers:
         version: '@voidzero-dev/vite-plus-core@0.1.17(@types/node@25.2.3)(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3)'
       vite-plus:
         specifier: 'catalog:'
-        version: 0.1.17(@opentelemetry/api@1.9.1)(@types/node@25.2.3)(@vitest/coverage-istanbul@4.1.5(@voidzero-dev/vite-plus-test@0.1.17))(@voidzero-dev/vite-plus-core@0.1.17(@types/node@25.2.3)(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3))(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3)
+        version: 0.1.17(@opentelemetry/api@1.9.1)(@types/node@25.2.3)(@vitest/coverage-istanbul@4.1.5(@voidzero-dev/vite-plus-test@0.1.17))(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3)
 
   tests/fixtures/ecosystem/nuqs:
     dependencies:
@@ -1085,7 +1104,7 @@ importers:
         version: '@voidzero-dev/vite-plus-core@0.1.17(@types/node@25.2.3)(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3)'
       vite-plus:
         specifier: 'catalog:'
-        version: 0.1.17(@opentelemetry/api@1.9.1)(@types/node@25.2.3)(@vitest/coverage-istanbul@4.1.5(@voidzero-dev/vite-plus-test@0.1.17))(@voidzero-dev/vite-plus-core@0.1.17(@types/node@25.2.3)(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3))(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3)
+        version: 0.1.17(@opentelemetry/api@1.9.1)(@types/node@25.2.3)(@vitest/coverage-istanbul@4.1.5(@voidzero-dev/vite-plus-test@0.1.17))(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3)
 
   tests/fixtures/ecosystem/shadcn:
     dependencies:
@@ -1128,7 +1147,7 @@ importers:
         version: '@voidzero-dev/vite-plus-core@0.1.17(@types/node@25.2.3)(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3)'
       vite-plus:
         specifier: 'catalog:'
-        version: 0.1.17(@opentelemetry/api@1.9.1)(@types/node@25.2.3)(@vitest/coverage-istanbul@4.1.5(@voidzero-dev/vite-plus-test@0.1.17))(@voidzero-dev/vite-plus-core@0.1.17(@types/node@25.2.3)(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3))(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3)
+        version: 0.1.17(@opentelemetry/api@1.9.1)(@types/node@25.2.3)(@vitest/coverage-istanbul@4.1.5(@voidzero-dev/vite-plus-test@0.1.17))(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3)
 
   tests/fixtures/ecosystem/validator:
     dependencies:
@@ -1150,7 +1169,7 @@ importers:
         version: '@voidzero-dev/vite-plus-core@0.1.17(@types/node@25.2.3)(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3)'
       vite-plus:
         specifier: 'catalog:'
-        version: 0.1.17(@opentelemetry/api@1.9.1)(@types/node@25.2.3)(@vitest/coverage-istanbul@4.1.5(@voidzero-dev/vite-plus-test@0.1.17))(@voidzero-dev/vite-plus-core@0.1.17(@types/node@25.2.3)(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3))(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3)
+        version: 0.1.17(@opentelemetry/api@1.9.1)(@types/node@25.2.3)(@vitest/coverage-istanbul@4.1.5(@voidzero-dev/vite-plus-test@0.1.17))(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3)
 
   tests/fixtures/font-google-multiple:
     dependencies:
@@ -1175,7 +1194,7 @@ importers:
     devDependencies:
       vite-plus:
         specifier: 'catalog:'
-        version: 0.1.17(@opentelemetry/api@1.9.1)(@types/node@25.2.3)(@vitest/coverage-istanbul@4.1.5(@voidzero-dev/vite-plus-test@0.1.17))(@voidzero-dev/vite-plus-core@0.1.17(@types/node@25.2.3)(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3))(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3)
+        version: 0.1.17(@opentelemetry/api@1.9.1)(@types/node@25.2.3)(@vitest/coverage-istanbul@4.1.5(@voidzero-dev/vite-plus-test@0.1.17))(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3)
 
   tests/fixtures/pages-basic:
     dependencies:
@@ -1194,7 +1213,7 @@ importers:
         version: '@voidzero-dev/vite-plus-core@0.1.17(@types/node@25.2.3)(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3)'
       vite-plus:
         specifier: 'catalog:'
-        version: 0.1.17(@opentelemetry/api@1.9.1)(@types/node@25.2.3)(@vitest/coverage-istanbul@4.1.5(@voidzero-dev/vite-plus-test@0.1.17))(@voidzero-dev/vite-plus-core@0.1.17(@types/node@25.2.3)(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3))(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3)
+        version: 0.1.17(@opentelemetry/api@1.9.1)(@types/node@25.2.3)(@vitest/coverage-istanbul@4.1.5(@voidzero-dev/vite-plus-test@0.1.17))(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3)
 
   tests/fixtures/standalone-output:
     dependencies:
@@ -1213,7 +1232,7 @@ importers:
         version: '@voidzero-dev/vite-plus-core@0.1.17(@types/node@25.2.3)(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3)'
       vite-plus:
         specifier: 'catalog:'
-        version: 0.1.17(@opentelemetry/api@1.9.1)(@types/node@25.2.3)(@vitest/coverage-istanbul@4.1.5(@voidzero-dev/vite-plus-test@0.1.17))(@voidzero-dev/vite-plus-core@0.1.17(@types/node@25.2.3)(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3))(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3)
+        version: 0.1.17(@opentelemetry/api@1.9.1)(@types/node@25.2.3)(@vitest/coverage-istanbul@4.1.5(@voidzero-dev/vite-plus-test@0.1.17))(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3)
 
   tests/fixtures/static-export:
     dependencies:
@@ -1408,6 +1427,14 @@ packages:
 
   '@better-fetch/fetch@1.1.21':
     resolution: {integrity: sha512-/ImESw0sskqlVR94jB+5+Pxjf+xBwDZF/N5+y2/q4EqD7IARUTSpPfIo8uf39SYpCxyOCtbyYpUrZ3F/k0zT4A==}
+
+  '@clack/core@1.3.0':
+    resolution: {integrity: sha512-xJPHpAmEQUBrXSLx0gF+q5K/IyihXpsHZcha+jB+tyahsKRK3Dxo4D0coZDewHo12NhiuzC3dTtMPbm53GEAAA==}
+    engines: {node: '>= 20.12.0'}
+
+  '@clack/prompts@1.3.0':
+    resolution: {integrity: sha512-GgcWwRCs/xPtaqlMy8qRhPnZf9vlWcWZNHAitnVQ3yk7JmSralSiq5q07yaffYE8SogtDm7zFeKccx1QNVARpw==}
+    engines: {node: '>= 20.12.0'}
 
   '@cloudflare/kumo@1.6.0':
     resolution: {integrity: sha512-1Sy8kgfHNkze+NEfu/6cNzwOb0hemGm1mUNGU9GVmAnHemLOaXixosslM/o38TbUTEEs48yTRrDy0WFGgSTFWg==}
@@ -3781,7 +3808,6 @@ packages:
       '@vitest/ui': 4.1.4
       happy-dom: '*'
       jsdom: '*'
-      vite: ^6.0.0 || ^7.0.0 || ^8.0.0
     peerDependenciesMeta:
       '@edge-runtime/vm':
         optional: true
@@ -4268,6 +4294,15 @@ packages:
   fast-glob@3.3.3:
     resolution: {integrity: sha512-7MptL8U0cqcFdzIzwOTHoilX9x5BrNqye7Z/LuC7kCMRio1EMSyqRK3BEAUD7sXRq4iT4AzTVuZdhgQ2TCvYLg==}
     engines: {node: '>=8.6.0'}
+
+  fast-string-truncated-width@3.0.3:
+    resolution: {integrity: sha512-0jjjIEL6+0jag3l2XWWizO64/aZVtpiGE3t0Zgqxv0DPuxiMjvB3M24fCyhZUO4KomJQPj3LTSUnDP3GpdwC0g==}
+
+  fast-string-width@3.0.2:
+    resolution: {integrity: sha512-gX8LrtNEI5hq8DVUfRQMbr5lpaS4nMIWV+7XEbXk2b8kiQIizgnlr12B4dA3ZEx3308ze0O4Q1R+cHts8kyUJg==}
+
+  fast-wrap-ansi@0.2.0:
+    resolution: {integrity: sha512-rLV8JHxTyhVmFYhBJuMujcrHqOT2cnO5Zxj37qROj23CP39GXubJRBUFF0z8KFK77Uc0SukZUf7JZhsVEQ6n8w==}
 
   fastq@1.20.1:
     resolution: {integrity: sha512-GGToxJ/w1x32s/D2EKND7kTil4n8OVk/9mycTc4VDza13lOvpUZTGX3mFSCtV9ksdGBVzvsyAVLM6mHFThxXxw==}
@@ -5497,6 +5532,9 @@ packages:
     resolution: {integrity: sha512-2wcC/oGxHis/BoHkkPwldgiPSYcpZK3JU28WoMVv55yHJgcZ8rlXvuG9iZggz+sU1d4bRgIGASwyWqjxu3FM0g==}
     engines: {node: '>=18'}
 
+  sisteransi@1.0.5:
+    resolution: {integrity: sha512-bLGGlR1QxBcynn2d5YmDX4MGjlZvy2MRBDRNHLJ8VI6l6+9FUiyTFNJ0IveOSP0bcXgVDPRcfGqA0pjaqUpfVg==}
+
   smol-toml@1.6.1:
     resolution: {integrity: sha512-dWUG8F5sIIARXih1DTaQAX4SsiTXhInKf1buxdY9DIg4ZYPZK5nGM1VRIYmEbDbsHt7USo99xSLFu5Q1IqTmsg==}
     engines: {node: '>= 18'}
@@ -5604,10 +5642,6 @@ packages:
   tinyexec@1.0.2:
     resolution: {integrity: sha512-W/KYk+NFhkmsYpuHq5JykngiOCnxeVL8v8dFnqxSD8qEEdRfXk1SDM6JzNqcERbcGYj9tMrDQBYV9cjgnunFIg==}
     engines: {node: '>=18'}
-
-  tinyglobby@0.2.15:
-    resolution: {integrity: sha512-j2Zq4NyQYG5XMST4cbs02Ak8iJUdxRM0XI5QyxXuZOzKOINmWurp3smXu3y5wDcJrptwpSjgXHzIQxR0omXljQ==}
-    engines: {node: '>=12.0.0'}
 
   tinyglobby@0.2.16:
     resolution: {integrity: sha512-pn99VhoACYR8nFHhxqix+uvsbXineAasWm5ojXoN8xEwK5Kd3/TrhNn1wByuD52UxWRLy8pu+kRMniEi6Eq9Zg==}
@@ -6123,6 +6157,18 @@ snapshots:
   '@better-auth/utils@0.3.1': {}
 
   '@better-fetch/fetch@1.1.21': {}
+
+  '@clack/core@1.3.0':
+    dependencies:
+      fast-wrap-ansi: 0.2.0
+      sisteransi: 1.0.5
+
+  '@clack/prompts@1.3.0':
+    dependencies:
+      '@clack/core': 1.3.0
+      fast-string-width: 3.0.2
+      fast-wrap-ansi: 0.2.0
+      sisteransi: 1.0.5
 
   '@cloudflare/kumo@1.6.0(@phosphor-icons/react@2.1.10(react-dom@19.2.5(react@19.2.5))(react@19.2.5))(@types/react@19.2.14)(react-dom@19.2.5(react@19.2.5))(react@19.2.5)(zod@4.3.6)':
     dependencies:
@@ -7847,7 +7893,7 @@ snapshots:
       magicast: 0.5.2
       obug: 2.1.1
       tinyrainbow: 3.1.0
-      vitest: '@voidzero-dev/vite-plus-test@0.1.17(@opentelemetry/api@1.9.1)(@types/node@25.2.3)(@vitest/coverage-istanbul@4.1.5(@voidzero-dev/vite-plus-test@0.1.17))(@voidzero-dev/vite-plus-core@0.1.17(@types/node@25.2.3)(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3))(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3)'
+      vitest: '@voidzero-dev/vite-plus-test@0.1.17(@opentelemetry/api@1.9.1)(@types/node@25.2.3)(@vitest/coverage-istanbul@4.1.5(@voidzero-dev/vite-plus-test@0.1.17))(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3)'
     transitivePeerDependencies:
       - supports-color
 
@@ -7883,7 +7929,7 @@ snapshots:
   '@voidzero-dev/vite-plus-linux-x64-musl@0.1.17':
     optional: true
 
-  '@voidzero-dev/vite-plus-test@0.1.17(@opentelemetry/api@1.9.1)(@types/node@25.2.3)(@vitest/coverage-istanbul@4.1.5(@voidzero-dev/vite-plus-test@0.1.17))(@voidzero-dev/vite-plus-core@0.1.17(@types/node@25.2.3)(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3))(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3)':
+  '@voidzero-dev/vite-plus-test@0.1.17(@opentelemetry/api@1.9.1)(@types/node@25.2.3)(@vitest/coverage-istanbul@4.1.5(@voidzero-dev/vite-plus-test@0.1.17))(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3)':
     dependencies:
       '@standard-schema/spec': 1.1.0
       '@types/chai': 5.2.3
@@ -7896,7 +7942,7 @@ snapshots:
       std-env: 4.0.0
       tinybench: 2.9.0
       tinyexec: 1.0.2
-      tinyglobby: 0.2.15
+      tinyglobby: 0.2.16
       vite: '@voidzero-dev/vite-plus-core@0.1.17(@types/node@25.2.3)(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3)'
       ws: 8.19.0
     optionalDependencies:
@@ -7962,7 +8008,7 @@ snapshots:
 
   baseline-browser-mapping@2.10.25: {}
 
-  better-auth@1.5.6(@cloudflare/workers-types@4.20260313.1)(@opentelemetry/api@1.9.1)(@types/node@25.2.3)(@vitest/coverage-istanbul@4.1.5(@voidzero-dev/vite-plus-test@0.1.17))(@voidzero-dev/vite-plus-core@0.1.17(@types/node@25.2.3)(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3))(better-sqlite3@12.6.2)(esbuild@0.27.3)(jiti@2.6.1)(next@16.2.3(@opentelemetry/api@1.9.1)(@playwright/test@1.58.2)(react-dom@19.2.5(react@19.2.5))(react@19.2.5))(react-dom@19.2.5(react@19.2.5))(react@19.2.5)(typescript@5.9.3)(yaml@2.8.3):
+  better-auth@1.5.6(@cloudflare/workers-types@4.20260313.1)(@opentelemetry/api@1.9.1)(@types/node@25.2.3)(@vitest/coverage-istanbul@4.1.5(@voidzero-dev/vite-plus-test@0.1.17))(better-sqlite3@12.6.2)(esbuild@0.27.3)(jiti@2.6.1)(next@16.2.3(@opentelemetry/api@1.9.1)(@playwright/test@1.58.2)(react-dom@19.2.5(react@19.2.5))(react@19.2.5))(react-dom@19.2.5(react@19.2.5))(react@19.2.5)(typescript@5.9.3)(yaml@2.8.3):
     dependencies:
       '@better-auth/core': 1.5.6(@better-auth/utils@0.3.1)(@better-fetch/fetch@1.1.21)(@cloudflare/workers-types@4.20260313.1)(@opentelemetry/api@1.9.1)(better-call@1.3.2(zod@4.3.6))(jose@6.1.3)(kysely@0.28.15)(nanostores@1.2.0)
       '@better-auth/drizzle-adapter': 1.5.6(@better-auth/core@1.5.6(@better-auth/utils@0.3.1)(@better-fetch/fetch@1.1.21)(@cloudflare/workers-types@4.20260313.1)(@opentelemetry/api@1.9.1)(better-call@1.3.2(zod@4.3.6))(jose@6.1.3)(kysely@0.28.15)(nanostores@1.2.0))(@better-auth/utils@0.3.1)
@@ -7980,7 +8026,7 @@ snapshots:
       jose: 6.1.3
       kysely: 0.28.15
       nanostores: 1.2.0
-      vitest: '@voidzero-dev/vite-plus-test@0.1.17(@opentelemetry/api@1.9.1)(@types/node@25.2.3)(@vitest/coverage-istanbul@4.1.5(@voidzero-dev/vite-plus-test@0.1.17))(@voidzero-dev/vite-plus-core@0.1.17(@types/node@25.2.3)(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3))(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3)'
+      vitest: '@voidzero-dev/vite-plus-test@0.1.17(@opentelemetry/api@1.9.1)(@types/node@25.2.3)(@vitest/coverage-istanbul@4.1.5(@voidzero-dev/vite-plus-test@0.1.17))(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3)'
       zod: 4.3.6
     optionalDependencies:
       better-sqlite3: 12.6.2
@@ -8015,7 +8061,6 @@ snapshots:
       - typescript
       - unplugin-unused
       - utf-8-validate
-      - vite
       - yaml
 
   better-call@1.3.2(zod@4.3.6):
@@ -8338,6 +8383,16 @@ snapshots:
       glob-parent: 5.1.2
       merge2: 1.4.1
       micromatch: 4.0.8
+
+  fast-string-truncated-width@3.0.3: {}
+
+  fast-string-width@3.0.2:
+    dependencies:
+      fast-string-truncated-width: 3.0.3
+
+  fast-wrap-ansi@0.2.0:
+    dependencies:
+      fast-string-width: 3.0.2
 
   fastq@1.20.1:
     dependencies:
@@ -10021,6 +10076,8 @@ snapshots:
       mrmime: 2.0.1
       totalist: 3.0.1
 
+  sisteransi@1.0.5: {}
+
   smol-toml@1.6.1: {}
 
   source-map-js@1.2.1: {}
@@ -10107,11 +10164,6 @@ snapshots:
   tinybench@2.9.0: {}
 
   tinyexec@1.0.2: {}
-
-  tinyglobby@0.2.15:
-    dependencies:
-      fdir: 6.5.0(picomatch@4.0.4)
-      picomatch: 4.0.4
 
   tinyglobby@0.2.16:
     dependencies:
@@ -10285,11 +10337,11 @@ snapshots:
       fast-glob: 3.3.3
       magic-string: 0.30.21
 
-  vite-plus@0.1.17(@opentelemetry/api@1.9.1)(@types/node@25.2.3)(@vitest/coverage-istanbul@4.1.5(@voidzero-dev/vite-plus-test@0.1.17))(@voidzero-dev/vite-plus-core@0.1.17(@types/node@25.2.3)(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3))(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3):
+  vite-plus@0.1.17(@opentelemetry/api@1.9.1)(@types/node@25.2.3)(@vitest/coverage-istanbul@4.1.5(@voidzero-dev/vite-plus-test@0.1.17))(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3):
     dependencies:
       '@oxc-project/types': 0.124.0
       '@voidzero-dev/vite-plus-core': 0.1.17(@types/node@25.2.3)(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3)
-      '@voidzero-dev/vite-plus-test': 0.1.17(@opentelemetry/api@1.9.1)(@types/node@25.2.3)(@vitest/coverage-istanbul@4.1.5(@voidzero-dev/vite-plus-test@0.1.17))(@voidzero-dev/vite-plus-core@0.1.17(@types/node@25.2.3)(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3))(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3)
+      '@voidzero-dev/vite-plus-test': 0.1.17(@opentelemetry/api@1.9.1)(@types/node@25.2.3)(@vitest/coverage-istanbul@4.1.5(@voidzero-dev/vite-plus-test@0.1.17))(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3)
       oxfmt: 0.45.0
       oxlint: 1.60.0(oxlint-tsgolint@0.20.0)
       oxlint-tsgolint: 0.20.0
@@ -10329,7 +10381,6 @@ snapshots:
       - typescript
       - unplugin-unused
       - utf-8-validate
-      - vite
       - yaml
 
   vite-tsconfig-paths@6.1.1(@voidzero-dev/vite-plus-core@0.1.17(@types/node@25.2.3)(esbuild@0.27.3)(jiti@2.6.1)(typescript@5.9.3)(yaml@2.8.3))(typescript@5.9.3):
