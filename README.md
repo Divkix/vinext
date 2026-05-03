@@ -86,9 +86,30 @@ Environment variables: `PORT` (default `3000`), `HOST` (default `0.0.0.0`).
 
 ### Starting a new vinext project
 
-Run `npm create next-app@latest` to create a new Next.js project, and then follow these instructions to migrate it to vinext.
+Use `create-vinext-app` to scaffold a new project:
 
-In the future, we will have a proper `npm create vinext` new project workflow.
+```bash
+npm create vinext-app
+```
+
+This will prompt for a project name and template (App Router or Pages Router), then scaffold a complete project with TypeScript, Vite, and Cloudflare Workers configuration.
+
+**Quick start with defaults:**
+
+```bash
+npm create vinext-app my-app --yes
+```
+
+**Choose your template:**
+
+```bash
+npm create vinext-app my-app --template pages  # Pages Router
+npm create vinext-app my-app --template app      # App Router (default)
+```
+
+See [create-vinext-app documentation](packages/create-vinext-app/README.md) for all options.
+
+Alternatively, you can start from an existing Next.js project and migrate it to vinext (see below).
 
 ### Migrating an existing Next.js project
 
@@ -551,7 +572,7 @@ These are intentional exclusions:
 - **`next export` (legacy)** — Use `output: 'export'` in config instead.
 - **Turbopack/webpack configuration** — This runs on Vite. Use Vite plugins instead of webpack loaders/plugins.
 - **`next/jest`** — Use Vitest.
-- **`create-next-app` scaffolding** — Not a goal.
+- **`create-next-app` scaffolding** — Use `create-vinext-app` instead.
 - **Bug-for-bug parity with undocumented behavior** — If it's not in the Next.js docs, we probably don't replicate it.
 
 ## Known limitations
