@@ -69,17 +69,14 @@ export default {
       project: ["src/**/*.{ts,tsx}"],
     },
     "packages/create-vinext-app": {
-      entry: ["src/index.ts"],
       project: ["src/**/*.ts", "test/**/*.ts"],
-      ignoreFiles: ["templates/**"],
+      ignoreDependencies: [
+        // imported through vite-plus/test, invisible to knip
+        "vitest",
+      ],
     },
   },
-  ignoreWorkspaces: [
-    "examples/**",
-    "tests/fixtures/**",
-    "benchmarks/**",
-    "packages/create-vinext-app/templates/**",
-  ],
+  ignoreWorkspaces: ["examples/**", "tests/fixtures/**", "benchmarks/**"],
   ignoreDependencies: [
     "@typescript/native-preview",
 
