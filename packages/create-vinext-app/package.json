@@ -11,7 +11,8 @@
     "create-vinext-app": "dist/index.js"
   },
   "files": [
-    "dist"
+    "dist",
+    "templates"
   ],
   "type": "module",
   "main": "dist/index.js",
