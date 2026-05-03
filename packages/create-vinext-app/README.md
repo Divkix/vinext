@@ -17,30 +17,33 @@ npm create vinext-app my-app --template pages
 
 ## Options
 
-| Flag | Description |
-|------|-------------|
-| `--yes`, `-y` | Skip all prompts and use defaults |
-| `--template <app\|pages>` | Choose App Router or Pages Router |
-| `--skip-install` | Skip dependency installation |
-| `--no-git` | Skip git repository initialization |
-| `--help`, `-h` | Show help |
-| `--version`, `-v` | Show version |
+| Flag                      | Description                        |
+| ------------------------- | ---------------------------------- |
+| `--yes`, `-y`             | Skip all prompts and use defaults  |
+| `--template <app\|pages>` | Choose App Router or Pages Router  |
+| `--skip-install`          | Skip dependency installation       |
+| `--no-git`                | Skip git repository initialization |
+| `--help`, `-h`            | Show help                          |
+| `--version`, `-v`         | Show version                       |
 
 ## Templates
 
 **App Router** (`--template app`)
+
 - Next.js App Router file-system routing
 - React Server Components
 - API routes
 - Optimized for Cloudflare Workers
 
 **Pages Router** (`--template pages`)
+
 - Traditional Next.js Pages Router
 - Client-side navigation
 - Full middleware/routing/SSR support
 - API routes
 
 Both templates include:
+
 - TypeScript
 - Vite 8 + vinext plugin
 - `@cloudflare/vite-plugin` for Workers deployment
@@ -52,6 +55,7 @@ Both templates include:
 vinext is a Vite plugin that reimplements the Next.js API surface for deployment to Cloudflare Workers. It gives you the Next.js developer experience (routing, SSR, RSC, server actions) with Vite's build tooling.
 
 **Key features:**
+
 - File-system routing (`app/` or `pages/`)
 - Server Components and Server Actions
 - Edge-first architecture

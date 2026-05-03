@@ -1,15 +1,4 @@
-/**
- * Cloudflare Worker entry point for vinext Pages Router.
- *
- * The built server entry (virtual:vinext-server-entry) exports:
- * - renderPage(request, url, manifest) -> Response
- * - handleApiRoute(request, url) -> Response
- * - runMiddleware(request) -> middleware result
- * - vinextConfig -> embedded next.config.js settings
- *
- * Both use Web-standard Request/Response APIs, making them
- * directly usable in a Worker fetch handler.
- */
+// @ts-nocheck -- template file, modules resolved in scaffolded project
 import {
   matchRedirect,
   matchRewrite,
@@ -21,8 +10,12 @@ import {
 } from "vinext/config/config-matchers";
 import { mergeHeaders } from "vinext/server/worker-utils";
 
-// @ts-expect-error -- virtual module resolved by vinext at build time
-import { renderPage, handleApiRoute, runMiddleware, vinextConfig } from "virtual:vinext-server-entry";
+import {
+  renderPage,
+  handleApiRoute,
+  runMiddleware,
+  vinextConfig,
+} from "virtual:vinext-server-entry";
 
 // Extract config values (embedded at build time in the server entry)
 const basePath: string = vinextConfig?.basePath ?? "";
@@ -82,7 +75,9 @@ export default {
         const redirect = matchRedirect(pathname, configRedirects, reqCtx);
         if (redirect) {
           const dest = sanitizeDestination(
-            basePath && !isExternalUrl(redirect.destination) && !redirect.destination.startsWith(basePath)
+            basePath &&
+              !isExternalUrl(redirect.destination) &&
+              !redirect.destination.startsWith(basePath)
               ? basePath + redirect.destination
               : redirect.destination,
           );
@@ -198,9 +193,10 @@ export default {
 
       // API routes
       if (resolvedPathname.startsWith("/api/") || resolvedPathname === "/api") {
-        const response = typeof handleApiRoute === "function"
-          ? await handleApiRoute(request, resolvedUrl)
-          : new Response("404 - API route not found", { status: 404 });
+        const response =
+          typeof handleApiRoute === "function"
+            ? await handleApiRoute(request, resolvedUrl)
+            : new Response("404 - API route not found", { status: 404 });
         return mergeHeaders(response, middlewareHeaders, middlewareRewriteStatus);
       }
 
@@ -223,7 +219,11 @@ export default {
 
         // Fallback rewrites (if SSR returned 404)
         if (response && response.status === 404 && configRewrites.fallback?.length) {
-          const fallbackRewrite = matchRewrite(resolvedPathname, configRewrites.fallback, postMwReqCtx);
+          const fallbackRewrite = matchRewrite(
+            resolvedPathname,
+            configRewrites.fallback,
+            postMwReqCtx,
+          );
           if (fallbackRewrite) {
             if (isExternalUrl(fallbackRewrite)) {
               return proxyExternalRequest(request, fallbackRewrite);

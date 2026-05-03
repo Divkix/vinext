@@ -153,16 +153,9 @@ jobs:
         run: vp run build
         working-directory: packages/create-vinext-app
 
-      - name: Pack create-vinext-app for local testing
-        run: vp pm pack --pack-destination "${{ runner.temp }}"
-        working-directory: packages/create-vinext-app
-
-      - name: Install create-vinext-app globally
-        run: vp add -g "${{ runner.temp }}"/create-vinext-app-*.tgz
-
       - name: Scaffold a fresh create-vinext-app project
         run: |
-          create-vinext-app "${{ runner.temp }}/cva-test-${{ matrix.template }}" --yes --skip-install --no-git --template ${{ matrix.template }}
+          node packages/create-vinext-app/dist/index.js "${{ runner.temp }}/cva-test-${{ matrix.template }}" --yes --skip-install --no-git --template ${{ matrix.template }}
 
       - name: Verify project structure
         run: |

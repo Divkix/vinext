@@ -14,5 +14,13 @@
       "vinext/shims/*": ["./packages/vinext/src/shims/*"]
     }
   },
-  "exclude": ["node_modules", "dist", "fixtures", "tests/fixtures", "benchmarks", "examples", "packages/create-vinext-app/templates"]
+  "exclude": [
+    "node_modules",
+    "dist",
+    "fixtures",
+    "tests/fixtures",
+    "benchmarks",
+    "examples",
+    "packages/create-vinext-app/templates"
+  ]
 }
