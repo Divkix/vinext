@@ -658,7 +658,6 @@ async function _renderPage(request, url, manifest, middlewareHeaders) {
         renderDocumentToString(element) {
           return renderToStringAsync(element);
         },
-        renderIsrPassToStringAsync,
         renderToReadableStream(element) {
           return renderToReadableStream(element);
         },
