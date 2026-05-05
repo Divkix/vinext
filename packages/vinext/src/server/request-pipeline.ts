@@ -554,3 +554,104 @@ export function processMiddlewareHeaders(headers: Headers): void {
     headers.delete(key);
   }
 }
+
+/**
+ * Headers that are only used internally by Next.js and must not be honored
+ * from external requests. An attacker could forge these to influence routing
+ * or impersonate internal data fetches.
+ *
+ * Ported from Next.js `INTERNAL_HEADERS`:
+ * https://github.com/vercel/next.js/blob/canary/packages/next/src/server/lib/server-ipc/utils.ts
+ *
+ * Next.js strips these via `filterInternalHeaders()` at the router-server
+ * entry point before any handler sees the request:
+ * https://github.com/vercel/next.js/blob/canary/packages/next/src/server/lib/router-server.ts
+ */
+export const INTERNAL_HEADERS = [
+  "x-middleware-rewrite",
+  "x-middleware-redirect",
+  "x-middleware-set-cookie",
+  "x-middleware-skip",
+  "x-middleware-override-headers",
+  "x-middleware-next",
+  "x-now-route-matches",
+  "x-matched-path",
+  "x-nextjs-data",
+  "x-next-resume-state-length",
+];
+
+type RequestInitWithCf = RequestInit & { cf?: unknown };
+
+/**
+ * Strip internal headers from an inbound request so they cannot be forged by
+ * an external attacker to influence routing or impersonate internal state.
+ *
+ * Must be called at every request entry point BEFORE middleware, routing,
+ * or any handler logic accesses the request headers.
+ *
+ * Returns a new Headers object with internal headers removed. The input
+ * is never mutated — Request.headers is immutable in Workers/miniflare
+ * environments (see applyMiddlewareRequestHeaders in config-matchers.ts
+ * for the same cloning pattern).
+ *
+ * @param headers - The source Headers (never modified)
+ * @returns A new Headers with INTERNAL_HEADERS removed
+ */
+export function filterInternalHeaders(headers: Headers): Headers {
+  const filtered = new Headers();
+  for (const [key, value] of headers) {
+    if (!INTERNAL_HEADERS.includes(key.toLowerCase())) {
+      filtered.append(key, value);
+    }
+  }
+  return filtered;
+}
+
+function getRequestCf(request: Request): unknown | undefined {
+  const cf = Reflect.get(request, "cf");
+  return cf === undefined ? undefined : cf;
+}
+
+/**
+ * Clone a Request while overriding headers, preserving metadata when possible.
+ *
+ * Some runtimes (Workers) allow `new Request(request, { headers })` which
+ * retains redirect/signal/cf data. Others (Node/undici across realms) can throw
+ * when cloning a foreign Request instance. In that case, fall back to building
+ * a RequestInit with best-effort metadata.
+ */
+export function cloneRequestWithHeaders(request: Request, headers: Headers): Request {
+  let cloned: Request;
+  try {
+    cloned = new Request(request, { headers });
+  } catch {
+    const init: RequestInitWithCf = {
+      method: request.method,
+      headers,
+      body: request.body ?? undefined,
+      redirect: request.redirect,
+      signal: request.signal,
+      integrity: request.integrity,
+      cache: request.cache,
+      mode: request.mode,
+      credentials: request.credentials,
+      referrer: request.referrer,
+      referrerPolicy: request.referrerPolicy,
+    };
+    if (request.body) {
+      // @ts-expect-error — duplex needed for streaming request bodies
+      init.duplex = "half";
+    }
+    cloned = new Request(request.url, init);
+  }
+  const cf = getRequestCf(request);
+  if (cf !== undefined) {
+    // new Request() does not copy Workers-specific cf, so re-attach it.
+    Object.defineProperty(cloned, "cf", {
+      value: cf,
+      enumerable: true,
+      configurable: true,
+    });
+  }
+  return cloned;
+}

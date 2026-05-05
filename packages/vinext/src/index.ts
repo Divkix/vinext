@@ -44,7 +44,11 @@ import {
 import { findMiddlewareFile, runMiddleware } from "./server/middleware.js";
 import { logRequest, now } from "./server/request-log.js";
 import { normalizePath } from "./server/normalize-path.js";
-import { isOpenRedirectShaped } from "./server/request-pipeline.js";
+import {
+  filterInternalHeaders,
+  INTERNAL_HEADERS,
+  isOpenRedirectShaped,
+} from "./server/request-pipeline.js";
 import {
   findInstrumentationClientFile,
   findInstrumentationFile,
@@ -2361,13 +2365,21 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
               // preMiddlewareReqCtx and the middleware Request itself. Intentionally
               // captured once here — applyRequestHeadersToNodeRequest() mutates
               // req.headers later, but by then this Headers object is no longer read.
-              const nodeRequestHeaders = new Headers(
+              const rawHeaders = new Headers(
                 Object.fromEntries(
                   Object.entries(req.headers)
                     .filter(([, v]) => v !== undefined)
                     .map(([k, v]) => [k, Array.isArray(v) ? v.join(", ") : String(v)]),
                 ),
               );
+              // Strip internal headers from inbound requests so they cannot be
+              // forged to influence routing or impersonate internal state.
+              // Both the middleware Request (built below) and the SSR handler
+              // (which reads req.headers directly) must see clean headers.
+              const nodeRequestHeaders = filterInternalHeaders(rawHeaders);
+              for (const header of INTERNAL_HEADERS) {
+                delete req.headers[header];
+              }
 
               const requestOrigin = `http://${req.headers.host || "localhost"}`;
               const preMiddlewareReqUrl = new URL(url, requestOrigin);
