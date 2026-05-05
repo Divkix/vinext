@@ -1,13 +1,5 @@
 import { Suspense, type ComponentType, type ReactNode } from "react";
-import {
-  APP_INTERCEPTION_CONTEXT_KEY,
-  APP_ROOT_LAYOUT_KEY,
-  APP_ROUTE_KEY,
-  APP_UNMATCHED_SLOT_WIRE_VALUE,
-  createAppPayloadPageId,
-  createAppPayloadRouteId,
-  type AppElements,
-} from "./app-elements.js";
+import { AppElementsWire, type AppElements } from "./app-elements.js";
 import {
   ErrorBoundary,
   ForbiddenBoundary,
@@ -342,10 +334,9 @@ export function buildAppPageElements<
   TModule extends AppPageModule,
   TErrorModule extends AppPageErrorModule,
 >(options: BuildAppPageElementsOptions<TModule, TErrorModule>): AppElements {
-  const elements: Record<string, ReactNode | string | null> = {};
   const interceptionContext = options.interceptionContext ?? null;
-  const routeId = createAppPayloadRouteId(options.routePath, interceptionContext);
-  const pageId = createAppPayloadPageId(options.routePath, interceptionContext);
+  const routeId = AppElementsWire.encodeRouteId(options.routePath, interceptionContext);
+  const pageId = AppElementsWire.encodePageId(options.routePath, interceptionContext);
   const layoutEntries = createAppPageLayoutEntries(options.route);
   const templateEntries = createAppPageTemplateEntries(options.route);
   const layoutEntriesByTreePosition = new Map<number, AppPageLayoutEntry<TModule, TErrorModule>>();
@@ -367,6 +358,13 @@ export function buildAppPageElements<
   const templateDependenciesBeforeById = new Map<string, AppRenderDependency[]>();
   const pageDependencies: AppRenderDependency[] = [];
   const rootLayoutTreePath = layoutEntries[0]?.treePath ?? null;
+  const elements: Record<string, ReactNode | string | null> = {
+    ...AppElementsWire.createMetadataEntries({
+      interceptionContext,
+      rootLayoutTreePath,
+      routeId,
+    }),
+  };
   const slotNameCounts = new Map<string, number>();
   for (const slot of Object.values(options.route.slots ?? {})) {
     const slotName = slot.name;
@@ -419,9 +417,6 @@ export function buildAppPageElements<
     pageDependencies.push(templateDependency);
   }
 
-  elements[APP_ROUTE_KEY] = routeId;
-  elements[APP_INTERCEPTION_CONTEXT_KEY] = interceptionContext;
-  elements[APP_ROOT_LAYOUT_KEY] = rootLayoutTreePath;
   elements[pageId] = renderAfterAppDependencies(options.element, pageDependencies);
 
   for (const templateEntry of templateEntries) {
@@ -522,7 +517,7 @@ export function buildAppPageElements<
     const slotComponent = overrideOrPageComponent ?? defaultComponent;
 
     if (!slotComponent) {
-      elements[slotId] = APP_UNMATCHED_SLOT_WIRE_VALUE;
+      elements[slotId] = AppElementsWire.unmatchedSlotValue;
       continue;
     }
 
