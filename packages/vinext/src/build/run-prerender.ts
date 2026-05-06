@@ -93,6 +93,11 @@ type RunPrerenderOptions = {
    * Intended for tests that build to a custom outDir.
    */
   rscBundlePath?: string;
+  /**
+   * Maximum number of routes rendered in parallel.
+   * Defaults to prerenderApp/prerenderPages internal defaults when omitted.
+   */
+  concurrency?: number;
 };
 
 /**
@@ -214,6 +219,7 @@ export async function runPrerender(options: RunPrerenderOptions): Promise<Preren
         outDir,
         skipManifest: true,
         config,
+        concurrency: options.concurrency,
         rscBundlePath,
         // For hybrid builds pass the shared prod server via internal field.
         // prerenderApp will use it instead of starting its own.
@@ -247,6 +253,7 @@ export async function runPrerender(options: RunPrerenderOptions): Promise<Preren
         outDir,
         skipManifest: true,
         config,
+        concurrency: options.concurrency,
         // For hybrid builds pass the shared prod server; for single-router builds
         // fall back to the pages bundle path so prerenderPages starts its own.
         ...(sharedProdServer
