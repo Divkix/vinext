@@ -144,6 +144,8 @@ async function applyApprovedTestCommit(
 
 function stubWindow(href: string) {
   const assign = vi.fn();
+  const replace = vi.fn();
+  const storage = new Map<string, string>();
 
   vi.stubGlobal("window", {
     history: { state: null },
@@ -151,10 +153,22 @@ function stubWindow(href: string) {
       assign,
       href,
       origin: new URL(href).origin,
+      replace,
+    },
+    sessionStorage: {
+      getItem(key: string) {
+        return storage.get(key) ?? null;
+      },
+      removeItem(key: string) {
+        storage.delete(key);
+      },
+      setItem(key: string, value: string) {
+        storage.set(key, value);
+      },
     },
   });
 
-  return { assign };
+  return { assign, replace, storage };
 }
 
 afterEach(() => {
@@ -1987,6 +2001,139 @@ describe("app browser root-layout hard navigation", () => {
 
       expect(assign).toHaveBeenCalledTimes(1);
       await expect(pendingRouterState.promise).resolves.toBeDefined();
+    } finally {
+      detach();
+    }
+  });
+
+  it("blocks a repeated same-target root-boundary hard navigation to prevent reload loops", async () => {
+    const { controller, detach } = createControllerHarness(
+      createState({ rootLayoutTreePath: "/(marketing)" }),
+    );
+    const { assign, storage } = stubWindow("https://example.com/marketing");
+
+    try {
+      const firstNavId = controller.beginNavigation();
+      await expect(
+        controller.renderNavigationPayload({
+          actionType: "navigate",
+          createNavigationCommitEffect: () => () => {},
+          historyUpdateMode: "push",
+          navigationSnapshot: createClientNavigationRenderSnapshot(
+            "https://example.com/marketing",
+            {},
+          ),
+          nextElements: Promise.resolve(
+            createResolvedElements("route:/dashboard", "/(dashboard)", null, {
+              "page:/dashboard": React.createElement("main", null, "dashboard"),
+            }),
+          ),
+          operationLane: "navigation",
+          params: {},
+          pendingRouterState: null,
+          previousNextUrl: null,
+          targetHref: "https://example.com/dashboard",
+          navId: firstNavId,
+          useTransition: false,
+        }),
+      ).resolves.toBe("hard-navigate");
+      expect(assign).toHaveBeenCalledTimes(1);
+      expect(storage.size).toBe(1);
+
+      assign.mockClear();
+      window.location.href = "https://example.com/dashboard";
+      const secondNavId = controller.beginNavigation();
+      await expect(
+        controller.renderNavigationPayload({
+          actionType: "navigate",
+          createNavigationCommitEffect: () => () => {},
+          historyUpdateMode: "push",
+          navigationSnapshot: createClientNavigationRenderSnapshot(
+            "https://example.com/dashboard",
+            {},
+          ),
+          nextElements: Promise.resolve(
+            createResolvedElements("route:/dashboard", "/(dashboard)", null, {
+              "page:/dashboard": React.createElement("main", null, "dashboard"),
+            }),
+          ),
+          operationLane: "navigation",
+          params: {},
+          pendingRouterState: null,
+          previousNextUrl: null,
+          targetHref: "https://example.com/dashboard",
+          navId: secondNavId,
+          useTransition: false,
+        }),
+      ).resolves.toBe("no-commit");
+      expect(assign).not.toHaveBeenCalled();
+      expect(storage.size).toBe(0);
+    } finally {
+      detach();
+    }
+  });
+
+  it("allows cross-page hard navigation when the stored guard target is not the current URL", async () => {
+    const { controller, detach } = createControllerHarness(
+      createState({ rootLayoutTreePath: "/(marketing)" }),
+    );
+    const { assign } = stubWindow("https://example.com/marketing");
+
+    try {
+      const firstNavId = controller.beginNavigation();
+      await expect(
+        controller.renderNavigationPayload({
+          actionType: "navigate",
+          createNavigationCommitEffect: () => () => {},
+          historyUpdateMode: "push",
+          navigationSnapshot: createClientNavigationRenderSnapshot(
+            "https://example.com/marketing",
+            {},
+          ),
+          nextElements: Promise.resolve(
+            createResolvedElements("route:/dashboard", "/(dashboard)", null, {
+              "page:/dashboard": React.createElement("main", null, "dashboard"),
+            }),
+          ),
+          operationLane: "navigation",
+          params: {},
+          pendingRouterState: null,
+          previousNextUrl: null,
+          targetHref: "https://example.com/dashboard",
+          navId: firstNavId,
+          useTransition: false,
+        }),
+      ).resolves.toBe("hard-navigate");
+      expect(assign).toHaveBeenCalledTimes(1);
+
+      assign.mockClear();
+      window.location.href = "https://example.com/settings";
+      const secondNavId = controller.beginNavigation();
+      await expect(
+        controller.renderNavigationPayload({
+          actionType: "navigate",
+          createNavigationCommitEffect: () => () => {},
+          historyUpdateMode: "push",
+          navigationSnapshot: createClientNavigationRenderSnapshot(
+            "https://example.com/settings",
+            {},
+          ),
+          nextElements: Promise.resolve(
+            createResolvedElements("route:/dashboard", "/(dashboard)", null, {
+              "page:/dashboard": React.createElement("main", null, "dashboard"),
+            }),
+          ),
+          operationLane: "navigation",
+          params: {},
+          pendingRouterState: null,
+          previousNextUrl: null,
+          targetHref: "https://example.com/dashboard",
+          navId: secondNavId,
+          useTransition: false,
+        }),
+      ).resolves.toBe("hard-navigate");
+      expect(assign).toHaveBeenCalledTimes(1);
+      expect(assign).toHaveBeenCalledWith("https://example.com/dashboard");
     } finally {
       detach();
     }
