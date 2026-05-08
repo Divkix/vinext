@@ -100,6 +100,8 @@ export function createRequestContext(opts?: Partial<UnifiedRequestContext>): Uni
     currentRequestTags: [],
     currentFetchSoftTags: [],
     currentFetchCacheMode: null,
+    isFetchDedupeActive: false,
+    currentFetchDedupeEntries: new Map(),
     executionContext: _getInheritedExecutionContext(), // inherits from standalone ALS if present
     requestCache: new WeakMap(),
     ssrContext: null,
