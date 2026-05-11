@@ -42,12 +42,6 @@ import {
   getRequestContext,
   runWithUnifiedStateMutation,
 } from "./unified-request-context.js";
-import { UseCacheTimeoutError, UseCacheDeadlockError } from "./use-cache-errors.js";
-import {
-  getUseCacheProbe,
-  isInsideUseCacheProbe,
-  type UseCacheProbeRequestSnapshot,
-} from "./use-cache-probe-globals.js";
 
 // ---------------------------------------------------------------------------
 // Cache execution context — AsyncLocalStorage for cacheLife/cacheTag
@@ -408,6 +402,14 @@ export function registerCachedFunction<T extends (...args: any[]) => Promise<any
       const USE_CACHE_TIMEOUT_MS = 54_000;
       const fillDeadlineAt = performance.now() + USE_CACHE_TIMEOUT_MS;
 
+      const [
+        { UseCacheTimeoutError, UseCacheDeadlockError },
+        { getUseCacheProbe, isInsideUseCacheProbe },
+      ] = await Promise.all([
+        import("./use-cache-errors.js"),
+        import("./use-cache-probe-globals.js"),
+      ]);
+
       const timeoutError = new UseCacheTimeoutError();
       const deadlockError = new UseCacheDeadlockError();
 
@@ -421,7 +423,7 @@ export function registerCachedFunction<T extends (...args: any[]) => Promise<any
         const requestCtx = getRequestContext();
         const headers = requestCtx.headersContext?.headers;
         const navCtx = requestCtx.serverContext;
-        const requestSnapshot: UseCacheProbeRequestSnapshot = {
+        const requestSnapshot = {
           headers: headers ? Array.from(headers.entries()) : [],
           cookieHeader: headers?.get("cookie") ?? undefined,
           urlPathname: navCtx?.pathname ?? "/",
