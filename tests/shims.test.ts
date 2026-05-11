@@ -5668,6 +5668,98 @@ describe('"use cache" runtime', () => {
   });
 });
 
+describe("use-cache errors", () => {
+  it("UseCacheTimeoutError has correct digest and message", async () => {
+    const { UseCacheTimeoutError, isUseCacheTimeoutError } =
+      await import("../packages/vinext/src/shims/use-cache-errors.js");
+    const err = new UseCacheTimeoutError();
+    expect(err.digest).toBe("USE_CACHE_TIMEOUT");
+    expect(err.message).toContain("timed out");
+    expect(isUseCacheTimeoutError(err)).toBe(true);
+    expect(isUseCacheTimeoutError(new Error("other"))).toBe(false);
+  });
+
+  it("UseCacheDeadlockError has correct digest and message", async () => {
+    const { UseCacheDeadlockError, isUseCacheDeadlockError } =
+      await import("../packages/vinext/src/shims/use-cache-errors.js");
+    const err = new UseCacheDeadlockError();
+    expect(err.digest).toBe("USE_CACHE_DEADLOCK");
+    expect(err.message).toContain("shared state");
+    expect(isUseCacheDeadlockError(err)).toBe(true);
+    expect(isUseCacheDeadlockError(new Error("other"))).toBe(false);
+  });
+});
+
+describe("use-cache probe scheduler", () => {
+  it("setupProbeScheduler returns stream unchanged when no probe is installed", async () => {
+    const { setupProbeScheduler } =
+      await import("../packages/vinext/src/server/use-cache-probe-scheduler.js");
+
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array([1, 2, 3]));
+        controller.close();
+      },
+    });
+
+    const abortController = new AbortController();
+    const result = setupProbeScheduler({
+      cacheContext: { functionId: "test:fn", handlerKind: "" },
+      encodedArguments: "[]",
+      fillDeadlineAt: performance.now() + 60_000,
+      stream,
+      abortSignal: abortController.signal,
+      onProbeCompleted: () => {},
+      requestSnapshot: {
+        headers: [],
+        cookieHeader: undefined,
+        urlPathname: "/",
+        urlSearch: "",
+        rootParams: {},
+        isDraftMode: false,
+        isHmrRefresh: false,
+      },
+    });
+
+    // When no probe is installed globally, the stream should pass through unchanged.
+    expect(result).toBe(stream);
+  });
+
+  it("setupProbeScheduler returns stream unchanged when budget is too short", async () => {
+    const { setupProbeScheduler } =
+      await import("../packages/vinext/src/server/use-cache-probe-scheduler.js");
+
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array([1, 2, 3]));
+        controller.close();
+      },
+    });
+
+    const abortController = new AbortController();
+    const result = setupProbeScheduler({
+      cacheContext: { functionId: "test:fn", handlerKind: "" },
+      encodedArguments: "[]",
+      // Budget is less than PROBE_THRESHOLD_MS + MIN_PROBE_BUDGET_MS
+      fillDeadlineAt: performance.now() + 5_000,
+      stream,
+      abortSignal: abortController.signal,
+      onProbeCompleted: () => {},
+      requestSnapshot: {
+        headers: [],
+        cookieHeader: undefined,
+        urlPathname: "/",
+        urlSearch: "",
+        rootParams: {},
+        isDraftMode: false,
+        isHmrRefresh: false,
+      },
+    });
+
+    expect(result).toBe(stream);
+  });
+});
+
 describe("replyToCacheKey deterministic hashing", () => {
   it("returns string replies as-is", async () => {
     const { replyToCacheKey } = await import("../packages/vinext/src/shims/cache-runtime.js");

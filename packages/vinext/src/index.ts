@@ -22,6 +22,7 @@ import { isImageOptimizationPath } from "./server/image-optimization.js";
 import { installSocketErrorBackstop } from "./server/socket-error-backstop.js";
 import { shouldInvalidateAppRouteFile } from "./server/dev-route-files.js";
 import { createDirectRunner } from "./server/dev-module-runner.js";
+import { initUseCacheProbePool, tearDownUseCacheProbePool } from "./server/use-cache-probe-pool.js";
 import { generateRscEntry } from "./entries/app-rsc-entry.js";
 import { generateSsrEntry } from "./entries/app-ssr-entry.js";
 import {
@@ -2994,6 +2995,9 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
           invalidateAppRouteCache();
           invalidateRscEntryModule();
           invalidateRootParamsModule();
+          // Tear down the use-cache probe pool so the next probe starts with
+          // fresh code after HMR invalidation.
+          tearDownUseCacheProbePool();
         }
 
         let appRouteTypeGeneration: Promise<void> | null = null;
@@ -3127,6 +3131,14 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
           //      it is flushed to the client.
           //   2. Logs the full request after res finishes, using those timings.
           if (hasAppDir) {
+            // Initialize the "use cache" deadlock probe pool for the App
+            // Router dev server. We bind to the RSC environment because
+            // "use cache" functions run inside the RSC module graph.
+            const rscEnv = server.environments["rsc"];
+            if (rscEnv) {
+              initUseCacheProbePool(rscEnv);
+            }
+
             server.middlewares.use((req, res, next) => {
               const url = req.url ?? "/";
               // Skip Vite internals, HMR, and static assets.
