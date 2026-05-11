@@ -1,7 +1,7 @@
 /**
  * use-cache-probe-pool.ts
  *
- * Manages a pool of isolated ModuleRunners for "use cache" deadlock probes.
+ * Manages isolated ModuleRunners for "use cache" deadlock probes.
  *
  * In dev mode, when a cache fill appears stuck, we re-run the same cache
  * function in a fresh module graph. If it completes there but the main fill
@@ -23,40 +23,26 @@ import { ModuleRunner } from "vite/module-runner";
 import { setUseCacheProbe } from "vinext/shims/use-cache-probe-globals";
 import { UseCacheTimeoutError } from "vinext/shims/use-cache-errors";
 
-let _activeProbeRunners: ModuleRunner[] | null = null;
-let _environment: DevEnvironmentLike | DevEnvironment | null = null;
-const MAX_RUNNERS = 4;
-
-function getProbeRunner(): ModuleRunner {
-  if (!_activeProbeRunners || _activeProbeRunners.length === 0) {
-    throw new Error("[vinext] use cache probe pool not initialized");
-  }
-  // Round-robin across runners for basic load distribution.
-  const runner = _activeProbeRunners.shift()!;
-  _activeProbeRunners.push(runner);
-  return runner;
-}
+let _probeEnvironment: DevEnvironmentLike | DevEnvironment | null = null;
 
 /**
- * Initialize the probe pool with a set of fresh ModuleRunners bound to the
- * given Vite dev environment.
+ * Initialize the probe pool with the Vite dev environment.
  *
  * Called once during configureServer() when the App Router dev server starts.
  */
 export function initUseCacheProbePool(environment: DevEnvironmentLike | DevEnvironment): void {
-  if (_activeProbeRunners) {
+  if (_probeEnvironment) {
     // Already initialized — no-op. The environment is the same for the
     // lifetime of the dev server.
     return;
   }
-  _environment = environment;
-  _activeProbeRunners = [];
-  for (let i = 0; i < MAX_RUNNERS; i++) {
-    _activeProbeRunners.push(createProbeRunner(environment));
-  }
+  _probeEnvironment = environment;
 
   setUseCacheProbe(async (msg) => {
-    const runner = getProbeRunner();
+    // Create a fresh runner per probe so the module graph is completely
+    // isolated from previous probes. Reusing runners would leave stale
+    // top-level state in EvaluatedModules.
+    const runner = createProbeRunner(_probeEnvironment!);
     const { id, kind, encodedArguments, request, timeoutMs } = msg;
 
     // Internal timeout so the probe aborts before the outer render timeout.
@@ -120,17 +106,14 @@ export function initUseCacheProbePool(environment: DevEnvironmentLike | DevEnvir
 
       // Run the function with a reconstructed request store so private caches
       // that read cookies()/headers()/draftMode() see the same values.
-      const result = await runWithProbeRequestStore(request, async () => wrapped(...args));
-
-      // Wait for the result, but enforce the internal timeout.
+      // Race against the internal timeout.
       const remaining = deadline - Date.now();
       if (remaining <= 0) {
         return false;
       }
 
-      // If we got here, the probe completed.
       await Promise.race([
-        Promise.resolve(result),
+        runWithProbeRequestStore(runner, request, async () => wrapped(...args)),
         new Promise<never>((_, reject) => {
           const t = setTimeout(() => reject(new UseCacheTimeoutError()), remaining);
           // Ensure timer is cleaned up on success via unref if available.
@@ -146,6 +129,8 @@ export function initUseCacheProbePool(environment: DevEnvironmentLike | DevEnvir
       // even in isolation, or the module import failed. Fall back to the
       // regular timeout.
       return false;
+    } finally {
+      runner.close().catch(() => {});
     }
   });
 }
@@ -155,13 +140,7 @@ export function initUseCacheProbePool(environment: DevEnvironmentLike | DevEnvir
  * probe starts with fresh code.
  */
 export function tearDownUseCacheProbePool(): void {
-  if (_activeProbeRunners) {
-    for (const runner of _activeProbeRunners) {
-      runner.close().catch(() => {});
-    }
-    _activeProbeRunners = null;
-  }
-  _environment = null;
+  _probeEnvironment = null;
   setUseCacheProbe(undefined);
 }
 
@@ -170,6 +149,7 @@ export function tearDownUseCacheProbePool(): void {
  * cookies(), headers(), and draftMode() behave correctly.
  */
 async function runWithProbeRequestStore<T>(
+  runner: ModuleRunner,
   requestSnapshot: {
     headers: [string, string][];
     cookieHeader: string | undefined;
@@ -181,35 +161,28 @@ async function runWithProbeRequestStore<T>(
   },
   fn: () => Promise<T>,
 ): Promise<T> {
-  // Import the ALS-backed request-context modules in the isolated runner.
-  const unifiedCtx = (async () => {
-    // These imports run inside the probe runner's module graph.
-    // We dynamic-import them because the probe runner doesn't share
-    // module state with the main runner.
-    const { createRequestContext, runWithRequestContext } =
-      (await import("vinext/shims/unified-request-context")) as typeof import("vinext/shims/unified-request-context");
+  // Import the ALS-backed request-context modules through the probe runner
+  // so they load inside the isolated module graph, not the main runner's.
+  const { createRequestContext, runWithRequestContext } = (await runner.import(
+    "vinext/shims/unified-request-context",
+  )) as typeof import("vinext/shims/unified-request-context");
 
-    const { headersContextFromRequest } =
-      (await import("vinext/shims/headers")) as typeof import("vinext/shims/headers");
+  const { headersContextFromRequest } = (await runner.import(
+    "vinext/shims/headers",
+  )) as typeof import("vinext/shims/headers");
 
-    // Build a Request from the snapshot so headersContextFromRequest works.
-    const url = new URL(
-      requestSnapshot.urlPathname + requestSnapshot.urlSearch,
-      "http://localhost",
-    );
-    const request = new Request(url, {
-      headers: new Headers(requestSnapshot.headers),
-    });
+  // Build a Request from the snapshot so headersContextFromRequest works.
+  const url = new URL(requestSnapshot.urlPathname + requestSnapshot.urlSearch, "http://localhost");
+  const request = new Request(url, {
+    headers: new Headers(requestSnapshot.headers),
+  });
 
-    const headersContext = headersContextFromRequest(request);
-    const ctx = createRequestContext({
-      headersContext,
-      executionContext: null,
-      rootParams: requestSnapshot.rootParams as Record<string, string | string[]>,
-    });
+  const headersContext = headersContextFromRequest(request);
+  const ctx = createRequestContext({
+    headersContext,
+    executionContext: null,
+    rootParams: requestSnapshot.rootParams as Record<string, string | string[]>,
+  });
 
-    return runWithRequestContext(ctx, fn);
-  })();
-
-  return unifiedCtx;
+  return runWithRequestContext(ctx, fn);
 }
