@@ -46,12 +46,6 @@ import {
   runWithUnifiedStateMutation,
 } from "./unified-request-context.js";
 import { markDynamicUsage } from "./headers.js";
-import { UseCacheTimeoutError, UseCacheDeadlockError } from "./use-cache-errors.js";
-import {
-  getUseCacheProbe,
-  isInsideUseCacheProbe,
-  type UseCacheProbeRequestSnapshot,
-} from "./use-cache-probe-globals.js";
 
 // ---------------------------------------------------------------------------
 // Constants for nested-dynamic cache life detection
@@ -531,6 +525,14 @@ export function registerCachedFunction<TArgs extends unknown[], TResult>(
       const USE_CACHE_TIMEOUT_MS = 54_000;
       const fillDeadlineAt = performance.now() + USE_CACHE_TIMEOUT_MS;
 
+      const [
+        { UseCacheTimeoutError, UseCacheDeadlockError },
+        { getUseCacheProbe, isInsideUseCacheProbe },
+      ] = await Promise.all([
+        import("./use-cache-errors.js"),
+        import("./use-cache-probe-globals.js"),
+      ]);
+
       const timeoutError = new UseCacheTimeoutError();
       const deadlockError = new UseCacheDeadlockError();
 
@@ -544,7 +546,7 @@ export function registerCachedFunction<TArgs extends unknown[], TResult>(
         const requestCtx = getRequestContext();
         const headers = requestCtx.headersContext?.headers;
         const navCtx = requestCtx.serverContext;
-        const requestSnapshot: UseCacheProbeRequestSnapshot = {
+        const requestSnapshot = {
           headers: headers ? Array.from(headers.entries()) : [],
           cookieHeader: headers?.get("cookie") ?? undefined,
           urlPathname: navCtx?.pathname ?? "/",

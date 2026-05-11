@@ -5727,14 +5727,16 @@ describe("use-cache deadlock probe behavior", () => {
     const cached = registerCachedFunction(fn, "test:no-recurse", "");
 
     setInsideUseCacheProbe(true);
-    const result = await cached();
-    setInsideUseCacheProbe(false);
-
-    expect(result).toBe("result");
-    expect(probeCalled).toBe(false);
-
-    process.env.NODE_ENV = originalNodeEnv;
-    setUseCacheProbe(undefined);
+    let result: unknown;
+    try {
+      result = await cached();
+      expect(result).toBe("result");
+      expect(probeCalled).toBe(false);
+    } finally {
+      setInsideUseCacheProbe(false);
+      process.env.NODE_ENV = originalNodeEnv;
+      setUseCacheProbe(undefined);
+    }
   });
 });
 

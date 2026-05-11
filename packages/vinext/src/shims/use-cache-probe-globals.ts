@@ -37,9 +37,12 @@ export function getUseCacheProbe(): UseCacheProbe | undefined {
 }
 
 export function setInsideUseCacheProbe(value: boolean): void {
-  (globalThis as Record<symbol, unknown>)[INSIDE_PROBE_SYMBOL] = value;
+  const current = ((globalThis as Record<symbol, unknown>)[INSIDE_PROBE_SYMBOL] as number) || 0;
+  (globalThis as Record<symbol, unknown>)[INSIDE_PROBE_SYMBOL] = value
+    ? current + 1
+    : Math.max(0, current - 1);
 }
 
 export function isInsideUseCacheProbe(): boolean {
-  return !!(globalThis as Record<symbol, unknown>)[INSIDE_PROBE_SYMBOL];
+  return (((globalThis as Record<symbol, unknown>)[INSIDE_PROBE_SYMBOL] as number) || 0) > 0;
 }

@@ -50,6 +50,7 @@ export function initUseCacheProbePool(environment: DevEnvironmentLike | DevEnvir
     // Internal timeout so the probe aborts before the outer render timeout.
     const deadline = Date.now() + timeoutMs;
 
+    let probeTimeoutTimer: ReturnType<typeof setTimeout> | undefined;
     setInsideUseCacheProbe(true);
     try {
       // Import the cache-runtime shim in the isolated runner.
@@ -73,6 +74,7 @@ export function initUseCacheProbePool(environment: DevEnvironmentLike | DevEnvir
       // We need to locate the original cached function module in the isolated
       // runner. The function id is "<modulePath>:<exportName>". We split it
       // to find the module and the export.
+      // NOTE: This assumes export names don't contain colons.
       const lastColon = id.lastIndexOf(":");
       const modulePath = lastColon >= 0 ? id.slice(0, lastColon) : id;
       const exportName = lastColon >= 0 ? id.slice(lastColon + 1) : "default";
@@ -118,10 +120,9 @@ export function initUseCacheProbePool(environment: DevEnvironmentLike | DevEnvir
       await Promise.race([
         runWithProbeRequestStore(runner, request, async () => wrapped(...args)),
         new Promise<never>((_, reject) => {
-          const t = setTimeout(() => reject(new UseCacheTimeoutError()), remaining);
-          // Ensure timer is cleaned up on success via unref if available.
-          if (typeof (t as NodeJS.Timeout).unref === "function") {
-            (t as NodeJS.Timeout).unref();
+          probeTimeoutTimer = setTimeout(() => reject(new UseCacheTimeoutError()), remaining);
+          if (typeof (probeTimeoutTimer as NodeJS.Timeout).unref === "function") {
+            (probeTimeoutTimer as NodeJS.Timeout).unref();
           }
         }),
       ]);
@@ -134,6 +135,7 @@ export function initUseCacheProbePool(environment: DevEnvironmentLike | DevEnvir
       return false;
     } finally {
       setInsideUseCacheProbe(false);
+      if (probeTimeoutTimer !== undefined) clearTimeout(probeTimeoutTimer);
       runner.close().catch(() => {});
     }
   });
