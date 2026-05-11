@@ -47,7 +47,11 @@ import {
 } from "./unified-request-context.js";
 import { markDynamicUsage } from "./headers.js";
 import { UseCacheTimeoutError, UseCacheDeadlockError } from "./use-cache-errors.js";
-import { getUseCacheProbe, type UseCacheProbeRequestSnapshot } from "./use-cache-probe-globals.js";
+import {
+  getUseCacheProbe,
+  isInsideUseCacheProbe,
+  type UseCacheProbeRequestSnapshot,
+} from "./use-cache-probe-globals.js";
 
 // ---------------------------------------------------------------------------
 // Constants for nested-dynamic cache life detection
@@ -535,7 +539,7 @@ export function registerCachedFunction<TArgs extends unknown[], TResult>(
       let probePromise: Promise<never> | null = null;
       const probe = getUseCacheProbe();
 
-      if (probe) {
+      if (probe && !isInsideUseCacheProbe()) {
         // Capture the current request store snapshot for the probe.
         const requestCtx = getRequestContext();
         const headers = requestCtx.headersContext?.headers;
@@ -546,8 +550,6 @@ export function registerCachedFunction<TArgs extends unknown[], TResult>(
           urlPathname: navCtx?.pathname ?? "/",
           urlSearch: navCtx?.searchParams?.toString() ?? "",
           rootParams: requestCtx.rootParams ?? {},
-          isDraftMode: false,
-          isHmrRefresh: false,
         };
 
         probePromise = new Promise<never>((_, reject) => {

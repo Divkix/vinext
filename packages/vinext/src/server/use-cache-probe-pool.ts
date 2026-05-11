@@ -18,9 +18,9 @@
  */
 
 import type { DevEnvironment } from "vite";
-import { createProbeRunner, type DevEnvironmentLike } from "./dev-module-runner.js";
-import { ModuleRunner } from "vite/module-runner";
-import { setUseCacheProbe } from "vinext/shims/use-cache-probe-globals";
+import { createDirectRunner, type DevEnvironmentLike } from "./dev-module-runner.js";
+import type { ModuleRunner } from "vite/module-runner";
+import { setUseCacheProbe, setInsideUseCacheProbe } from "vinext/shims/use-cache-probe-globals";
 import { UseCacheTimeoutError } from "vinext/shims/use-cache-errors";
 
 let _probeEnvironment: DevEnvironmentLike | DevEnvironment | null = null;
@@ -42,12 +42,15 @@ export function initUseCacheProbePool(environment: DevEnvironmentLike | DevEnvir
     // Create a fresh runner per probe so the module graph is completely
     // isolated from previous probes. Reusing runners would leave stale
     // top-level state in EvaluatedModules.
-    const runner = createProbeRunner(_probeEnvironment!);
+    // createDirectRunner creates a fresh ModuleRunner with its own isolated
+    // EvaluatedModules instance, which is exactly what we need for probes.
+    const runner = createDirectRunner(_probeEnvironment!);
     const { id, kind, encodedArguments, request, timeoutMs } = msg;
 
     // Internal timeout so the probe aborts before the outer render timeout.
     const deadline = Date.now() + timeoutMs;
 
+    setInsideUseCacheProbe(true);
     try {
       // Import the cache-runtime shim in the isolated runner.
       // The shim's registerCachedFunction will create fresh module-scope state.
@@ -130,6 +133,7 @@ export function initUseCacheProbePool(environment: DevEnvironmentLike | DevEnvir
       // regular timeout.
       return false;
     } finally {
+      setInsideUseCacheProbe(false);
       runner.close().catch(() => {});
     }
   });
@@ -156,8 +160,6 @@ async function runWithProbeRequestStore<T>(
     urlPathname: string;
     urlSearch: string;
     rootParams: Record<string, unknown>;
-    isDraftMode: boolean;
-    isHmrRefresh: boolean;
   },
   fn: () => Promise<T>,
 ): Promise<T> {

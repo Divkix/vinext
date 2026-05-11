@@ -10,6 +10,7 @@
  */
 
 const SYMBOL = Symbol.for("vinext.dev.useCacheProbe");
+const INSIDE_PROBE_SYMBOL = Symbol.for("vinext.dev.useCacheProbe.inside");
 
 export type UseCacheProbeRequestSnapshot = {
   headers: [string, string][];
@@ -17,8 +18,6 @@ export type UseCacheProbeRequestSnapshot = {
   urlPathname: string;
   urlSearch: string;
   rootParams: Record<string, unknown>;
-  isDraftMode: boolean;
-  isHmrRefresh: boolean;
 };
 
 export type UseCacheProbe = (msg: {
@@ -35,4 +34,12 @@ export function setUseCacheProbe(fn: UseCacheProbe | undefined): void {
 
 export function getUseCacheProbe(): UseCacheProbe | undefined {
   return (globalThis as Record<symbol, unknown>)[SYMBOL] as UseCacheProbe | undefined;
+}
+
+export function setInsideUseCacheProbe(value: boolean): void {
+  (globalThis as Record<symbol, unknown>)[INSIDE_PROBE_SYMBOL] = value;
+}
+
+export function isInsideUseCacheProbe(): boolean {
+  return !!(globalThis as Record<symbol, unknown>)[INSIDE_PROBE_SYMBOL];
 }
