@@ -43,7 +43,11 @@ import {
   runWithUnifiedStateMutation,
 } from "./unified-request-context.js";
 import { UseCacheTimeoutError, UseCacheDeadlockError } from "./use-cache-errors.js";
-import { getUseCacheProbe, type UseCacheProbeRequestSnapshot } from "./use-cache-probe-globals.js";
+import {
+  getUseCacheProbe,
+  isInsideUseCacheProbe,
+  type UseCacheProbeRequestSnapshot,
+} from "./use-cache-probe-globals.js";
 
 // ---------------------------------------------------------------------------
 // Cache execution context — AsyncLocalStorage for cacheLife/cacheTag
@@ -412,7 +416,7 @@ export function registerCachedFunction<T extends (...args: any[]) => Promise<any
       let probePromise: Promise<never> | null = null;
       const probe = getUseCacheProbe();
 
-      if (probe) {
+      if (probe && !isInsideUseCacheProbe()) {
         // Capture the current request store snapshot for the probe.
         const requestCtx = getRequestContext();
         const headers = requestCtx.headersContext?.headers;
@@ -423,8 +427,6 @@ export function registerCachedFunction<T extends (...args: any[]) => Promise<any
           urlPathname: navCtx?.pathname ?? "/",
           urlSearch: navCtx?.searchParams?.toString() ?? "",
           rootParams: requestCtx.rootParams ?? {},
-          isDraftMode: false,
-          isHmrRefresh: false,
         };
 
         probePromise = new Promise<never>((_, reject) => {

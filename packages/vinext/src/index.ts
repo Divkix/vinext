@@ -2045,6 +2045,11 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
           // Tear down the use-cache probe pool so the next probe starts with
           // fresh code after HMR invalidation.
           tearDownUseCacheProbePool();
+          // Re-initialize so probes continue working after HMR.
+          const rscEnv = server.environments["rsc"];
+          if (rscEnv) {
+            initUseCacheProbePool(rscEnv);
+          }
         }
 
         // Node throws on unhandled 'error' events on sockets. When a browser

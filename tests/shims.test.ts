@@ -2925,6 +2925,54 @@ describe("use-cache errors", () => {
     expect(isUseCacheDeadlockError(err)).toBe(true);
     expect(isUseCacheDeadlockError(new Error("other"))).toBe(false);
   });
+
+  it("UseCacheTimeoutError has correct name", async () => {
+    const { UseCacheTimeoutError } =
+      await import("../packages/vinext/src/shims/use-cache-errors.js");
+    const err = new UseCacheTimeoutError();
+    expect(err.name).toBe("UseCacheTimeoutError");
+  });
+
+  it("UseCacheDeadlockError has correct name", async () => {
+    const { UseCacheDeadlockError } =
+      await import("../packages/vinext/src/shims/use-cache-errors.js");
+    const err = new UseCacheDeadlockError();
+    expect(err.name).toBe("UseCacheDeadlockError");
+  });
+});
+
+describe("use-cache deadlock probe behavior", () => {
+  it("does not schedule probe when isInsideUseCacheProbe is true", async () => {
+    const { setUseCacheProbe, setInsideUseCacheProbe } =
+      await import("../packages/vinext/src/shims/use-cache-probe-globals.js");
+
+    let probeCalled = false;
+    setUseCacheProbe(async () => {
+      probeCalled = true;
+      return true;
+    });
+
+    // Ensure dev mode path is taken by resetting modules and setting NODE_ENV
+    const originalNodeEnv = process.env.NODE_ENV;
+    process.env.NODE_ENV = "development";
+    vi.resetModules();
+
+    const { registerCachedFunction } =
+      await import("../packages/vinext/src/shims/cache-runtime.js");
+
+    const fn = async () => "result";
+    const cached = registerCachedFunction(fn, "test:no-recurse", "");
+
+    setInsideUseCacheProbe(true);
+    const result = await cached();
+    setInsideUseCacheProbe(false);
+
+    expect(result).toBe("result");
+    expect(probeCalled).toBe(false);
+
+    process.env.NODE_ENV = originalNodeEnv;
+    setUseCacheProbe(undefined);
+  });
 });
 
 describe("replyToCacheKey deterministic hashing", () => {
