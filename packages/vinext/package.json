@@ -68,6 +68,7 @@
     "@vercel/og": "catalog:",
     "image-size": "catalog:",
     "magic-string": "catalog:",
+    "tinypool": "2.1.0",
     "vite-plugin-commonjs": "catalog:",
     "vite-tsconfig-paths": "catalog:"
   },

@@ -65,7 +65,7 @@ import type { DevEnvironment } from "vite";
  * environment types — including Cloudflare's custom environments that don't
  * support the hot-channel-based transport.
  */
-type DevEnvironmentLike = {
+export type DevEnvironmentLike = {
   fetchModule: (
     id: string,
     importer?: string,
@@ -114,6 +114,54 @@ export function createDirectRunner(environment: DevEnvironmentLike | DevEnvironm
             return { result: [] };
           }
 
+          return {
+            error: {
+              name: "Error",
+              message: `[vinext] Unexpected ModuleRunner invoke: ${name}`,
+            },
+          };
+        },
+      },
+      createImportMeta: createNodeImportMeta,
+      sourcemapInterceptor: false,
+      hmr: false,
+    },
+    new ESModulesEvaluator(),
+  );
+}
+
+/**
+ * Create a fresh ModuleRunner with its own isolated module graph.
+ *
+ * Used by the "use cache" deadlock probe to re-import a cache function
+ * with zero shared module-scope state from the main request pipeline.
+ * Each probe gets a brand-new `EvaluatedModules` instance so top-level
+ * `Map`s, `Promise`s, etc. are recreated from scratch.
+ *
+ * The transport delegates to the same `environment.fetchModule()`, so
+ * Vite transforms and HMR still work, but the *evaluated* module cache
+ * is completely separate.
+ */
+export function createProbeRunner(environment: DevEnvironmentLike | DevEnvironment): ModuleRunner {
+  return new ModuleRunner(
+    {
+      transport: {
+        // oxlint-disable-next-line @typescript-eslint/no-explicit-any
+        invoke: async (payload: any) => {
+          const { name, data: args } = payload.data;
+          if (name === "fetchModule") {
+            const [id, importer, options] = args as [
+              string,
+              string | undefined,
+              { cached?: boolean; startOffset?: number } | undefined,
+            ];
+            return {
+              result: await environment.fetchModule(id, importer, options),
+            };
+          }
+          if (name === "getBuiltins") {
+            return { result: [] };
+          }
           return {
             error: {
               name: "Error",

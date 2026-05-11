@@ -42,6 +42,8 @@ import {
   getRequestContext,
   runWithUnifiedStateMutation,
 } from "./unified-request-context.js";
+import { UseCacheTimeoutError, UseCacheDeadlockError } from "./use-cache-errors.js";
+import { getUseCacheProbe, type UseCacheProbeRequestSnapshot } from "./use-cache-probe-globals.js";
 
 // ---------------------------------------------------------------------------
 // Cache execution context — AsyncLocalStorage for cacheLife/cacheTag
@@ -399,7 +401,69 @@ export function registerCachedFunction<T extends (...args: any[]) => Promise<any
     // In dev mode, always execute fresh — skip shared cache lookup/storage.
     // This ensures HMR changes are reflected immediately.
     if (isDev) {
-      return executeWithContext(fn, args, cacheVariant);
+      const USE_CACHE_TIMEOUT_MS = 54_000;
+      const fillDeadlineAt = performance.now() + USE_CACHE_TIMEOUT_MS;
+
+      const timeoutError = new UseCacheTimeoutError();
+      const deadlockError = new UseCacheDeadlockError();
+
+      let probePromise: Promise<never> | null = null;
+      const probe = getUseCacheProbe();
+
+      if (probe) {
+        // Capture the current request store snapshot for the probe.
+        const requestCtx = getRequestContext();
+        const headers = requestCtx.headersContext?.headers;
+        const navCtx = requestCtx.serverContext;
+        const requestSnapshot: UseCacheProbeRequestSnapshot = {
+          headers: headers ? Array.from(headers.entries()) : [],
+          cookieHeader: headers?.get("cookie") ?? undefined,
+          urlPathname: navCtx?.pathname ?? "/",
+          urlSearch: navCtx?.searchParams?.toString() ?? "",
+          rootParams: requestCtx.rootParams ?? {},
+          isDraftMode: false,
+          isHmrRefresh: false,
+        };
+
+        probePromise = new Promise<never>((_, reject) => {
+          setTimeout(() => {
+            const probeInternalTimeoutMs = fillDeadlineAt - performance.now() - 1_000;
+            if (probeInternalTimeoutMs <= 0) return;
+
+            probe({
+              id,
+              kind: cacheVariant,
+              encodedArguments: JSON.stringify(args),
+              request: requestSnapshot,
+              timeoutMs: probeInternalTimeoutMs,
+            }).then(
+              (completed) => {
+                if (completed) reject(deadlockError);
+              },
+              () => {},
+            );
+          }, 10_000);
+        });
+        // Swallow rejection when execution wins the race.
+        probePromise.catch(() => {});
+      }
+
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        const t = setTimeout(() => reject(timeoutError), USE_CACHE_TIMEOUT_MS);
+        if (typeof (t as NodeJS.Timeout).unref === "function") {
+          (t as NodeJS.Timeout).unref();
+        }
+      });
+      // Swallow rejection when execution wins the race.
+      timeoutPromise.catch(() => {});
+
+      const executionPromise = executeWithContext(fn, args, cacheVariant);
+
+      const promises: Promise<unknown>[] = [executionPromise];
+      if (probePromise) promises.push(probePromise);
+      promises.push(timeoutPromise);
+
+      return Promise.race(promises);
     }
 
     // Shared cache ("use cache" / "use cache: remote")
