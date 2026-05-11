@@ -17,7 +17,7 @@ export type UseCacheProbeRequestSnapshot = {
   cookieHeader: string | undefined;
   urlPathname: string;
   urlSearch: string;
-  rootParams: Record<string, unknown>;
+  rootParams: Record<string, string | string[] | undefined>;
 };
 
 export type UseCacheProbe = (msg: {

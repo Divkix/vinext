@@ -5738,6 +5738,53 @@ describe("use-cache deadlock probe behavior", () => {
       setUseCacheProbe(undefined);
     }
   });
+
+  it("probe completing surfaces UseCacheDeadlockError via Promise.race", async () => {
+    const { setUseCacheProbe } =
+      await import("../packages/vinext/src/shims/use-cache-probe-globals.js");
+
+    // Install a probe that reports the function completed in isolation.
+    setUseCacheProbe(async () => true);
+
+    const originalNodeEnv = process.env.NODE_ENV;
+    process.env.NODE_ENV = "development";
+    vi.useFakeTimers();
+    vi.resetModules();
+
+    const { registerCachedFunction } =
+      await import("../packages/vinext/src/shims/cache-runtime.js");
+    const { isUseCacheDeadlockError } =
+      await import("../packages/vinext/src/shims/use-cache-errors.js");
+
+    let resolveHung!: (v: string) => void;
+    const hungFn = () =>
+      new Promise<string>((resolve) => {
+        resolveHung = resolve;
+      });
+    const cached = registerCachedFunction(hungFn, "test:deadlock-race", "");
+
+    try {
+      const promise = cached();
+      // Attach a handler immediately so Node never sees this as unhandled.
+      let caughtError: Error | undefined;
+      promise.catch((err) => {
+        caughtError = err as Error;
+      });
+
+      // Advance to the 10 s probe timer.
+      await vi.advanceTimersByTimeAsync(10_000);
+      // Flush the microtask that carries the deadlock rejection.
+      await Promise.resolve();
+
+      expect(isUseCacheDeadlockError(caughtError)).toBe(true);
+      expect(caughtError?.message).toContain("shared state");
+    } finally {
+      resolveHung?.("cleanup");
+      vi.useRealTimers();
+      process.env.NODE_ENV = originalNodeEnv;
+      setUseCacheProbe(undefined);
+    }
+  });
 });
 
 describe("replyToCacheKey deterministic hashing", () => {

@@ -543,6 +543,11 @@ export function registerCachedFunction<TArgs extends unknown[], TResult>(
 
       if (probe && !isInsideUseCacheProbe()) {
         // Capture the current request store snapshot for the probe.
+        // getRequestContext() never returns null — it creates a default
+        // context when called outside a request scope. For deadlock detection,
+        // the exact headers/pathname matter less than the function body
+        // executing with a fresh module scope, so the default "/" pathname
+        // and empty headers are acceptable.
         const requestCtx = getRequestContext();
         const headers = requestCtx.headersContext?.headers;
         const navCtx = requestCtx.serverContext;

@@ -38,13 +38,17 @@ export function initUseCacheProbePool(environment: DevEnvironmentLike | DevEnvir
   }
   _probeEnvironment = environment;
 
+  // Capture the environment in a local variable so the probe closure is
+  // immune to HMR teardown setting _probeEnvironment = null mid-flight.
+  const env = environment;
+
   setUseCacheProbe(async (msg) => {
     // Create a fresh runner per probe so the module graph is completely
     // isolated from previous probes. Reusing runners would leave stale
     // top-level state in EvaluatedModules.
     // createDirectRunner creates a fresh ModuleRunner with its own isolated
     // EvaluatedModules instance, which is exactly what we need for probes.
-    const runner = createDirectRunner(_probeEnvironment!);
+    const runner = createDirectRunner(env);
     const { id, kind, encodedArguments, request, timeoutMs } = msg;
 
     // Internal timeout so the probe aborts before the outer render timeout.
@@ -128,11 +132,15 @@ export function initUseCacheProbePool(environment: DevEnvironmentLike | DevEnvir
       ]);
 
       return true;
-    } catch {
-      // Probe failure is inconclusive — the function might genuinely hang
-      // even in isolation, or the module import failed. Fall back to the
-      // regular timeout.
-      return false;
+    } catch (err) {
+      // If the probe timed out, the result is inconclusive — the function
+      // might genuinely hang even in isolation.
+      if (err instanceof UseCacheTimeoutError) {
+        return false;
+      }
+      // The function threw — it ran to completion (with an error). If the main
+      // fill is still stuck, this is evidence of a deadlock on shared state.
+      return true;
     } finally {
       setInsideUseCacheProbe(false);
       if (probeTimeoutTimer !== undefined) clearTimeout(probeTimeoutTimer);
@@ -161,7 +169,7 @@ async function runWithProbeRequestStore<T>(
     cookieHeader: string | undefined;
     urlPathname: string;
     urlSearch: string;
-    rootParams: Record<string, unknown>;
+    rootParams: Record<string, string | string[] | undefined>;
   },
   fn: () => Promise<T>,
 ): Promise<T> {
@@ -185,7 +193,7 @@ async function runWithProbeRequestStore<T>(
   const ctx = createRequestContext({
     headersContext,
     executionContext: null,
-    rootParams: requestSnapshot.rootParams as Record<string, string | string[]>,
+    rootParams: requestSnapshot.rootParams,
   });
 
   return runWithRequestContext(ctx, fn);
