@@ -553,10 +553,12 @@ export function registerCachedFunction<TArgs extends unknown[], TResult>(
         const navCtx = requestCtx.serverContext;
         const requestSnapshot = {
           headers: headers ? Array.from(headers.entries()) : [],
-          cookieHeader: headers?.get("cookie") ?? undefined,
           urlPathname: navCtx?.pathname ?? "/",
           urlSearch: navCtx?.searchParams?.toString() ?? "",
-          rootParams: requestCtx.rootParams ?? {},
+          rootParams: (requestCtx.rootParams ?? {}) as Record<
+            string,
+            string | string[] | undefined
+          >,
         };
 
         probePromise = new Promise<never>((_, reject) => {
@@ -567,12 +569,25 @@ export function registerCachedFunction<TArgs extends unknown[], TResult>(
             probe({
               id,
               kind: cacheVariant,
-              encodedArguments: JSON.stringify(args),
+              encodedArguments: (() => {
+                try {
+                  return JSON.stringify(args);
+                } catch {
+                  return "[]";
+                }
+              })(),
               request: requestSnapshot,
               timeoutMs: probeInternalTimeoutMs,
             }).then(
               (completed) => {
-                if (completed) reject(deadlockError);
+                if (completed) {
+                  reject(deadlockError);
+                } else if (typeof console !== "undefined") {
+                  console.warn(
+                    `[vinext] "use cache" fill for ${id} has been idle for 10s. ` +
+                      `Probe was also inconclusive — will hard-timeout at 54s.`,
+                  );
+                }
               },
               () => {},
             );

@@ -5715,7 +5715,11 @@ describe("use-cache deadlock probe behavior", () => {
       return true;
     });
 
-    // Ensure dev mode path is taken by resetting modules and setting NODE_ENV
+    // Ensure dev mode path is taken by resetting modules and setting NODE_ENV.
+    // Note: vi.resetModules() re-evaluates cache-runtime.js with the new
+    // NODE_ENV, but probe-globals.js (imported above) is from the original
+    // module evaluation. Both use Symbol.for on globalThis, so they still
+    // share the same global state despite being different module instances.
     const originalNodeEnv = process.env.NODE_ENV;
     process.env.NODE_ENV = "development";
     vi.resetModules();

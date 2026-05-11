@@ -32,8 +32,8 @@ let _probeEnvironment: DevEnvironmentLike | DevEnvironment | null = null;
  */
 export function initUseCacheProbePool(environment: DevEnvironmentLike | DevEnvironment): void {
   if (_probeEnvironment) {
-    // Already initialized — no-op. The environment is the same for the
-    // lifetime of the dev server.
+    // Guard against double-init within the same cycle (e.g., if
+    // initUseCacheProbePool is called without a preceding teardown).
     return;
   }
   _probeEnvironment = environment;
@@ -49,7 +49,7 @@ export function initUseCacheProbePool(environment: DevEnvironmentLike | DevEnvir
     // createDirectRunner creates a fresh ModuleRunner with its own isolated
     // EvaluatedModules instance, which is exactly what we need for probes.
     const runner = createDirectRunner(env);
-    const { id, kind, encodedArguments, request, timeoutMs } = msg;
+    const { id, encodedArguments, request, timeoutMs } = msg;
 
     // Internal timeout so the probe aborts before the outer render timeout.
     const deadline = Date.now() + timeoutMs;
@@ -92,7 +92,9 @@ export function initUseCacheProbePool(environment: DevEnvironmentLike | DevEnvir
 
       // Wrap it with registerCachedFunction so the probe runs through the
       // same cache-runtime path (fresh ALS, no shared state).
-      const variant = kind === "private" ? "private" : "";
+      // Private cache functions return before reaching the probe scheduling
+      // code, so kind can never be "private" here. Keep "" for safety.
+      const variant = "";
       const wrapped = registerCachedFunction(
         originalFn as (...args: unknown[]) => Promise<unknown>,
         id,
@@ -166,7 +168,6 @@ async function runWithProbeRequestStore<T>(
   runner: ModuleRunner,
   requestSnapshot: {
     headers: [string, string][];
-    cookieHeader: string | undefined;
     urlPathname: string;
     urlSearch: string;
     rootParams: Record<string, string | string[] | undefined>;
