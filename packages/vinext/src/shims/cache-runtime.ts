@@ -530,6 +530,8 @@ export function registerCachedFunction<TArgs extends unknown[], TResult>(
       const timeoutError = new UseCacheTimeoutError();
       const deadlockError = new UseCacheDeadlockError();
 
+      let probeTimer: ReturnType<typeof setTimeout> | undefined;
+      let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
       let probePromise: Promise<never> | null = null;
       const probe = getUseCacheProbe();
 
@@ -549,7 +551,7 @@ export function registerCachedFunction<TArgs extends unknown[], TResult>(
         };
 
         probePromise = new Promise<never>((_, reject) => {
-          setTimeout(() => {
+          probeTimer = setTimeout(() => {
             const probeInternalTimeoutMs = fillDeadlineAt - performance.now() - 1_000;
             if (probeInternalTimeoutMs <= 0) return;
 
@@ -572,9 +574,9 @@ export function registerCachedFunction<TArgs extends unknown[], TResult>(
       }
 
       const timeoutPromise = new Promise<never>((_, reject) => {
-        const t = setTimeout(() => reject(timeoutError), USE_CACHE_TIMEOUT_MS);
-        if (typeof (t as NodeJS.Timeout).unref === "function") {
-          (t as NodeJS.Timeout).unref();
+        timeoutTimer = setTimeout(() => reject(timeoutError), USE_CACHE_TIMEOUT_MS);
+        if (typeof (timeoutTimer as NodeJS.Timeout).unref === "function") {
+          (timeoutTimer as NodeJS.Timeout).unref();
         }
       });
       // Swallow rejection when execution wins the race.
@@ -586,7 +588,10 @@ export function registerCachedFunction<TArgs extends unknown[], TResult>(
       if (probePromise) promises.push(probePromise);
       promises.push(timeoutPromise);
 
-      return Promise.race(promises);
+      return Promise.race(promises).finally(() => {
+        if (probeTimer !== undefined) clearTimeout(probeTimer);
+        if (timeoutTimer !== undefined) clearTimeout(timeoutTimer);
+      });
     }
 
     // Shared cache ("use cache" / "use cache: remote")
