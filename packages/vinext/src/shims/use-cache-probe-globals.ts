@@ -14,7 +14,6 @@ const INSIDE_PROBE_SYMBOL = Symbol.for("vinext.dev.useCacheProbe.inside");
 
 export type UseCacheProbeRequestSnapshot = {
   headers: [string, string][];
-  cookieHeader: string | undefined;
   urlPathname: string;
   urlSearch: string;
   rootParams: Record<string, string | string[] | undefined>;
