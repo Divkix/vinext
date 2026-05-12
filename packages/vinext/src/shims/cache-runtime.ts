@@ -117,6 +117,30 @@ function getUseCacheKeySeed(): string | undefined {
   return getUseCacheDeploymentIdDefine() || getUseCacheBuildIdDefine();
 }
 
+// Lazy singleton for dev-only probe modules — eliminates microtask
+// overhead on every "use cache" call after the first.
+let _probeModules:
+  | {
+      UseCacheTimeoutError: typeof import("./use-cache-errors.js").UseCacheTimeoutError;
+      UseCacheDeadlockError: typeof import("./use-cache-errors.js").UseCacheDeadlockError;
+      getUseCacheProbe: typeof import("./use-cache-probe-globals.js").getUseCacheProbe;
+      isInsideUseCacheProbe: typeof import("./use-cache-probe-globals.js").isInsideUseCacheProbe;
+    }
+  | undefined;
+
+async function loadProbeModules() {
+  const [errors, globals] = await Promise.all([
+    import("./use-cache-errors.js"),
+    import("./use-cache-probe-globals.js"),
+  ]);
+  return {
+    UseCacheTimeoutError: errors.UseCacheTimeoutError,
+    UseCacheDeadlockError: errors.UseCacheDeadlockError,
+    getUseCacheProbe: globals.getUseCacheProbe,
+    isInsideUseCacheProbe: globals.isInsideUseCacheProbe,
+  };
+}
+
 function buildUseCacheKey(id: string, keySeed: string | undefined, argsKey?: string): string {
   const scopedId = keySeed ? `build:${encodeURIComponent(keySeed)}:${id}` : id;
   return argsKey === undefined ? `use-cache:${scopedId}` : `use-cache:${scopedId}:${argsKey}`;
@@ -403,16 +427,12 @@ export function registerCachedFunction<T extends (...args: any[]) => Promise<any
       const USE_CACHE_TIMEOUT_MS = 54_000;
       const fillDeadlineAt = performance.now() + USE_CACHE_TIMEOUT_MS;
 
-      const [
-        { UseCacheTimeoutError, UseCacheDeadlockError },
-        { getUseCacheProbe, isInsideUseCacheProbe },
-      ] = await Promise.all([
-        import("./use-cache-errors.js"),
-        import("./use-cache-probe-globals.js"),
-      ]);
-
-      const timeoutError = new UseCacheTimeoutError();
-      const deadlockError = new UseCacheDeadlockError();
+      const {
+        UseCacheTimeoutError,
+        UseCacheDeadlockError,
+        getUseCacheProbe,
+        isInsideUseCacheProbe,
+      } = (_probeModules ??= await loadProbeModules());
 
       let probeTimer: ReturnType<typeof setTimeout> | undefined;
       let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
@@ -433,10 +453,12 @@ export function registerCachedFunction<T extends (...args: any[]) => Promise<any
           headers: headers ? Array.from(headers.entries()) : [],
           urlPathname: navCtx?.pathname ?? "/",
           urlSearch: navCtx?.searchParams?.toString() ?? "",
-          rootParams: (requestCtx.rootParams ?? {}) as Record<
-            string,
-            string | string[] | undefined
-          >,
+          rootParams: Object.fromEntries(
+            Object.entries(requestCtx.rootParams ?? {}).map(([k, v]) => [
+              k,
+              typeof v === "string" || Array.isArray(v) ? v : undefined,
+            ]),
+          ) as Record<string, string | string[] | undefined>,
         };
 
         probePromise = new Promise<never>((_, reject) => {
@@ -459,7 +481,7 @@ export function registerCachedFunction<T extends (...args: any[]) => Promise<any
             }).then(
               (completed) => {
                 if (completed) {
-                  reject(deadlockError);
+                  reject(new UseCacheDeadlockError());
                 } else if (typeof console !== "undefined") {
                   console.warn(
                     `[vinext] "use cache" fill for ${id} has been idle for 10s. ` +
@@ -476,7 +498,7 @@ export function registerCachedFunction<T extends (...args: any[]) => Promise<any
       }
 
       const timeoutPromise = new Promise<never>((_, reject) => {
-        timeoutTimer = setTimeout(() => reject(timeoutError), USE_CACHE_TIMEOUT_MS);
+        timeoutTimer = setTimeout(() => reject(new UseCacheTimeoutError()), USE_CACHE_TIMEOUT_MS);
         if (typeof (timeoutTimer as NodeJS.Timeout).unref === "function") {
           (timeoutTimer as NodeJS.Timeout).unref();
         }
