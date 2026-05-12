@@ -52,7 +52,7 @@ export function initUseCacheProbePool(environment: DevEnvironmentLike | DevEnvir
     const { id, encodedArguments, request, timeoutMs } = msg;
 
     // Internal timeout so the probe aborts before the outer render timeout.
-    const deadline = Date.now() + timeoutMs;
+    const deadline = performance.now() + timeoutMs;
 
     let probeTimeoutTimer: ReturnType<typeof setTimeout> | undefined;
     setInsideUseCacheProbe(true);
@@ -92,8 +92,6 @@ export function initUseCacheProbePool(environment: DevEnvironmentLike | DevEnvir
 
       // Wrap it with registerCachedFunction so the probe runs through the
       // same cache-runtime path (fresh ALS, no shared state).
-      // Private cache functions return before reaching the probe scheduling
-      // code, so kind can never be "private" here. Keep "" for safety.
       const variant = "";
       const wrapped = registerCachedFunction(
         originalFn as (...args: unknown[]) => Promise<unknown>,
@@ -118,7 +116,7 @@ export function initUseCacheProbePool(environment: DevEnvironmentLike | DevEnvir
       // Run the function with a reconstructed request store so private caches
       // that read cookies()/headers()/draftMode() see the same values.
       // Race against the internal timeout.
-      const remaining = deadline - Date.now();
+      const remaining = deadline - performance.now();
       if (remaining <= 0) {
         return false;
       }
