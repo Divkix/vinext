@@ -22,7 +22,6 @@ import { isImageOptimizationPath } from "./server/image-optimization.js";
 import { installSocketErrorBackstop } from "./server/socket-error-backstop.js";
 import { shouldInvalidateAppRouteFile } from "./server/dev-route-files.js";
 import { createDirectRunner } from "./server/dev-module-runner.js";
-import { initUseCacheProbePool, tearDownUseCacheProbePool } from "./server/use-cache-probe-pool.js";
 import { generateRscEntry } from "./entries/app-rsc-entry.js";
 import { generateSsrEntry } from "./entries/app-ssr-entry.js";
 import {
@@ -288,6 +287,17 @@ function hasServerOnlyMarkerImport(code: string): boolean {
 }
 
 const __dirname = import.meta.dirname;
+
+// Lazy load the use-cache probe pool so it is only loaded when the dev
+// server starts (configureServer), not during production builds.
+let _probePoolModule: typeof import("./server/use-cache-probe-pool.js") | null = null;
+async function getProbePoolModule() {
+  if (!_probePoolModule) {
+    _probePoolModule = await import("./server/use-cache-probe-pool.js");
+  }
+  return _probePoolModule;
+}
+
 type VitePluginReactModule = typeof import("@vitejs/plugin-react");
 
 function resolveOptionalDependency(projectRoot: string, specifier: string): string | null {
@@ -2933,7 +2943,7 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
         }
       },
 
-      configureServer(server: ViteDevServer) {
+      async configureServer(server: ViteDevServer) {
         // Watch route files for additions/removals to invalidate route cache.
         const pageExtensions = fileMatcher.extensionRegex;
 
@@ -2991,10 +3001,11 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
           }
         }
 
-        function invalidateAppRoutingModules() {
+        async function invalidateAppRoutingModules() {
           invalidateAppRouteCache();
           invalidateRscEntryModule();
           invalidateRootParamsModule();
+          const { tearDownUseCacheProbePool, initUseCacheProbePool } = await getProbePoolModule();
           // Tear down the use-cache probe pool so the next probe starts with
           // fresh code after HMR invalidation.
           tearDownUseCacheProbePool();
@@ -3141,7 +3152,9 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
             // "use cache" functions run inside the RSC module graph.
             const rscEnv = server.environments["rsc"];
             if (rscEnv) {
-              initUseCacheProbePool(rscEnv);
+              getProbePoolModule()
+                .then(({ initUseCacheProbePool }) => initUseCacheProbePool(rscEnv))
+                .catch(() => {});
             }
 
             server.middlewares.use((req, res, next) => {
