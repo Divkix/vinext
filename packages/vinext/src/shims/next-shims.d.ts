@@ -30,9 +30,16 @@ declare module "next/head" {
 
 declare module "next/dynamic" {
   import { ComponentType } from "react";
+  type DynamicOptionsLoadingProps = {
+    error?: Error | null;
+    isLoading?: boolean;
+    pastDelay?: boolean;
+    retry?: () => void;
+    timedOut?: boolean;
+  };
   function dynamic<P extends object = object>(
     loader: () => Promise<{ default: ComponentType<P> } | ComponentType<P>>,
-    options?: { loading?: ComponentType<any>; ssr?: boolean },
+    options?: { loading?: ComponentType<DynamicOptionsLoadingProps>; ssr?: boolean },
   ): ComponentType<P>;
   export default dynamic;
   export function flushPreloads(): Promise<void[]>;
@@ -550,15 +557,10 @@ declare module "next/form" {
 }
 
 declare module "next/web-vitals" {
-  type WebVitalsMetric = {
-    id: string;
-    name: string;
-    value: number;
-    rating?: "good" | "needs-improvement" | "poor";
-    delta: number;
-    navigationType?: "navigate" | "reload" | "back-forward" | "prerender";
-  };
-  type ReportWebVitalsCallback = (metric: WebVitalsMetric) => void;
+  import type { MetricType } from "web-vitals";
+
+  export type WebVitalsMetric = MetricType;
+  export type ReportWebVitalsCallback = (metric: WebVitalsMetric) => void;
   export function useReportWebVitals(callback: ReportWebVitalsCallback): void;
 }
 

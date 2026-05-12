@@ -71,6 +71,46 @@ function createState(overrides: Partial<AppRouterState> = {}): AppRouterState {
   };
 }
 
+type TestPendingDispositionOptions = {
+  activeNavigationId: number;
+  currentRootLayoutTreePath: string | null;
+  currentVisibleCommitVersion: number;
+  nextRootLayoutTreePath: string | null;
+  renderId?: number;
+  startedNavigationId: number;
+  startedVisibleCommitVersion: number;
+};
+
+async function resolveTestPendingNavigationCommitDispositionDecision(
+  options: TestPendingDispositionOptions,
+) {
+  const startState = createState({
+    rootLayoutTreePath: options.currentRootLayoutTreePath,
+    visibleCommitVersion: options.startedVisibleCommitVersion,
+  });
+  const currentState = createState({
+    rootLayoutTreePath: options.currentRootLayoutTreePath,
+    visibleCommitVersion: options.currentVisibleCommitVersion,
+  });
+  const pending = await createPendingNavigationCommit({
+    currentState: startState,
+    nextElements: Promise.resolve(
+      createResolvedElements("route:/dashboard", options.nextRootLayoutTreePath),
+    ),
+    navigationSnapshot: createClientNavigationRenderSnapshot("https://example.com/dashboard", {}),
+    operationLane: "navigation",
+    renderId: options.renderId ?? options.startedNavigationId,
+    type: "navigate",
+  });
+
+  return resolvePendingNavigationCommitDispositionDecision({
+    activeNavigationId: options.activeNavigationId,
+    currentState,
+    pending,
+    startedNavigationId: options.startedNavigationId,
+  });
+}
+
 function createControllerHarness(initialState: AppRouterState = createState()) {
   const controller = createAppBrowserNavigationController();
   const stateRef: { current: AppRouterState } = { current: initialState };
@@ -101,6 +141,7 @@ type ApprovedTestCommitOptions = {
   rootLayoutTreePath: string | null;
   routeId: string;
   startedNavigationId?: number;
+  targetHref?: string;
   type?: "navigate" | "replace" | "traverse";
 };
 
@@ -133,6 +174,7 @@ async function applyApprovedTestCommit(
     currentState: state,
     pending,
     startedNavigationId: options.startedNavigationId ?? activeNavigationId,
+    targetHref: options.targetHref ?? "https://example.com/initial",
   });
 
   if (approval.approvedCommit === null) {
@@ -266,6 +308,7 @@ describe("app browser entry state helpers", () => {
       currentState: state,
       pending,
       startedNavigationId: 1,
+      targetHref: "https://example.com/next",
     });
     if (approval.approvedCommit === null) {
       throw new Error("Expected approved visible commit");
@@ -373,11 +416,9 @@ describe("app browser entry state helpers", () => {
     expect(
       resolvePendingNavigationCommitDisposition({
         activeNavigationId: 3,
-        currentVisibleCommitVersion: currentState.visibleCommitVersion,
-        currentRootLayoutTreePath: currentState.rootLayoutTreePath,
-        nextRootLayoutTreePath: pending.rootLayoutTreePath,
+        currentState,
+        pending,
         startedNavigationId: 3,
-        startedVisibleCommitVersion: pending.action.operation.startedVisibleCommitVersion,
       }),
     ).toBe("hard-navigate");
   });
@@ -446,6 +487,7 @@ describe("app browser entry state helpers", () => {
       currentState,
       pending,
       startedNavigationId: 1,
+      targetHref: "https://example.com/dashboard",
     });
     if (approval.approvedCommit === null) {
       throw new Error("Expected approved visible commit");
@@ -476,11 +518,9 @@ describe("app browser entry state helpers", () => {
     expect(
       resolvePendingNavigationCommitDisposition({
         activeNavigationId: 5,
-        currentVisibleCommitVersion: currentState.visibleCommitVersion,
-        currentRootLayoutTreePath: currentState.rootLayoutTreePath,
-        nextRootLayoutTreePath: pending.rootLayoutTreePath,
+        currentState,
+        pending,
         startedNavigationId: 4,
-        startedVisibleCommitVersion: pending.action.operation.startedVisibleCommitVersion,
       }),
     ).toBe("skip");
   });
@@ -505,6 +545,7 @@ describe("app browser entry state helpers", () => {
       currentState: latestState,
       pending,
       startedNavigationId: 7,
+      targetHref: "https://example.com/dashboard",
     });
 
     expect(approval.decision.disposition).toBe("no-commit");
@@ -526,6 +567,7 @@ describe("app browser entry state helpers", () => {
           nextRootLayoutTreePath: "/",
           startedNavigationId: 7,
           startedVisibleCommitVersion: 4,
+          targetHref: "https://example.com/dashboard",
         },
       },
     ]);
@@ -553,6 +595,7 @@ describe("app browser entry state helpers", () => {
       currentState: latestState,
       pending,
       startedNavigationId: 8,
+      targetHref: "https://example.com/previous",
     });
 
     expect(approval.decision.disposition).toBe("no-commit");
@@ -574,14 +617,15 @@ describe("app browser entry state helpers", () => {
           nextRootLayoutTreePath: "/",
           startedNavigationId: 8,
           startedVisibleCommitVersion: 2,
+          targetHref: "https://example.com/previous",
         },
       },
     ]);
     expect(approval.approvedCommit).toBeNull();
   });
 
-  it("traces stale pending commits with compact reason codes and structured fields", () => {
-    const decision = resolvePendingNavigationCommitDispositionDecision({
+  it("traces stale pending commits with compact reason codes and structured fields", async () => {
+    const decision = await resolveTestPendingNavigationCommitDispositionDecision({
       activeNavigationId: 5,
       currentVisibleCommitVersion: 0,
       currentRootLayoutTreePath: "/",
@@ -609,12 +653,12 @@ describe("app browser entry state helpers", () => {
     });
   });
 
-  it("treats a visible commit version mismatch as stale before root-boundary decisions", () => {
-    const decision = resolvePendingNavigationCommitDispositionDecision({
+  it("treats a visible commit version mismatch as stale before root-boundary decisions", async () => {
+    const decision = await resolveTestPendingNavigationCommitDispositionDecision({
       activeNavigationId: 2,
       currentVisibleCommitVersion: 1,
-      currentRootLayoutTreePath: "/(marketing)",
-      nextRootLayoutTreePath: "/(dashboard)",
+      currentRootLayoutTreePath: "/",
+      nextRootLayoutTreePath: "/",
       startedNavigationId: 2,
       startedVisibleCommitVersion: 0,
     });
@@ -623,8 +667,39 @@ describe("app browser entry state helpers", () => {
     expect(decision.trace.entries[0]?.code).toBe(NavigationTraceReasonCodes.staleOperation);
   });
 
-  it("traces root-boundary hard navigation decisions", () => {
-    const decision = resolvePendingNavigationCommitDispositionDecision({
+  it("treats stale state as authoritative even when the root boundary changed", async () => {
+    const decision = await resolveTestPendingNavigationCommitDispositionDecision({
+      activeNavigationId: 2,
+      currentVisibleCommitVersion: 1,
+      currentRootLayoutTreePath: "/(marketing)",
+      nextRootLayoutTreePath: "/(dashboard)",
+      startedNavigationId: 2,
+      startedVisibleCommitVersion: 0,
+    });
+
+    expect(decision).toEqual({
+      disposition: "skip",
+      trace: {
+        schemaVersion: NAVIGATION_TRACE_SCHEMA_VERSION,
+        entries: [
+          {
+            code: NavigationTraceReasonCodes.staleOperation,
+            fields: {
+              activeNavigationId: 2,
+              currentRootLayoutTreePath: "/(marketing)",
+              currentVisibleCommitVersion: 1,
+              nextRootLayoutTreePath: "/(dashboard)",
+              startedNavigationId: 2,
+              startedVisibleCommitVersion: 0,
+            },
+          },
+        ],
+      },
+    });
+  });
+
+  it("traces root-boundary hard navigation decisions", async () => {
+    const decision = await resolveTestPendingNavigationCommitDispositionDecision({
       activeNavigationId: 2,
       currentVisibleCommitVersion: 0,
       currentRootLayoutTreePath: "/(marketing)",
@@ -649,8 +724,8 @@ describe("app browser entry state helpers", () => {
     ]);
   });
 
-  it("traces unknown root-layout identity as a legacy soft-commit fallback", () => {
-    const decision = resolvePendingNavigationCommitDispositionDecision({
+  it("traces unknown root-layout identity as a legacy soft-commit fallback", async () => {
+    const decision = await resolveTestPendingNavigationCommitDispositionDecision({
       activeNavigationId: 2,
       currentVisibleCommitVersion: 0,
       currentRootLayoutTreePath: "/",
@@ -663,8 +738,8 @@ describe("app browser entry state helpers", () => {
     expect(decision.trace.entries[0]?.code).toBe(NavigationTraceReasonCodes.rootBoundaryUnknown);
   });
 
-  it("traces matching root-layout dispatches as current commits", () => {
-    const decision = resolvePendingNavigationCommitDispositionDecision({
+  it("traces matching root-layout dispatches as current commits", async () => {
+    const decision = await resolveTestPendingNavigationCommitDispositionDecision({
       activeNavigationId: 2,
       currentVisibleCommitVersion: 0,
       currentRootLayoutTreePath: "/",
@@ -726,6 +801,7 @@ describe("app browser entry state helpers", () => {
       currentState,
       pending,
       startedNavigationId: 4,
+      targetHref: "https://example.com/dashboard",
     });
 
     expect(approval.decision.disposition).toBe("commit");
@@ -753,6 +829,7 @@ describe("app browser entry state helpers", () => {
           nextRootLayoutTreePath: "/",
           startedNavigationId: 4,
           startedVisibleCommitVersion: 0,
+          targetHref: "https://example.com/dashboard",
         },
       },
     ]);
@@ -785,6 +862,7 @@ describe("app browser entry state helpers", () => {
       currentState,
       pending,
       startedNavigationId: 6,
+      targetHref: "https://example.com/legacy-payload",
     });
 
     expect(approval.decision.disposition).toBe("commit");
@@ -870,6 +948,7 @@ describe("app browser entry state helpers", () => {
       currentState,
       pending,
       startedNavigationId: 4,
+      targetHref: "https://example.com/next",
     });
 
     if (approval.approvedCommit === null) {
@@ -907,6 +986,7 @@ describe("app browser entry state helpers", () => {
       currentState,
       pending,
       startedNavigationId: 4,
+      targetHref: "https://example.com/feed",
     });
 
     if (approval.approvedCommit === null) {
@@ -941,6 +1021,7 @@ describe("app browser entry state helpers", () => {
       currentState,
       pending,
       startedNavigationId: 7,
+      targetHref: "https://example.com/dashboard",
     });
     expect(staleApproval.decision.disposition).toBe("no-commit");
     expect(staleApproval.decision.trace.entries[0]?.code).toBe(
@@ -956,6 +1037,7 @@ describe("app browser entry state helpers", () => {
       currentState,
       pending,
       startedNavigationId: 8,
+      targetHref: "https://example.com/dashboard?from=planner",
     });
     expect(hardNavigateApproval.decision.disposition).toBe("hard-navigate");
     expect(hardNavigateApproval.decision.trace.entries[0]?.code).toBe(
@@ -963,6 +1045,9 @@ describe("app browser entry state helpers", () => {
     );
     expect(hardNavigateApproval.decision.trace.entries[1]?.code).toBe(
       NavigationTraceReasonCodes.rootBoundaryChanged,
+    );
+    expect(hardNavigateApproval.decision.trace.entries[1]?.fields.targetHref).toBe(
+      "https://example.com/dashboard?from=planner",
     );
     expect(hardNavigateApproval.approvedCommit).toBeNull();
   });
@@ -1791,6 +1876,7 @@ describe("app browser navigation lifecycle settlement", () => {
       operationLane: "navigation",
       renderId: 3,
       startedNavigationId: 5,
+      targetHref: "https://example.com/dashboard",
       type: "navigate",
     });
 
@@ -1815,6 +1901,7 @@ describe("app browser navigation lifecycle settlement", () => {
       operationLane: "server-action",
       renderId: 24,
       startedNavigationId: 5,
+      targetHref: "https://example.com/dashboard",
       type: "navigate",
     });
 
@@ -1842,6 +1929,7 @@ describe("app browser navigation lifecycle settlement", () => {
           nextRootLayoutTreePath: "/",
           startedNavigationId: 5,
           startedVisibleCommitVersion: 0,
+          targetHref: "https://example.com/dashboard",
         },
       },
     ]);
@@ -1864,6 +1952,7 @@ describe("app browser navigation lifecycle settlement", () => {
       operationLane: "server-action",
       renderId: 25,
       startedNavigationId: 8,
+      targetHref: "https://example.com/dashboard",
       type: "navigate",
     });
 
@@ -1894,6 +1983,7 @@ describe("app browser navigation lifecycle settlement", () => {
           nextRootLayoutTreePath: "/",
           startedNavigationId: 8,
           startedVisibleCommitVersion: 0,
+          targetHref: "https://example.com/dashboard",
         },
       },
     ]);
@@ -2206,6 +2296,7 @@ describe("app browser entry previousNextUrl helpers", () => {
       operationLane: "server-action",
       renderId: 3,
       startedNavigationId: 7,
+      targetHref: "https://example.com/dashboard?action=same-url",
       type: "navigate",
     });
 
@@ -2214,6 +2305,9 @@ describe("app browser entry previousNextUrl helpers", () => {
     expect(result.pending.action.renderId).toBe(3);
     expect(result.trace.entries[0]?.code).toBe(NavigationTraceTransactionCodes.hardNavigate);
     expect(result.trace.entries[1]?.code).toBe(NavigationTraceReasonCodes.rootBoundaryChanged);
+    expect(result.trace.entries[1]?.fields.targetHref).toBe(
+      "https://example.com/dashboard?action=same-url",
+    );
   });
 
   it("creates navigation trace entries without retaining field ownership", () => {
