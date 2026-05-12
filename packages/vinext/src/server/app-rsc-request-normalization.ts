@@ -2,8 +2,13 @@ import { normalizePath } from "./normalize-path.js";
 import { normalizePathnameForRouteMatchStrict } from "../routing/utils.js";
 import { guardProtocolRelativeUrl } from "./request-pipeline.js";
 import { hasBasePath, stripBasePath } from "../utils/base-path.js";
+import {
+  VINEXT_INTERCEPTION_CONTEXT_HEADER,
+  VINEXT_MOUNTED_SLOTS_HEADER,
+  VINEXT_RSC_RENDER_MODE_HEADER,
+} from "./headers.js";
 import { normalizeMountedSlotsHeader } from "./app-mounted-slots-header.js";
-import { stripRscSuffix, VINEXT_RSC_RENDER_MODE_HEADER } from "./app-rsc-cache-busting.js";
+import { stripRscSuffix } from "./app-rsc-cache-busting.js";
 import {
   APP_RSC_RENDER_MODE_NAVIGATION,
   parseAppRscRenderMode,
@@ -101,11 +106,11 @@ export function normalizeRscRequest(
   // Step 8: Sanitize X-Vinext-Interception-Context.
   // Null bytes in header values can be used for injection in some HTTP stacks.
   const interceptionContextHeader =
-    request.headers.get("X-Vinext-Interception-Context")?.replaceAll("\0", "") || null;
+    request.headers.get(VINEXT_INTERCEPTION_CONTEXT_HEADER)?.replaceAll("\0", "") || null;
 
   // Step 9: Normalize mounted-slots header for canonical cache keying.
   const mountedSlotsHeader = normalizeMountedSlotsHeader(
-    request.headers.get("x-vinext-mounted-slots"),
+    request.headers.get(VINEXT_MOUNTED_SLOTS_HEADER),
   );
   const renderMode = isRscRequest
     ? parseAppRscRenderMode(request.headers.get(VINEXT_RSC_RENDER_MODE_HEADER))
