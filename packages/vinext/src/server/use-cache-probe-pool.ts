@@ -28,7 +28,8 @@ let _probeEnvironment: DevEnvironmentLike | DevEnvironment | null = null;
 /**
  * Initialize the probe pool with the Vite dev environment.
  *
- * Called once during configureServer() when the App Router dev server starts.
+ * Called during configureServer() when the App Router dev server starts,
+ * and re-called after each HMR teardown cycle.
  */
 export function initUseCacheProbePool(environment: DevEnvironmentLike | DevEnvironment): void {
   if (_probeEnvironment) {
@@ -92,10 +93,7 @@ export function initUseCacheProbePool(environment: DevEnvironmentLike | DevEnvir
 
       // Wrap it with registerCachedFunction so the probe runs through the
       // same cache-runtime path (fresh ALS, no shared state).
-      // Private caches return before the probe block in cache-runtime.ts,
-      // so the probe is only ever scheduled for shared caches where variant
-      // is always "".
-      const variant = "";
+      const variant = ""; // Only shared caches reach the probe block.
       const wrapped = registerCachedFunction(
         originalFn as (...args: unknown[]) => Promise<unknown>,
         id,
@@ -107,13 +105,11 @@ export function initUseCacheProbePool(environment: DevEnvironmentLike | DevEnvir
       // For deadlock detection, the exact argument values matter less than
       // the fact that the function body executes with a fresh module scope.
       let args: unknown[] = [];
-      if (typeof encodedArguments === "string") {
-        try {
-          args = JSON.parse(encodedArguments);
-          if (!Array.isArray(args)) args = [args];
-        } catch {
-          args = [];
-        }
+      try {
+        args = JSON.parse(encodedArguments);
+        if (!Array.isArray(args)) args = [args];
+      } catch {
+        args = [];
       }
 
       // Run the function with a reconstructed request store so private caches
