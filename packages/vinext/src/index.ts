@@ -2092,7 +2092,9 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
             invalidateRouteCache(pagesDir);
           }
           if (hasAppDir && shouldInvalidateAppRouteFile(appDir, filePath, fileMatcher)) {
-            invalidateAppRoutingModules().catch(() => {});
+            invalidateAppRoutingModules().catch((err) => {
+              console.warn("[vinext] Failed to invalidate app routing modules:", err);
+            });
           }
         });
         server.watcher.on("unlink", (filePath: string) => {
@@ -2100,7 +2102,9 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
             invalidateRouteCache(pagesDir);
           }
           if (hasAppDir && shouldInvalidateAppRouteFile(appDir, filePath, fileMatcher)) {
-            invalidateAppRoutingModules().catch(() => {});
+            invalidateAppRoutingModules().catch((err) => {
+              console.warn("[vinext] Failed to invalidate app routing modules:", err);
+            });
           }
         });
 
@@ -2173,7 +2177,9 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
             if (rscEnv) {
               getProbePoolModule()
                 .then(({ initUseCacheProbePool }) => initUseCacheProbePool(rscEnv))
-                .catch(() => {});
+                .catch((err) => {
+                  console.warn("[vinext] Failed to initialize use-cache probe pool:", err);
+                });
             }
 
             server.middlewares.use((req, res, next) => {

@@ -468,7 +468,6 @@ export function registerCachedFunction<T extends (...args: any[]) => Promise<any
 
             probe({
               id,
-              kind: cacheVariant,
               encodedArguments: (() => {
                 try {
                   return JSON.stringify(args);
