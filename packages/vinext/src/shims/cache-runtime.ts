@@ -201,18 +201,19 @@ function getUseCacheKeySeed(): string | undefined {
   return getUseCacheDeploymentIdDefine() || getUseCacheBuildIdDefine();
 }
 
+type ProbeModules = {
+  UseCacheTimeoutError: typeof import("./use-cache-errors.js").UseCacheTimeoutError;
+  UseCacheDeadlockError: typeof import("./use-cache-errors.js").UseCacheDeadlockError;
+  getUseCacheProbe: typeof import("./use-cache-probe-globals.js").getUseCacheProbe;
+  isInsideUseCacheProbe: typeof import("./use-cache-probe-globals.js").isInsideUseCacheProbe;
+};
+
 // Lazy singleton for dev-only probe modules — eliminates microtask
 // overhead on every "use cache" call after the first.
-let _probeModules:
-  | {
-      UseCacheTimeoutError: typeof import("./use-cache-errors.js").UseCacheTimeoutError;
-      UseCacheDeadlockError: typeof import("./use-cache-errors.js").UseCacheDeadlockError;
-      getUseCacheProbe: typeof import("./use-cache-probe-globals.js").getUseCacheProbe;
-      isInsideUseCacheProbe: typeof import("./use-cache-probe-globals.js").isInsideUseCacheProbe;
-    }
-  | undefined;
+let _probeModules: ProbeModules | undefined;
+let _probeModulesPromise: Promise<ProbeModules> | undefined;
 
-async function loadProbeModules() {
+async function loadProbeModules(): Promise<ProbeModules> {
   const [errors, globals] = await Promise.all([
     import("./use-cache-errors.js"),
     import("./use-cache-probe-globals.js"),
@@ -223,6 +224,17 @@ async function loadProbeModules() {
     getUseCacheProbe: globals.getUseCacheProbe,
     isInsideUseCacheProbe: globals.isInsideUseCacheProbe,
   };
+}
+
+async function getProbeModules(): Promise<ProbeModules> {
+  if (_probeModules) return _probeModules;
+
+  _probeModulesPromise ??= loadProbeModules().catch((error) => {
+    _probeModulesPromise = undefined;
+    throw error;
+  });
+  _probeModules = await _probeModulesPromise;
+  return _probeModules;
 }
 
 function buildUseCacheKey(id: string, keySeed: string | undefined, argsKey?: string): string {
@@ -554,7 +566,7 @@ export function registerCachedFunction<TArgs extends unknown[], TResult>(
         UseCacheDeadlockError,
         getUseCacheProbe,
         isInsideUseCacheProbe,
-      } = (_probeModules ??= await loadProbeModules());
+      } = await getProbeModules();
 
       let probeTimer: ReturnType<typeof setTimeout> | undefined;
       let timeoutTimer: ReturnType<typeof setTimeout> | undefined;

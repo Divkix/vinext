@@ -21,7 +21,7 @@ export type UseCacheProbeRequestSnapshot = {
 
 export type UseCacheProbe = (msg: {
   id: string;
-  encodedArguments: string | FormData;
+  encodedArguments: string;
   request: UseCacheProbeRequestSnapshot;
   timeoutMs: number;
 }) => Promise<boolean>;
