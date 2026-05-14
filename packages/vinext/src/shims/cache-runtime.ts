@@ -590,7 +590,6 @@ export function registerCachedFunction<TArgs extends unknown[], TResult>(
 
             probe({
               id,
-              kind: cacheVariant,
               encodedArguments: (() => {
                 try {
                   return JSON.stringify(args);

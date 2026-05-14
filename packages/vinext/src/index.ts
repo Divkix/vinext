@@ -3154,7 +3154,9 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
             if (rscEnv) {
               getProbePoolModule()
                 .then(({ initUseCacheProbePool }) => initUseCacheProbePool(rscEnv))
-                .catch(() => {});
+                .catch((err) => {
+                  console.warn("[vinext] Failed to initialize use-cache probe pool:", err);
+                });
             }
 
             server.middlewares.use((req, res, next) => {
