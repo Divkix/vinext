@@ -439,12 +439,16 @@ export function registerCachedFunction<T extends (...args: any[]) => Promise<any
       const USE_CACHE_TIMEOUT_MS = 54_000;
       const fillDeadlineAt = performance.now() + USE_CACHE_TIMEOUT_MS;
 
+      let probeModules = _probeModules;
+      if (!probeModules) {
+        probeModules = await getProbeModules();
+      }
       const {
         UseCacheTimeoutError,
         UseCacheDeadlockError,
         getUseCacheProbe,
         isInsideUseCacheProbe,
-      } = await getProbeModules();
+      } = probeModules;
 
       let probeTimer: ReturnType<typeof setTimeout> | undefined;
       let timeoutTimer: ReturnType<typeof setTimeout> | undefined;

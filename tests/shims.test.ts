@@ -4280,9 +4280,11 @@ describe("use-cache deadlock probe behavior", () => {
 
       // Advance to the 10 s probe timer.
       await vi.advanceTimersByTimeAsync(10_000);
-      // Flush the microtask that carries the deadlock rejection.
-      await Promise.resolve();
-      await Promise.resolve();
+      // Flush microtasks until the deadlock rejection propagates.
+      // Loop avoids fragility if the promise chain length changes.
+      for (let i = 0; i < 10 && !caughtError; i++) {
+        await Promise.resolve();
+      }
 
       expect(isUseCacheDeadlockError(caughtError)).toBe(true);
       expect(caughtError?.message).toContain("shared state");

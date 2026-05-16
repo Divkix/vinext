@@ -149,12 +149,11 @@ const __dirname = import.meta.dirname;
 
 // Lazy load the use-cache probe pool so it is only loaded when the dev
 // server starts (configureServer), not during production builds.
-let _probePoolModule: typeof import("./server/use-cache-probe-pool.js") | null = null;
-async function getProbePoolModule() {
-  if (!_probePoolModule) {
-    _probePoolModule = await import("./server/use-cache-probe-pool.js");
-  }
-  return _probePoolModule;
+let _probePoolModulePromise: Promise<typeof import("./server/use-cache-probe-pool.js")> | null =
+  null;
+function getProbePoolModule(): Promise<typeof import("./server/use-cache-probe-pool.js")> {
+  _probePoolModulePromise ??= import("./server/use-cache-probe-pool.js");
+  return _probePoolModulePromise;
 }
 
 type VitePluginReactModule = typeof import("@vitejs/plugin-react");
