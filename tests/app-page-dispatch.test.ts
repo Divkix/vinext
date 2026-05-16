@@ -74,6 +74,8 @@ function createDispatchOptions(
     clearRequestContext?: DispatchOptions["clearRequestContext"];
     generateStaticParams?: DispatchOptions["generateStaticParams"];
     formState?: DispatchOptions["formState"];
+    actionError?: DispatchOptions["actionError"];
+    actionFailed?: DispatchOptions["actionFailed"];
     isProgressiveActionRender?: DispatchOptions["isProgressiveActionRender"];
     isProduction?: boolean;
     isRscRequest?: boolean;
@@ -126,6 +128,8 @@ function createDispatchOptions(
     hasPageModule: true,
     handlerStart: 10,
     formState: overrides.formState,
+    actionError: overrides.actionError,
+    actionFailed: overrides.actionFailed,
     interceptionContext: null,
     isProgressiveActionRender: overrides.isProgressiveActionRender,
     isProduction: overrides.isProduction ?? false,
@@ -272,6 +276,31 @@ describe("app page dispatch", () => {
     await expect(response.text()).resolves.toBe("<html>page</html>");
   });
 
+  it("renders not-found HTML when a progressive action calls notFound()", async () => {
+    const buildPageElement = vi.fn(async () => React.createElement("main", null, "page"));
+    const renderHttpAccessFallbackPage = vi.fn(
+      async () => new Response("<html>not found</html>", { status: 404 }),
+    );
+    const { options } = createDispatchOptions({
+      actionError: { digest: "NEXT_HTTP_ERROR_FALLBACK;404" },
+      actionFailed: true,
+      buildPageElement,
+      isProgressiveActionRender: true,
+    });
+    options.renderHttpAccessFallbackPage = renderHttpAccessFallbackPage;
+
+    const response = await dispatchAppPage(options);
+
+    expect(response.status).toBe(404);
+    await expect(response.text()).resolves.toBe("<html>not found</html>");
+    expect(buildPageElement).not.toHaveBeenCalled();
+    expect(renderHttpAccessFallbackPage).toHaveBeenCalledWith(
+      404,
+      { matchedParams: { slug: "hello" } },
+      null,
+    );
+  });
+
   it("does not bypass cached production HTML for arbitrary draft cookie values", async () => {
     vi.stubEnv("__VINEXT_DRAFT_SECRET", "draft-secret");
     const isrGet = vi.fn(async () =>
@@ -347,7 +376,7 @@ describe("app page dispatch", () => {
     });
 
     expect(response.status).toBe(404);
-    await expect(response.text()).resolves.toBe("Not Found");
+    await expect(response.text()).resolves.toBe("This page could not be found");
   });
 
   it("serves intercepted RSC source-route payloads with middleware response state", async () => {
@@ -389,7 +418,7 @@ describe("app page dispatch", () => {
     });
 
     expect(response.status).toBe(202);
-    expect(response.headers.get("content-type")).toBe("text/x-component; charset=utf-8");
+    expect(response.headers.get("content-type")).toBe("text/x-component");
     expect(response.headers.get("x-from-middleware")).toBe("yes");
     await expect(response.text()).resolves.toBe("/feed:{}:modal@app/feed/@modal");
   });

@@ -8,9 +8,18 @@ import {
   readActionFormDataWithLimit,
   type HandleProgressiveServerActionRequestOptions,
 } from "../packages/vinext/src/server/app-server-action-execution.js";
-import { VINEXT_RSC_VARY_HEADER } from "../packages/vinext/src/server/app-rsc-cache-busting.js";
+import {
+  createServerActionNotFoundResponse,
+  throwOnServerActionNotFound,
+} from "../packages/vinext/src/server/server-action-not-found.js";
+import { unstable_isUnrecognizedActionError } from "../packages/vinext/src/shims/navigation.js";
+import {
+  VINEXT_RSC_COMPATIBILITY_ID_HEADER,
+  VINEXT_RSC_VARY_HEADER,
+} from "../packages/vinext/src/server/app-rsc-cache-busting.js";
 import { refresh, revalidatePath, revalidateTag } from "../packages/vinext/src/shims/cache.js";
 import { setHeadersAccessPhase } from "../packages/vinext/src/shims/headers.js";
+import { withEnvVar } from "./env-test-helpers.js";
 
 type TestRoute = {
   id: string;
@@ -454,67 +463,95 @@ describe("app server action execution helpers", () => {
     expect((await request.formData()).get("field")).toBe("value");
   });
 
-  it("maps action HTTP fallback errors to status responses", async () => {
-    for (const [digest, statusCode] of [
-      ["NEXT_NOT_FOUND", 404],
-      ["NEXT_HTTP_ERROR_FALLBACK;403", 403],
-    ]) {
+  it("passes HTTP fallback errors as actionError to be rendered by error boundaries", async () => {
+    for (const digest of ["NEXT_NOT_FOUND", "NEXT_HTTP_ERROR_FALLBACK;403"]) {
       const clearContext = vi.fn();
       const reportedErrors: Error[] = [];
 
-      const response = requireProgressiveActionResponse(
-        await handleProgressiveServerActionRequest(
-          createOptions({
-            clearRequestContext: clearContext,
-            async decodeAction() {
-              return () => {
-                throw { digest };
-              };
-            },
-            reportRequestError(error) {
-              reportedErrors.push(error);
-            },
-          }),
-        ),
+      const result = await handleProgressiveServerActionRequest(
+        createOptions({
+          clearRequestContext: clearContext,
+          async decodeAction() {
+            return () => {
+              throw { digest };
+            };
+          },
+          reportRequestError(error) {
+            reportedErrors.push(error);
+          },
+        }),
       );
 
-      expect(response.status).toBe(statusCode);
+      expect(result).toEqual({
+        kind: "form-state",
+        formState: null,
+        actionError: { digest },
+        actionFailed: true,
+      });
       expect(reportedErrors).toEqual([]);
-      expect(clearContext).toHaveBeenCalledTimes(1);
+      expect(clearContext).not.toHaveBeenCalled(); // Let app-rsc-handler clear it after render
     }
   });
 
-  it("reports action execution failures and clears pending cookies", async () => {
+  it("passes action execution failures as actionError to be rendered by error boundaries", async () => {
     const reportedErrors: Error[] = [];
     const clearedCookies = vi.fn(() => ["session=1; Path=/"]);
     const clearContext = vi.fn();
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
-    const response = requireProgressiveActionResponse(
-      await handleProgressiveServerActionRequest(
-        createOptions({
-          cleanPathname: "/action-source",
-          clearRequestContext: clearContext,
-          async decodeAction() {
-            return () => {
-              throw new Error("boom");
-            };
-          },
-          getAndClearPendingCookies: clearedCookies,
-          reportRequestError(error) {
-            reportedErrors.push(error);
-          },
-        }),
-      ),
+    const error = new Error("boom");
+    const result = await handleProgressiveServerActionRequest(
+      createOptions({
+        cleanPathname: "/action-source",
+        clearRequestContext: clearContext,
+        async decodeAction() {
+          return () => {
+            throw error;
+          };
+        },
+        getAndClearPendingCookies: clearedCookies,
+        reportRequestError(err) {
+          reportedErrors.push(err);
+        },
+      }),
     );
 
-    expect(response.status).toBe(500);
-    expect(await response.text()).toBe("Server action failed: boom");
-    expect(reportedErrors.map((error) => error.message)).toEqual(["boom"]);
-    expect(clearedCookies).toHaveBeenCalledTimes(1);
-    expect(clearContext).toHaveBeenCalledTimes(1);
+    expect(result).toEqual({
+      kind: "form-state",
+      formState: null,
+      actionError: error,
+      actionFailed: true,
+    });
+    expect(reportedErrors.map((e) => e.message)).toEqual(["boom"]);
+    expect(clearedCookies).not.toHaveBeenCalled(); // Only cleared if response is rendered here
+    expect(clearContext).not.toHaveBeenCalled(); // Handled by app-rsc-handler
 
     errorSpy.mockRestore();
+  });
+
+  it("passes falsy action execution failures to the page render path", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    try {
+      const result = await handleProgressiveServerActionRequest(
+        createOptions({
+          async decodeAction() {
+            return () => {
+              throw 0;
+            };
+          },
+        }),
+      );
+
+      expect(result).toEqual({
+        kind: "form-state",
+        formState: null,
+        actionError: 0,
+        actionFailed: true,
+      });
+    } finally {
+      errorSpy.mockRestore();
+    }
   });
 
   // Ported from Next.js: test/e2e/app-dir/no-server-actions/no-server-actions.test.ts
@@ -625,7 +662,7 @@ describe("app server action execution helpers", () => {
     );
 
     expect(response?.status).toBe(200);
-    expect(response?.headers.get("content-type")).toBe("text/x-component; charset=utf-8");
+    expect(response?.headers.get("content-type")).toBe("text/x-component");
     expect(response?.headers.get("vary")).toBe(VINEXT_RSC_VARY_HEADER);
     expect(response?.headers.get("x-middleware")).toBe("present");
     expect(response?.headers.getSetCookie()).toEqual(["action=1; Path=/", "draft=1; Path=/"]);
@@ -645,23 +682,27 @@ describe("app server action execution helpers", () => {
       (model: TestActionModel) => new Response(JSON.stringify(model)).body,
     );
 
-    const response = await handleServerActionRscRequest(
-      createRscOptions({
-        buildPageElement,
-        renderToReadableStream,
-        setNavigationContext,
-      }),
-    );
+    await withEnvVar("__VINEXT_RSC_COMPATIBILITY_ID", "compat-action", async () => {
+      const response = await handleServerActionRscRequest(
+        createRscOptions({
+          buildPageElement,
+          middlewareHeaders: new Headers([[VINEXT_RSC_COMPATIBILITY_ID_HEADER, "spoofed-compat"]]),
+          renderToReadableStream,
+          setNavigationContext,
+        }),
+      );
 
-    expect(response?.status).toBe(200);
-    expect(response?.headers.get("content-type")).toBe("text/x-component; charset=utf-8");
-    expect(response?.headers.get("x-action-revalidated")).toBeNull();
-    expect(buildPageElement).not.toHaveBeenCalled();
-    expect(setNavigationContext).not.toHaveBeenCalled();
+      expect(response?.status).toBe(200);
+      expect(response?.headers.get("content-type")).toBe("text/x-component");
+      expect(response?.headers.get(VINEXT_RSC_COMPATIBILITY_ID_HEADER)).toBe("compat-action");
+      expect(response?.headers.get("x-action-revalidated")).toBeNull();
+      expect(buildPageElement).not.toHaveBeenCalled();
+      expect(setNavigationContext).not.toHaveBeenCalled();
 
-    const model = JSON.parse(await response!.text()) as Partial<TestActionModel>;
-    expect(model.returnValue).toEqual({ ok: true, data: "action-result" });
-    expect(model).not.toHaveProperty("root");
+      const model = JSON.parse(await response!.text()) as Partial<TestActionModel>;
+      expect(model.returnValue).toEqual({ ok: true, data: "action-result" });
+      expect(model).not.toHaveProperty("root");
+    });
   });
 
   // Mirrors Next.js' action revalidation header contract:
@@ -938,5 +979,33 @@ describe("app server action execution helpers", () => {
         returnValue: { ok: false, data: fallbackError },
       });
     }
+  });
+});
+
+// The client-side counterpart of `createServerActionNotFoundResponse`: when the
+// server cannot resolve an action id, client code must be able to detect the
+// deployment skew through the public `unstable_isUnrecognizedActionError`
+// predicate so it can recover (typically by reloading the page).
+//
+// Mirrors Next.js, whose server-action reducer throws `UnrecognizedActionError`
+// on the `x-nextjs-action-not-found` response header:
+// https://github.com/vercel/next.js/blob/canary/packages/next/src/client/components/router-reducer/reducers/server-action-reducer.ts
+describe("client recognition of unrecognized server actions", () => {
+  it("raises an error the public predicate recognizes, naming the stale action id", () => {
+    let caught: unknown;
+    try {
+      // `createServerActionNotFoundResponse()` is exactly what the server emits.
+      throwOnServerActionNotFound(createServerActionNotFoundResponse(), "decafc0ffeebad01");
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(unstable_isUnrecognizedActionError(caught)).toBe(true);
+    expect(String(caught)).toContain('Server Action "decafc0ffeebad01" was not found');
+  });
+
+  it("does not throw for a recognized action response", () => {
+    // A recognized action returns an ordinary response without the not-found header.
+    expect(() => throwOnServerActionNotFound(new Response("ok"), "abc")).not.toThrow();
   });
 });

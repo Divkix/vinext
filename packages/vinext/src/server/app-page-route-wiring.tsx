@@ -1,5 +1,10 @@
 import { Suspense, type ComponentType, type ReactNode } from "react";
-import { AppElementsWire, type AppElements } from "./app-elements.js";
+import {
+  AppElementsWire,
+  normalizeAppElementsSlotBindings,
+  type AppElements,
+  type AppElementsSlotBinding,
+} from "./app-elements.js";
 import {
   ErrorBoundary,
   ForbiddenBoundary,
@@ -277,18 +282,67 @@ function createAppPageParallelSlotEntries<
 
     const layoutEntry = layoutEntries[targetIndex];
     const treePath = layoutEntry?.treePath ?? "/";
+    const slotId = resolveAppPageSlotId(slot, treePath);
     const slotParams = getEffectiveSlotParams(slotKey, slotName);
     const slotSegments = slot.routeSegments
       ? resolveAppPageChildSegments(slot.routeSegments, 0, slotParams)
       : [];
     parallelSlots[slotName] = (
       <LayoutSegmentProvider segmentMap={{ children: slotSegments }}>
-        <Slot id={AppElementsWire.encodeSlotId(slotName, treePath)} />
+        <Slot id={slotId} />
       </LayoutSegmentProvider>
     );
   }
 
   return Object.keys(parallelSlots).length > 0 ? parallelSlots : undefined;
+}
+
+function resolveAppPageSlotId(slot: AppPageRouteWiringSlot, treePath: string): string {
+  const slotId = AppElementsWire.encodeSlotId(slot.name, treePath);
+  if (slot.id && slot.id !== slotId) {
+    throw new Error(
+      `[vinext] App Router slot id mismatch for @${slot.name}: graph id ${slot.id} does not match wire id ${slotId}`,
+    );
+  }
+  return slotId;
+}
+
+function resolveAppPageSlotBindingState(
+  slot: AppPageRouteWiringSlot,
+  override: AppPageSlotOverride | undefined,
+): AppElementsSlotBinding["state"] {
+  const pageComponent = getDefaultExport(override?.pageModule) ?? getDefaultExport(slot.page);
+  if (pageComponent) return "active";
+  if (getDefaultExport(slot.default)) return "default";
+  return "unmatched";
+}
+
+function createAppPageSlotBindings<
+  TModule extends AppPageModule,
+  TErrorModule extends AppPageErrorModule,
+>(
+  route: AppPageRouteWiringRoute<TModule, TErrorModule>,
+  layoutEntries: readonly AppPageLayoutEntry<TModule, TErrorModule>[],
+  resolveSlotOverride: (
+    slotKey: string,
+    slotName: string,
+  ) => AppPageSlotOverride<TModule> | undefined,
+): readonly AppElementsSlotBinding[] {
+  const bindings: AppElementsSlotBinding[] = [];
+  for (const [slotKey, slot] of Object.entries(route.slots ?? {})) {
+    const targetIndex = slot.layoutIndex >= 0 ? slot.layoutIndex : layoutEntries.length - 1;
+    const layoutEntry = layoutEntries[targetIndex] ?? null;
+    const ownerLayoutId = layoutEntry?.id ?? null;
+    const override = resolveSlotOverride(slotKey, slot.name);
+    bindings.push({
+      ownerLayoutId,
+      slotId: resolveAppPageSlotId(slot, layoutEntry?.treePath ?? "/"),
+      state: resolveAppPageSlotBindingState(slot, override),
+    });
+  }
+  return normalizeAppElementsSlotBindings(bindings, {
+    layoutIds: layoutEntries.map((entry) => entry.id),
+  });
 }
 
 function createAppPageRouteHead(metadata: Metadata | null, viewport: Viewport): ReactNode {
@@ -336,14 +390,6 @@ export function buildAppPageElements<
   const templateDependenciesBeforeById = new Map<string, AppRenderDependency[]>();
   const pageDependencies: AppRenderDependency[] = [];
   const rootLayoutTreePath = layoutEntries[0]?.treePath ?? null;
-  const elements: Record<string, ReactNode | string | null> = {
-    ...AppElementsWire.createMetadataEntries({
-      interceptionContext,
-      layoutIds: options.route.ids?.layouts ?? layoutEntries.map((entry) => entry.id),
-      rootLayoutTreePath,
-      routeId,
-    }),
-  };
   const slotNameCounts = new Map<string, number>();
   for (const slot of Object.values(options.route.slots ?? {})) {
     const slotName = slot.name;
@@ -369,6 +415,15 @@ export function buildAppPageElements<
     }
 
     return undefined;
+  };
+  const elements: Record<string, ReactNode | string | null | readonly AppElementsSlotBinding[]> = {
+    ...AppElementsWire.createMetadataEntries({
+      interceptionContext,
+      layoutIds: options.route.ids?.layouts ?? layoutEntries.map((entry) => entry.id),
+      rootLayoutTreePath,
+      routeId,
+      slotBindings: createAppPageSlotBindings(options.route, layoutEntries, resolveSlotOverride),
+    }),
   };
   const getEffectiveSlotParams = (slotKey: string, slotName: string): AppPageParams =>
     resolveSlotOverride(slotKey, slotName)?.params ?? options.matchedParams;
@@ -474,7 +529,7 @@ export function buildAppPageElements<
     const slotName = slot.name;
     const targetIndex = slot.layoutIndex >= 0 ? slot.layoutIndex : layoutEntries.length - 1;
     const treePath = layoutEntries[targetIndex]?.treePath ?? "/";
-    const slotId = AppElementsWire.encodeSlotId(slotName, treePath);
+    const slotId = resolveAppPageSlotId(slot, treePath);
     const slotOverride = resolveSlotOverride(slotKey, slotName);
     const slotParams = getEffectiveSlotParams(slotKey, slotName);
     const slotRouteSegments = slot.routeSegments ?? [];

@@ -6,7 +6,9 @@ import {
   getLinkPrefetchHref,
   type LinkPrefetchIntent,
   type LinkPrefetchDecision,
+  type LinkPrefetchRouterMode,
 } from "../packages/vinext/src/shims/link-prefetch.js";
+import type { VinextLinkPrefetchRoute } from "../packages/vinext/src/client/vinext-next-data.js";
 
 type CapturedEffect = () => void | (() => void);
 
@@ -14,7 +16,7 @@ type CapturedClickEvent = {
   altKey?: boolean;
   button: number;
   ctrlKey?: boolean;
-  currentTarget: { target: string };
+  currentTarget: { hasAttribute(name: string): boolean; target: string };
   defaultPrevented: boolean;
   metaKey?: boolean;
   preventDefault(): void;
@@ -29,6 +31,20 @@ type CapturedAnchorProps = {
   onTouchStart?: (event: CapturedIntentEvent) => void;
   ref?: (node: HTMLAnchorElement | null) => void;
 };
+
+type CapturedPrefetchLinkElement = {
+  as?: string;
+  href?: string;
+  rel?: string;
+};
+
+const linkPrefetchRoutes = [
+  { patternParts: ["viewport-prefetch-target"], isDynamic: false },
+  { patternParts: ["intent-prefetch-target"], isDynamic: false },
+  { patternParts: ["touch-prefetch-target"], isDynamic: false },
+  { patternParts: ["same-origin-intent-prefetch-target"], isDynamic: false },
+  { patternParts: ["blog", ":slug"], isDynamic: true },
+] satisfies VinextLinkPrefetchRoute[];
 
 type MockReactAnchorCaptureOptions = {
   captureAnchor(type: unknown, props: unknown): void;
@@ -168,9 +184,20 @@ describe("Link prefetch pure decisions", () => {
         expected: { shouldPrefetch: true, priority: "high" },
       },
       {
-        name: "prod + prefetch=false",
+        name: "prod + app intent + prefetch=false",
         input: { nodeEnv: "production", prefetch: false, isDangerous: false, intent: "intent" },
         expected: { shouldPrefetch: false },
+      },
+      {
+        name: "prod + pages intent + prefetch=false",
+        input: {
+          nodeEnv: "production",
+          prefetch: false,
+          isDangerous: false,
+          intent: "intent",
+          routerMode: "pages",
+        },
+        expected: { shouldPrefetch: true, priority: "high" },
       },
       {
         name: "prod + dangerous",
@@ -184,6 +211,7 @@ describe("Link prefetch pure decisions", () => {
         prefetch: boolean | undefined;
         isDangerous: boolean;
         intent: LinkPrefetchIntent;
+        routerMode?: LinkPrefetchRouterMode;
       };
       expected: LinkPrefetchDecision;
     }>;
@@ -226,6 +254,25 @@ describe("Link prefetch pure decisions", () => {
       {
         name: "external protocol-relative URL",
         input: { href: "//external.com/path", basePath: "", currentOrigin: "https://example.com" },
+        expected: null,
+      },
+      {
+        name: "mailto URL",
+        input: {
+          href: "mailto:hello@example.com",
+          basePath: "",
+          currentOrigin: "https://example.com",
+        },
+        expected: null,
+      },
+      {
+        name: "tel URL",
+        input: { href: "tel:+123456789", basePath: "", currentOrigin: "https://example.com" },
+        expected: null,
+      },
+      {
+        name: "sms URL",
+        input: { href: "sms:+123456789", basePath: "", currentOrigin: "https://example.com" },
         expected: null,
       },
       {
@@ -308,10 +355,17 @@ describe("Link App Router navigation scheduling", () => {
       scrollTo: vi.fn(),
     });
 
-    const [{ default: IsolatedLink }, React] = await Promise.all([
-      import("../packages/vinext/src/shims/link.js"),
-      vi.importActual<typeof import("react")>("react"),
-    ]);
+    // Load link.js BEFORE importActual("react"). Earlier these two imports ran
+    // in parallel via Promise.all, but that race made the mock occasionally not
+    // intercept link.tsx's transitive `import React from "react"` — when
+    // importActual won the race, "react" landed in the module cache as the
+    // actual module first, and link.tsx's import then resolved to that cached
+    // entry instead of the doMock factory. That caused React.startTransition
+    // inside Link to be the real implementation rather than the spy, so the
+    // assertion on `toHaveBeenCalledTimes(1)` would flake to 0.
+    // Sequencing the imports guarantees the doMock factory runs first.
+    const { default: IsolatedLink } = await import("../packages/vinext/src/shims/link.js");
+    const React = await vi.importActual<typeof import("react")>("react");
 
     ReactDOMServer.renderToString(
       React.createElement(IsolatedLink, { href: "/target", prefetch: false }, "target"),
@@ -319,7 +373,7 @@ describe("Link App Router navigation scheduling", () => {
 
     const clickEvent = {
       button: 0,
-      currentTarget: { target: "" },
+      currentTarget: { hasAttribute: () => false, target: "" },
       defaultPrevented: false,
       preventDefault() {
         this.defaultPrevented = true;
@@ -337,6 +391,115 @@ describe("Link App Router navigation scheduling", () => {
     expect(navigate).toHaveBeenCalledWith("/target", 0, "navigate", "push", undefined, true);
     expect(transitionStates).toEqual([true]);
   });
+
+  it("lets the browser handle native URI schemes without app-router navigation", async () => {
+    const userOnClick = vi.fn();
+    const hrefs = ["mailto:hello@example.com", "tel:+123456789", "sms:+123456789"];
+
+    for (const href of hrefs) {
+      const result = await renderIsolatedLink({
+        href,
+        nodeEnv: "production",
+        props: { onClick: userOnClick, prefetch: false },
+        requireRef: false,
+      });
+
+      try {
+        const clickEvent = {
+          button: 0,
+          currentTarget: { hasAttribute: () => false, target: "" },
+          defaultPrevented: false,
+          preventDefault() {
+            this.defaultPrevented = true;
+          },
+        };
+        const onClick = result.capturedAnchorProps.onClick;
+        expect(onClick).toBeTypeOf("function");
+        if (onClick === undefined) {
+          throw new Error("Expected rendered Link anchor to expose an onClick handler");
+        }
+
+        await onClick(clickEvent);
+
+        expect(userOnClick).toHaveBeenCalledWith(clickEvent);
+        expect(clickEvent.defaultPrevented).toBe(false);
+        expect(result.navigate).not.toHaveBeenCalled();
+      } finally {
+        result.restoreNodeEnv();
+      }
+    }
+  });
+
+  it("lets the browser handle download links without app-router navigation", async () => {
+    vi.resetModules();
+
+    let capturedAnchorProps: CapturedAnchorProps | undefined;
+    const startTransition = vi.fn((callback: () => void) => {
+      callback();
+    });
+
+    const captureAnchor = (type: unknown, props: unknown) => {
+      if (type === "a" && props !== null && typeof props === "object") {
+        capturedAnchorProps = props;
+      }
+    };
+
+    mockReactAnchorCaptureForLinkOnly_DO_NOT_REUSE({ captureAnchor, startTransition });
+
+    const navigate = vi.fn(async () => {});
+    vi.stubGlobal("window", {
+      __VINEXT_RSC_NAVIGATE__: navigate,
+      addEventListener: vi.fn(),
+      history: {
+        pushState: vi.fn(),
+        replaceState: vi.fn(),
+      },
+      location: {
+        href: "https://example.com/current",
+        origin: "https://example.com",
+      },
+      scrollTo: vi.fn(),
+    });
+
+    const { default: IsolatedLink } = await import("../packages/vinext/src/shims/link.js");
+    const React = await vi.importActual<typeof import("react")>("react");
+    const onClick = vi.fn();
+    const onNavigate = vi.fn();
+
+    // Ported from Next.js: test/e2e/link-on-navigate-prop/index.test.ts
+    // https://github.com/vercel/next.js/blob/canary/test/e2e/link-on-navigate-prop/index.test.ts
+    ReactDOMServer.renderToString(
+      React.createElement(
+        IsolatedLink,
+        { download: true, href: "/file.pdf", onClick, onNavigate, prefetch: false },
+        "download",
+      ),
+    );
+
+    const clickEvent = {
+      button: 0,
+      currentTarget: {
+        hasAttribute: (name: string) => name === "download",
+        target: "",
+      },
+      defaultPrevented: false,
+      preventDefault() {
+        this.defaultPrevented = true;
+      },
+    };
+    const linkOnClick = capturedAnchorProps?.onClick;
+    expect(linkOnClick).toBeTypeOf("function");
+    if (linkOnClick === undefined) {
+      throw new Error("Expected rendered Link anchor to expose an onClick handler");
+    }
+    await linkOnClick(clickEvent);
+
+    expect(onClick).toHaveBeenCalledTimes(1);
+    expect(clickEvent.defaultPrevented).toBe(false);
+    expect(onNavigate).not.toHaveBeenCalled();
+    expect(startTransition).not.toHaveBeenCalled();
+    expect(navigate).not.toHaveBeenCalled();
+  });
 });
 
 async function renderIsolatedLink(options: {
@@ -348,15 +511,10 @@ async function renderIsolatedLink(options: {
 }) {
   vi.resetModules();
 
-  const previousNodeEnv = process.env.NODE_ENV;
   const restoreNodeEnv = () => {
-    if (previousNodeEnv === undefined) {
-      delete process.env.NODE_ENV;
-    } else {
-      process.env.NODE_ENV = previousNodeEnv;
-    }
+    vi.unstubAllEnvs();
   };
-  process.env.NODE_ENV = options.nodeEnv;
+  vi.stubEnv("NODE_ENV", options.nodeEnv);
 
   const effects: CapturedEffect[] = [];
   let capturedAnchorProps: CapturedAnchorProps | undefined;
@@ -375,14 +533,24 @@ async function renderIsolatedLink(options: {
   });
 
   const fetch = vi.fn(() => Promise.resolve(new Response("")));
+  const navigate = vi.fn();
+  const pagePrefetchLinks: CapturedPrefetchLinkElement[] = [];
   const location = {
     href: "https://example.com/current",
     origin: "https://example.com",
   };
 
   vi.stubGlobal("fetch", fetch);
+  vi.stubGlobal("document", {
+    createElement: vi.fn(() => ({})),
+    head: {
+      appendChild: vi.fn((node: CapturedPrefetchLinkElement) => {
+        pagePrefetchLinks.push(node);
+      }),
+    },
+  });
   vi.stubGlobal("window", {
-    __VINEXT_RSC_NAVIGATE__: vi.fn(),
+    __VINEXT_RSC_NAVIGATE__: navigate,
     addEventListener: vi.fn(),
     dispatchEvent: vi.fn(),
     history: {
@@ -390,6 +558,7 @@ async function renderIsolatedLink(options: {
       replaceState: vi.fn(),
     },
     location,
+    __VINEXT_LINK_PREFETCH_ROUTES__: linkPrefetchRoutes,
     requestIdleCallback: vi.fn((callback: () => void) => {
       callback();
       return 1;
@@ -425,6 +594,8 @@ async function renderIsolatedLink(options: {
       anchor,
       capturedAnchorProps,
       fetch,
+      navigate,
+      pagePrefetchLinks,
       restoreNodeEnv,
     };
   } catch (error) {
@@ -433,8 +604,8 @@ async function renderIsolatedLink(options: {
   }
 }
 
-describe("Link App Router prefetch scheduling", () => {
-  it("prefetches visible links in production with low priority", async () => {
+describe("Link prefetch scheduling", () => {
+  function stubIntersectionObserver() {
     let intersectionCallback: IntersectionObserverCallback | undefined;
     const observe = vi.fn();
     const unobserve = vi.fn();
@@ -454,44 +625,132 @@ describe("Link App Router prefetch scheduling", () => {
     }
     vi.stubGlobal("IntersectionObserver", FakeIntersectionObserver);
 
+    return {
+      observe,
+      unobserve,
+      dispatchIntersectingEntry(anchor: HTMLAnchorElement, isIntersecting = true) {
+        const rect = {
+          bottom: 0,
+          height: 0,
+          left: 0,
+          right: 0,
+          top: 0,
+          width: 0,
+          x: 0,
+          y: 0,
+          toJSON: () => ({}),
+        };
+        intersectionCallback?.(
+          [
+            {
+              boundingClientRect: rect,
+              intersectionRatio: isIntersecting ? 1 : 0,
+              intersectionRect: rect,
+              isIntersecting,
+              rootBounds: null,
+              target: anchor,
+              time: 0,
+            },
+          ],
+          {} as IntersectionObserver,
+        );
+      },
+    };
+  }
+
+  it("prefetches visible links in production with low priority", async () => {
+    const observer = stubIntersectionObserver();
+
     const result = await renderIsolatedLink({
       href: "/viewport-prefetch-target",
       nodeEnv: "production",
     });
 
     try {
-      expect(observe).toHaveBeenCalledWith(result.anchor);
-      expect(intersectionCallback).toBeTypeOf("function");
-      const rect = {
-        bottom: 0,
-        height: 0,
-        left: 0,
-        right: 0,
-        top: 0,
-        width: 0,
-        x: 0,
-        y: 0,
-        toJSON: () => ({}),
-      };
-      intersectionCallback?.(
-        [
-          {
-            boundingClientRect: rect,
-            intersectionRatio: 1,
-            intersectionRect: rect,
-            isIntersecting: true,
-            rootBounds: null,
-            target: result.anchor,
-            time: 0,
-          },
-        ],
-        {} as IntersectionObserver,
-      );
+      expect(observer.observe).toHaveBeenCalledWith(result.anchor);
+      observer.dispatchIntersectingEntry(result.anchor);
       await flushPrefetchTasks();
 
-      expect(unobserve).toHaveBeenCalledWith(result.anchor);
+      expect(observer.unobserve).not.toHaveBeenCalledWith(result.anchor);
       expect(result.fetch).toHaveBeenCalledWith(
         expect.stringContaining("/viewport-prefetch-target.rsc"),
+        expect.objectContaining({
+          credentials: "include",
+          priority: "low",
+        }),
+      );
+    } finally {
+      result.restoreNodeEnv();
+    }
+  });
+
+  it("re-prefetches visible links after the prefetch cache is invalidated", async () => {
+    const observer = stubIntersectionObserver();
+
+    const result = await renderIsolatedLink({
+      href: "/viewport-prefetch-target",
+      nodeEnv: "production",
+    });
+    const { invalidatePrefetchCache } = await import("../packages/vinext/src/shims/navigation.js");
+
+    try {
+      observer.dispatchIntersectingEntry(result.anchor);
+      await flushPrefetchTasks();
+      expect(result.fetch).toHaveBeenCalledTimes(1);
+
+      invalidatePrefetchCache();
+      await flushPrefetchTasks();
+
+      expect(result.fetch).toHaveBeenCalledTimes(2);
+      expect(result.fetch).toHaveBeenLastCalledWith(
+        expect.stringContaining("/viewport-prefetch-target.rsc"),
+        expect.objectContaining({
+          credentials: "include",
+          priority: "low",
+        }),
+      );
+    } finally {
+      result.restoreNodeEnv();
+    }
+  });
+
+  it("does not full-prefetch visible dynamic links in automatic production mode", async () => {
+    const observer = stubIntersectionObserver();
+
+    const result = await renderIsolatedLink({
+      href: "/blog/hello",
+      nodeEnv: "production",
+    });
+
+    try {
+      expect(observer.observe).toHaveBeenCalledWith(result.anchor);
+      observer.dispatchIntersectingEntry(result.anchor);
+      await flushPrefetchTasks();
+
+      expect(observer.unobserve).not.toHaveBeenCalledWith(result.anchor);
+      expect(result.fetch).not.toHaveBeenCalled();
+    } finally {
+      result.restoreNodeEnv();
+    }
+  });
+
+  it("full-prefetches visible dynamic links when prefetch is explicitly true", async () => {
+    const observer = stubIntersectionObserver();
+
+    const result = await renderIsolatedLink({
+      href: "/blog/hello",
+      nodeEnv: "production",
+      props: { prefetch: true },
+    });
+
+    try {
+      expect(observer.observe).toHaveBeenCalledWith(result.anchor);
+      observer.dispatchIntersectingEntry(result.anchor);
+      await flushPrefetchTasks();
+
+      expect(observer.unobserve).not.toHaveBeenCalledWith(result.anchor);
+      expect(result.fetch).toHaveBeenCalledWith(
+        expect.stringContaining("/blog/hello.rsc"),
         expect.objectContaining({
           credentials: "include",
           priority: "low",
@@ -592,6 +851,47 @@ describe("Link App Router prefetch scheduling", () => {
     }
   });
 
+  it("upgrades automatic dynamic links to full prefetch on unstable_dynamicOnHover intent", async () => {
+    const observer = stubIntersectionObserver();
+    const result = await renderIsolatedLink({
+      href: "/blog/hello",
+      nodeEnv: "production",
+      props: { unstable_dynamicOnHover: true },
+    });
+    const { invalidatePrefetchCache } = await import("../packages/vinext/src/shims/navigation.js");
+
+    try {
+      observer.dispatchIntersectingEntry(result.anchor);
+      await flushPrefetchTasks();
+      expect(result.fetch).not.toHaveBeenCalled();
+
+      result.capturedAnchorProps.onMouseEnter?.({ currentTarget: result.anchor });
+      await flushPrefetchTasks();
+
+      expect(result.fetch).toHaveBeenCalledWith(
+        expect.stringContaining("/blog/hello.rsc"),
+        expect.objectContaining({
+          credentials: "include",
+          priority: "high",
+        }),
+      );
+
+      invalidatePrefetchCache();
+      await flushPrefetchTasks();
+
+      expect(result.fetch).toHaveBeenCalledTimes(2);
+      expect(result.fetch).toHaveBeenLastCalledWith(
+        expect.stringContaining("/blog/hello.rsc"),
+        expect.objectContaining({
+          credentials: "include",
+          priority: "low",
+        }),
+      );
+    } finally {
+      result.restoreNodeEnv();
+    }
+  });
+
   it("prefetches on touch intent in production while preserving the user handler", async () => {
     const userOnTouchStart = vi.fn();
     const result = await renderIsolatedLink({
@@ -631,6 +931,22 @@ describe("Link App Router prefetch scheduling", () => {
       await flushPrefetchTasks();
 
       expect(userOnMouseEnter).toHaveBeenCalledTimes(1);
+      expect(result.fetch).not.toHaveBeenCalled();
+    } finally {
+      result.restoreNodeEnv();
+    }
+  });
+
+  it("does not prefetch native URI schemes on production intent", async () => {
+    const result = await renderIsolatedLink({
+      href: "mailto:hello@example.com",
+      nodeEnv: "production",
+    });
+
+    try {
+      result.capturedAnchorProps.onMouseEnter?.({ currentTarget: result.anchor });
+      await flushPrefetchTasks();
+
       expect(result.fetch).not.toHaveBeenCalled();
     } finally {
       result.restoreNodeEnv();
@@ -679,7 +995,7 @@ describe("Link App Router prefetch scheduling", () => {
     }
   });
 
-  it("does not prefetch on intent when prefetch is false", async () => {
+  it("does not App Router prefetch on intent when prefetch is false", async () => {
     const userOnMouseEnter = vi.fn();
     const result = await renderIsolatedLink({
       href: "/disabled-intent-prefetch-target",
@@ -693,6 +1009,112 @@ describe("Link App Router prefetch scheduling", () => {
 
       expect(userOnMouseEnter).toHaveBeenCalledTimes(1);
       expect(result.fetch).not.toHaveBeenCalled();
+    } finally {
+      result.restoreNodeEnv();
+    }
+  });
+
+  it("prefetches Pages Router links on mouse intent when prefetch is false", async () => {
+    const userOnMouseEnter = vi.fn();
+    const result = await renderIsolatedLink({
+      href: "/pages-disabled-mouse-intent-prefetch-target",
+      nodeEnv: "production",
+      props: { onMouseEnter: userOnMouseEnter, prefetch: false },
+      windowOverrides: {
+        __VINEXT_RSC_NAVIGATE__: undefined,
+        __NEXT_DATA__: {
+          __vinext: {
+            pageModuleUrl: "/_next/static/chunks/pages/current.js",
+          },
+        },
+      },
+    });
+
+    try {
+      result.capturedAnchorProps.onMouseEnter?.({ currentTarget: result.anchor });
+      await flushPrefetchTasks();
+
+      expect(userOnMouseEnter).toHaveBeenCalledTimes(1);
+      expect(result.fetch).not.toHaveBeenCalled();
+      expect(result.pagePrefetchLinks).toEqual([
+        {
+          as: "document",
+          href: "/pages-disabled-mouse-intent-prefetch-target",
+          rel: "prefetch",
+        },
+      ]);
+    } finally {
+      result.restoreNodeEnv();
+    }
+  });
+
+  it("prefetches Pages Router links on touch intent when prefetch is false", async () => {
+    const userOnTouchStart = vi.fn();
+    const result = await renderIsolatedLink({
+      href: "/pages-disabled-touch-intent-prefetch-target",
+      nodeEnv: "production",
+      props: { onTouchStart: userOnTouchStart, prefetch: false },
+      windowOverrides: {
+        __VINEXT_RSC_NAVIGATE__: undefined,
+        __NEXT_DATA__: {
+          __vinext: {
+            pageModuleUrl: "/_next/static/chunks/pages/current.js",
+          },
+        },
+      },
+    });
+
+    try {
+      result.capturedAnchorProps.onTouchStart?.({ currentTarget: result.anchor });
+      await flushPrefetchTasks();
+
+      expect(userOnTouchStart).toHaveBeenCalledTimes(1);
+      expect(result.fetch).not.toHaveBeenCalled();
+      expect(result.pagePrefetchLinks).toEqual([
+        {
+          as: "document",
+          href: "/pages-disabled-touch-intent-prefetch-target",
+          rel: "prefetch",
+        },
+      ]);
+    } finally {
+      result.restoreNodeEnv();
+    }
+  });
+
+  it("does not duplicate Pages Router viewport prefetch after visibility changes", async () => {
+    const observer = stubIntersectionObserver();
+    const result = await renderIsolatedLink({
+      href: "/pages-viewport-prefetch-target",
+      nodeEnv: "production",
+      windowOverrides: {
+        __VINEXT_RSC_NAVIGATE__: undefined,
+        __NEXT_DATA__: {
+          __vinext: {
+            pageModuleUrl: "/_next/static/chunks/pages/current.js",
+          },
+        },
+      },
+    });
+
+    try {
+      observer.dispatchIntersectingEntry(result.anchor, true);
+      await flushPrefetchTasks();
+      observer.dispatchIntersectingEntry(result.anchor, false);
+      await flushPrefetchTasks();
+      observer.dispatchIntersectingEntry(result.anchor, true);
+      await flushPrefetchTasks();
+      window.__VINEXT_PING_VISIBLE_LINKS__?.();
+      await flushPrefetchTasks();
+
+      expect(result.fetch).not.toHaveBeenCalled();
+      expect(result.pagePrefetchLinks).toEqual([
+        {
+          as: "document",
+          href: "/pages-viewport-prefetch-target",
+          rel: "prefetch",
+        },
+      ]);
     } finally {
       result.restoreNodeEnv();
     }

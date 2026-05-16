@@ -2,6 +2,7 @@ import type { ViteDevServer } from "vite";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Route } from "../routing/pages-router.js";
 import { matchRoute, patternToNextFormat } from "../routing/pages-router.js";
+import { normalizeStaticPathname, type StaticPathsEntry } from "../routing/route-pattern.js";
 import type { ModuleImporter } from "./instrumentation.js";
 import { importModule, reportRequestError } from "./instrumentation.js";
 import type { NextI18nConfig } from "../config/next-config.js";
@@ -340,7 +341,7 @@ export function createSSRHandler(
       try {
         await _alsRegistration;
 
-        // Set SSR context for the router shim so useRouter() returns
+        // Set SSR context for the Pages Router provider so useRouter() returns
         // the correct URL and params during server-side rendering.
         const routerShim = await importModule(runner, "next/router");
         if (typeof routerShim.setSSRContext === "function") {
@@ -404,18 +405,30 @@ export function createSSRHandler(
           const fallback = pathsResult?.fallback ?? false;
 
           if (fallback === false) {
-            // Only allow paths explicitly listed in getStaticPaths
-            const paths: Array<{ params: Record<string, string | string[]> }> =
-              pathsResult?.paths ?? [];
-            const isValidPath = paths.some((p: { params: Record<string, string | string[]> }) =>
-              Object.entries(p.params).every(([key, val]) => {
+            // Only allow paths explicitly listed in getStaticPaths. Next.js
+            // accepts `paths` as Array<string | { params, locale? }>; the
+            // shared `StaticPathsEntry` type and `normalizeStaticPathname`
+            // helper in `../routing/route-pattern.ts` reference the upstream
+            // implementation.
+            type DevStaticPathsEntry = Exclude<StaticPathsEntry, null | undefined>;
+            const paths: Array<DevStaticPathsEntry> = pathsResult?.paths ?? [];
+            const currentPathname = normalizeStaticPathname(url);
+            const isValidPath = paths.some((p) => {
+              if (typeof p === "string") {
+                return normalizeStaticPathname(p) === currentPathname;
+              }
+              const entryParams = p.params;
+              if (entryParams === undefined || entryParams === null) {
+                return false;
+              }
+              return Object.entries(entryParams).every(([key, val]) => {
                 const actual = params[key];
                 if (Array.isArray(val)) {
                   return Array.isArray(actual) && val.join("/") === actual.join("/");
                 }
                 return String(val) === String(actual);
-              }),
-            );
+              });
+            });
 
             if (!isValidPath) {
               await renderErrorPage(
@@ -786,7 +799,7 @@ export function createSSRHandler(
         let element: React.ReactElement;
 
         // wrapWithRouterContext wraps the element in RouterContext.Provider so that
-        // next/compat/router's useRouter() returns the real router.
+        // next/router and next/compat/router return the real Pages Router.
         const wrapWithRouterContext = routerShim.wrapWithRouterContext;
 
         if (AppComponent) {

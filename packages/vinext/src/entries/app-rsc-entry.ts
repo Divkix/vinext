@@ -50,7 +50,7 @@ const appPageRouteWiringPath = resolveEntryPath(
   "../server/app-page-route-wiring.js",
   import.meta.url,
 );
-const appPageHeadPath = resolveEntryPath("../server/app-page-head.js", import.meta.url);
+const appPageProbePath = resolveEntryPath("../server/app-page-probe.js", import.meta.url);
 const appPageParamsPath = resolveEntryPath("../server/app-page-params.js", import.meta.url);
 const appPageDispatchPath = resolveEntryPath("../server/app-page-dispatch.js", import.meta.url);
 const appPageRequestPath = resolveEntryPath("../server/app-page-request.js", import.meta.url);
@@ -221,9 +221,7 @@ import { buildPageElements as __buildPageElements } from ${JSON.stringify(appPag
 import {
   resolveAppPageSegmentParams as __resolveAppPageSegmentParams,
 } from ${JSON.stringify(appPageParamsPath)};
-import {
-  collectAppPageSearchParams as __collectAppPageSearchParams,
-} from ${JSON.stringify(appPageHeadPath)};
+import { probeAppPage as __probeAppPage } from ${JSON.stringify(appPageProbePath)};
 import {
   dispatchAppPage as __dispatchAppPage,
 } from ${JSON.stringify(appPageDispatchPath)};
@@ -449,6 +447,8 @@ export default __createAppRscHandler({
   dispatchMatchedPage({
     cleanPathname,
     formState,
+    actionError,
+    actionFailed,
     handlerStart,
     interceptionContext,
     isProgressiveActionRender,
@@ -515,6 +515,8 @@ export default __createAppRscHandler({
       interceptionContext,
       expireSeconds: __expireTime,
       formState,
+      actionError,
+      actionFailed,
       isProgressiveActionRender,
       isProduction: process.env.NODE_ENV === "production",
       isRscRequest,
@@ -542,11 +544,11 @@ export default __createAppRscHandler({
         });
       },
       probePage() {
-        if (!PageComponent) return null;
-        const _asyncSearchParams = makeThenableParams(
-          __collectAppPageSearchParams(searchParams).searchParamsObject,
-        );
-        return PageComponent({ params: _asyncRouteParams, searchParams: _asyncSearchParams });
+        return __probeAppPage({
+          pageComponent: PageComponent,
+          asyncRouteParams: _asyncRouteParams,
+          searchParams,
+        });
       },
       renderErrorBoundaryPage(renderErr) {
         return __fallbackRenderer.renderErrorBoundary(route, renderErr, isRscRequest, request, params, scriptNonce, middlewareContext);

@@ -1,8 +1,10 @@
 import { stripBasePath } from "../utils/base-path.js";
 import {
   AppElementsWire,
+  getMountedSlotIds,
   getMountedSlotIdsHeader,
   type AppElements,
+  type AppElementsSlotBinding,
   type LayoutFlags,
 } from "./app-elements.js";
 import { createRscRequestHeaders } from "./app-rsc-cache-busting.js";
@@ -20,18 +22,17 @@ import {
 } from "./navigation-trace.js";
 import {
   navigationPlanner,
+  type MountedParallelSlotSnapshotV0,
   type NavigationDecisionV0,
   type OperationLane,
   type OperationToken,
   type RouteSnapshotV0,
 } from "./navigation-planner.js";
 import type { ClientNavigationRenderSnapshot } from "vinext/shims/navigation";
-
-const VINEXT_PREVIOUS_NEXT_URL_HISTORY_STATE_KEY = "__vinext_previousNextUrl";
-
-type HistoryStateRecord = {
-  [key: string]: unknown;
-};
+export {
+  createHistoryStateWithPreviousNextUrl,
+  readHistoryStatePreviousNextUrl,
+} from "./app-history-state.js";
 
 export type { OperationLane } from "./navigation-planner.js";
 
@@ -63,6 +64,7 @@ export type AppRouterState = {
   navigationSnapshot: ClientNavigationRenderSnapshot;
   rootLayoutTreePath: string | null;
   routeId: string;
+  slotBindings: readonly AppElementsSlotBinding[];
   visibleCommitVersion: number;
 };
 
@@ -77,6 +79,7 @@ export type AppRouterAction = {
   renderId: number;
   rootLayoutTreePath: string | null;
   routeId: string;
+  slotBindings: readonly AppElementsSlotBinding[];
   type: "navigate" | "replace" | "traverse";
 };
 
@@ -89,43 +92,21 @@ export type PendingNavigationCommit = {
 };
 
 type PendingNavigationCommitDisposition = "dispatch" | "hard-navigate" | "skip";
-type PendingNavigationCommitDispositionDecision = {
-  disposition: PendingNavigationCommitDisposition;
+type DispatchPendingNavigationCommitDispositionDecision = {
+  disposition: "dispatch";
+  preserveAbsentSlots: boolean;
   preserveElementIds: readonly string[];
+  preservePreviousSlotIds: readonly string[];
   trace: NavigationTrace;
 };
-
-function cloneHistoryState(state: unknown): HistoryStateRecord {
-  if (!state || typeof state !== "object") {
-    return {};
-  }
-
-  const nextState: HistoryStateRecord = {};
-  for (const [key, value] of Object.entries(state)) {
-    nextState[key] = value;
-  }
-  return nextState;
-}
-
-export function createHistoryStateWithPreviousNextUrl(
-  state: unknown,
-  previousNextUrl: string | null,
-): HistoryStateRecord | null {
-  const nextState = cloneHistoryState(state);
-
-  if (previousNextUrl === null) {
-    delete nextState[VINEXT_PREVIOUS_NEXT_URL_HISTORY_STATE_KEY];
-  } else {
-    nextState[VINEXT_PREVIOUS_NEXT_URL_HISTORY_STATE_KEY] = previousNextUrl;
-  }
-
-  return Object.keys(nextState).length > 0 ? nextState : null;
-}
-
-export function readHistoryStatePreviousNextUrl(state: unknown): string | null {
-  const value = cloneHistoryState(state)[VINEXT_PREVIOUS_NEXT_URL_HISTORY_STATE_KEY];
-  return typeof value === "string" ? value : null;
-}
+type NonDispatchPendingNavigationCommitDispositionDecision = {
+  disposition: Exclude<PendingNavigationCommitDisposition, "dispatch">;
+  preserveElementIds: readonly [];
+  trace: NavigationTrace;
+};
+type PendingNavigationCommitDispositionDecision =
+  | DispatchPendingNavigationCommitDispositionDecision
+  | NonDispatchPendingNavigationCommitDispositionDecision;
 
 function createOperationRecord(options: {
   id: number;
@@ -252,6 +233,21 @@ function createNavigationSnapshotUrl(snapshot: ClientNavigationRenderSnapshot): 
   return query === "" ? snapshot.pathname : `${snapshot.pathname}?${query}`;
 }
 
+function createMountedParallelSlotSnapshots(
+  elements: AppElements,
+): readonly MountedParallelSlotSnapshotV0[] {
+  const snapshots: MountedParallelSlotSnapshotV0[] = [];
+  for (const slotId of getMountedSlotIds(elements)) {
+    const parsed = AppElementsWire.parseElementKey(slotId);
+    if (parsed?.kind !== "slot") continue;
+    snapshots.push({
+      ownerLayoutId: AppElementsWire.encodeLayoutId(parsed.treePath),
+      slotId,
+    });
+  }
+  return snapshots;
+}
+
 function createVisibleRouteSnapshot(state: AppRouterState): RouteSnapshotV0 {
   const displayUrl = createNavigationSnapshotUrl(state.navigationSnapshot);
   return {
@@ -261,8 +257,10 @@ function createVisibleRouteSnapshot(state: AppRouterState): RouteSnapshotV0 {
     // traces. `matchedUrl` stays path-only because route matching has already
     // consumed query params before AppElements metadata reaches this boundary.
     matchedUrl: state.navigationSnapshot.pathname,
+    mountedParallelSlots: createMountedParallelSlotSnapshots(state.elements),
     rootBoundaryId: state.rootLayoutTreePath,
     routeId: state.routeId,
+    slotBindings: state.slotBindings,
   };
 }
 
@@ -274,8 +272,10 @@ function createPendingRouteSnapshot(pending: PendingNavigationCommit): RouteSnap
     // See createVisibleRouteSnapshot: matchedUrl intentionally models the route
     // identity, not the address bar URL.
     matchedUrl: pending.action.navigationSnapshot.pathname,
+    mountedParallelSlots: createMountedParallelSlotSnapshots(pending.action.elements),
     rootBoundaryId: pending.rootLayoutTreePath,
     routeId: pending.routeId,
+    slotBindings: pending.action.slotBindings,
   };
 }
 
@@ -344,7 +344,9 @@ function mapNavigationDecisionToPendingDisposition(
     case "proposeCommit":
       return {
         disposition: "dispatch",
+        preserveAbsentSlots: decision.proposal.preserveAbsentSlots,
         preserveElementIds: decision.proposal.preserveElementIds,
+        preservePreviousSlotIds: decision.proposal.preservePreviousSlotIds,
         trace: decision.trace,
       };
     case "hardNavigate":
@@ -384,6 +386,7 @@ export async function createPendingNavigationCommit(options: {
       interceptionContext: metadata.interceptionContext,
       layoutIds: metadata.layoutIds,
       layoutFlags: metadata.layoutFlags,
+      slotBindings: metadata.slotBindings,
       navigationSnapshot: options.navigationSnapshot,
       operation: createOperationRecord({
         id: options.renderId,

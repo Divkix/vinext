@@ -22,8 +22,14 @@ declare module "next" {
 }
 
 declare module "next/router" {
+  import { ComponentType } from "react";
   export function useRouter(): any;
   export function setSSRContext(ctx: any): void;
+  export type WithRouterProps = { router: any };
+  export type ExcludeRouterProps<P> = Pick<P, Exclude<keyof P, keyof WithRouterProps>>;
+  export function withRouter<P extends WithRouterProps>(
+    ComposedComponent: ComponentType<P>,
+  ): ComponentType<ExcludeRouterProps<P>>;
   const Router: {
     push(url: string | object): Promise<boolean>;
     replace(url: string | object): Promise<boolean>;
@@ -111,7 +117,8 @@ declare module "next/link" {
     href: string | { pathname?: string; query?: UrlQuery };
     as?: string;
     replace?: boolean;
-    prefetch?: boolean;
+    prefetch?: boolean | "auto" | null;
+    unstable_dynamicOnHover?: boolean;
     passHref?: boolean;
     scroll?: boolean;
     locale?: string | false;
@@ -124,12 +131,13 @@ declare module "next/link" {
 
 declare module "next/navigation" {
   export function useRouter(): {
+    bfcacheId: string;
     push(href: string, options?: { scroll?: boolean }): void;
     replace(href: string, options?: { scroll?: boolean }): void;
     back(): void;
     forward(): void;
     refresh(): void;
-    prefetch(href: string): void;
+    prefetch(href: string, options?: { onInvalidate?: () => void }): void;
   };
   export function usePathname(): string;
   export class ReadonlyURLSearchParams extends URLSearchParams {
@@ -160,6 +168,25 @@ declare module "next/navigation" {
   export const HTTP_ERROR_FALLBACK_ERROR_CODE: string;
   export function isHTTPAccessFallbackError(error: unknown): boolean;
   export function getAccessFallbackHTTPStatus(error: unknown): number;
+  export function isRedirectError(error: unknown): error is Error & { digest: string };
+  export function isNextRouterError(error: unknown): boolean;
+  export class BailoutToCSRError extends Error {
+    readonly digest: "BAILOUT_TO_CLIENT_SIDE_RENDERING";
+    readonly reason: string;
+    constructor(reason: string);
+  }
+  export function isBailoutToCSRError(error: unknown): error is BailoutToCSRError;
+  export class DynamicServerError extends Error {
+    readonly digest: "DYNAMIC_SERVER_USAGE";
+    readonly description: string;
+    constructor(description: string);
+  }
+  export function isDynamicServerError(error: unknown): error is DynamicServerError;
+  export function unstable_rethrow(error: unknown): void;
+  export class UnrecognizedActionError extends Error {}
+  export function unstable_isUnrecognizedActionError(
+    error: unknown,
+  ): error is UnrecognizedActionError;
   // Context management (internal)
   export function setNavigationContext(ctx: any): void;
   export function setClientParams(params: Record<string, string | string[]>): void;
@@ -168,6 +195,7 @@ declare module "next/navigation" {
 
   // RSC prefetch cache utilities (shared between link.tsx and browser entry)
   export type CachedRscResponse = {
+    compatibilityIdHeader?: string | null;
     buffer: ArrayBuffer;
     contentType: string;
     mountedSlotsHeader?: string | null;
@@ -175,6 +203,8 @@ declare module "next/navigation" {
     url: string;
   };
   export type PrefetchCacheEntry = {
+    invalidationTimer?: ReturnType<typeof setTimeout>;
+    onInvalidateCallbacks?: Set<() => void>;
     outcome: "pending" | "cache-seeded";
     snapshot?: CachedRscResponse;
     pending?: Promise<void>;
@@ -184,10 +214,12 @@ declare module "next/navigation" {
   export const PREFETCH_CACHE_TTL: number;
   export function getPrefetchCache(): Map<string, PrefetchCacheEntry>;
   export function getPrefetchedUrls(): Set<string>;
+  export function invalidatePrefetchCache(): void;
   export function storePrefetchResponse(
     rscUrl: string,
     response: Response,
     interceptionContext?: string | null,
+    options?: { onInvalidate?: () => void },
   ): void;
   export function snapshotRscResponse(response: Response): Promise<CachedRscResponse>;
   export function restoreRscResponse(cached: CachedRscResponse, copy?: boolean): Response;
@@ -291,7 +323,7 @@ declare module "next/legacy/image" {
 }
 
 declare module "next/error" {
-  import { ComponentType } from "react";
+  import { ComponentType, ReactNode } from "react";
 
   type ErrorProps = {
     statusCode: number;
@@ -301,6 +333,16 @@ declare module "next/error" {
 
   const ErrorComponent: ComponentType<ErrorProps>;
   export default ErrorComponent;
+
+  export type ErrorInfo = {
+    error: unknown;
+    reset: () => void;
+    unstable_retry: () => void;
+  };
+
+  export function unstable_catchError<P extends Record<string, unknown>>(
+    fallback: (props: P, errorInfo: ErrorInfo) => ReactNode,
+  ): ComponentType<P & { children?: ReactNode }>;
 }
 
 declare module "next/constants" {
@@ -464,7 +506,7 @@ declare module "next/font/google" {
 
   type FontResult = {
     className: string;
-    style: { fontFamily: string };
+    style: { fontFamily: string; fontWeight?: number; fontStyle?: string };
     variable?: string;
   };
 
@@ -495,7 +537,7 @@ declare module "next/font/local" {
 
   type FontResult = {
     className: string;
-    style: { fontFamily: string };
+    style: { fontFamily: string; fontWeight?: number; fontStyle?: string };
     variable?: string;
   };
 
@@ -503,11 +545,46 @@ declare module "next/font/local" {
 }
 
 declare module "next/app" {
-  import { ComponentType } from "react";
-  export type AppProps = {
-    Component: ComponentType<any>;
-    pageProps: Record<string, unknown>;
+  import * as React from "react";
+  import type { ComponentType } from "react";
+
+  export type AppProps<P = any> = {
+    Component: ComponentType<P> & {
+      getInitialProps?: (ctx: any) => any;
+    };
+    pageProps: P;
+    router?: any;
+    __N_SSG?: boolean;
+    __N_SSP?: boolean;
   };
+
+  export type AppContext = {
+    Component: ComponentType<any> & {
+      getInitialProps?: (ctx: any) => any;
+    };
+    AppTree: ComponentType<any>;
+    ctx: any;
+    router: any;
+  };
+
+  export type AppInitialProps<PageProps = any> = {
+    pageProps: PageProps;
+  };
+
+  /**
+   * Default `App` class component used by Pages Router `_app.js`. Mirrors
+   * Next.js's `packages/next/src/pages/_app.tsx` so userland code can
+   * `import App from "next/app"` and either subclass or call
+   * `App.getInitialProps(appContext)` directly.
+   */
+  export default class App<P = any, CP = any, S = any> extends React.Component<
+    P & AppProps<CP>,
+    S
+  > {
+    static origGetInitialProps: (ctx: AppContext) => Promise<AppInitialProps>;
+    static getInitialProps: (ctx: AppContext) => Promise<AppInitialProps>;
+    render(): React.ReactNode;
+  }
 }
 
 declare module "next/cache" {
@@ -542,6 +619,7 @@ declare module "next/cache" {
         rscData: ArrayBuffer | undefined;
         headers: Record<string, string | string[]> | undefined;
         postponed: string | undefined;
+        renderObservation?: unknown;
         status: number | undefined;
       }
     | {

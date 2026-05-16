@@ -1,4 +1,5 @@
 import type { RouteManifest } from "../routing/app-route-graph.js";
+import { compareAppElementsSlotIds, type AppElementsSlotBinding } from "./app-elements.js";
 import {
   NavigationTraceReasonCodes,
   createNavigationLifecycleTraceFields,
@@ -30,10 +31,23 @@ export type RouteSnapshotV0 = {
   // Ordered ancestor-first, with the root layout at index 0. Same-layout
   // persistence uses prefix comparison, so callers must preserve this order.
   layoutIds: readonly string[];
+  mountedParallelSlots: readonly MountedParallelSlotSnapshotV0[];
   rootBoundaryId: string | null;
   displayUrl: string;
   matchedUrl: string;
+  slotBindings: readonly ParallelSlotBindingSnapshotV0[];
 };
+
+export type MountedParallelSlotSnapshotV0 = {
+  slotId: string;
+  ownerLayoutId: string | null;
+};
+
+// Planner snapshots consume the same canonical slot-binding facts decoded from
+// AppElements metadata. Keep the alias explicit so route-state and transport
+// readers cannot drift into structurally identical but semantically separate
+// shapes.
+export type ParallelSlotBindingSnapshotV0 = AppElementsSlotBinding;
 
 export type NavigationPlannerStateV0 = {
   // V0 keeps a single state shape so intent events and result events can move
@@ -64,7 +78,9 @@ export type RequestedWork =
   | { kind: "prefetch"; href: string };
 
 export type CommitProposal = {
+  preserveAbsentSlots: boolean;
   preserveElementIds: readonly string[];
+  preservePreviousSlotIds: readonly string[];
   reason: "currentRootBoundary" | "rootBoundaryUnknownFallback";
   targetSnapshot: RouteSnapshotV0;
 };
@@ -205,6 +221,119 @@ function resolveSameLayoutAncestorPersistence(
   return commonLayoutIds;
 }
 
+function resolveMountedParallelSlotPersistence(
+  currentSnapshot: RouteSnapshotV0,
+  targetSnapshot: RouteSnapshotV0,
+): readonly string[] {
+  const preservedLayoutIds = resolveSameLayoutAncestorPersistence(currentSnapshot, targetSnapshot);
+  return resolveMountedParallelSlotPersistenceForLayouts(currentSnapshot, preservedLayoutIds);
+}
+
+function resolveMountedParallelSlotPersistenceForLayouts(
+  currentSnapshot: RouteSnapshotV0,
+  preservedLayoutIds: readonly string[],
+): readonly string[] {
+  if (preservedLayoutIds.length === 0) return [];
+  const preservedLayoutIdSet = new Set(preservedLayoutIds);
+
+  const preservedSlotIds: string[] = [];
+  const seenSlotIds = new Set<string>();
+  for (const slot of currentSnapshot.mountedParallelSlots) {
+    if (slot.ownerLayoutId === null) continue;
+    if (!preservedLayoutIdSet.has(slot.ownerLayoutId)) continue;
+    if (seenSlotIds.has(slot.slotId)) continue;
+
+    preservedSlotIds.push(slot.slotId);
+    seenSlotIds.add(slot.slotId);
+  }
+  return preservedSlotIds;
+}
+
+function resolveCurrentRootBoundaryElementPersistence(
+  currentSnapshot: RouteSnapshotV0,
+  targetSnapshot: RouteSnapshotV0,
+): readonly string[] {
+  const preservedLayoutIds = resolveSameLayoutAncestorPersistence(currentSnapshot, targetSnapshot);
+  // Non-commit consumers still receive the legacy mounted-slot element list.
+  // Commit promotion uses preservePreviousSlotIds instead so default/unmatched
+  // slot reuse requires route-state proof.
+  return [
+    ...preservedLayoutIds,
+    ...resolveMountedParallelSlotPersistenceForLayouts(currentSnapshot, preservedLayoutIds),
+  ];
+}
+
+function resolveCurrentRootBoundaryCommitElementPersistence(options: {
+  currentSnapshot: RouteSnapshotV0;
+  lane: OperationLane;
+  targetSnapshot: RouteSnapshotV0;
+}): readonly string[] {
+  // Commit element persistence only keeps layout IDs. Default/unmatched slot
+  // reuse is handled separately by preservePreviousSlotIds, using slot-binding
+  // metadata as proof; payloads without __slotBindings get no semantic reuse.
+  // resolveCurrentRootBoundaryCommitSlotPersistence recomputes this same
+  // ancestor set; planner correctness relies on both calls agreeing so any
+  // preserved slot's owner layout is also present in preserveElementIds.
+  return resolveSameLayoutAncestorPersistence(options.currentSnapshot, options.targetSnapshot);
+}
+
+function resolveCurrentRootBoundaryCommitSlotPersistence(options: {
+  currentSnapshot: RouteSnapshotV0;
+  lane: OperationLane;
+  targetSnapshot: RouteSnapshotV0;
+}): readonly string[] {
+  if (options.lane === "traverse") return [];
+
+  const preservedLayoutIds = resolveSameLayoutAncestorPersistence(
+    options.currentSnapshot,
+    options.targetSnapshot,
+  );
+  if (preservedLayoutIds.length === 0) return [];
+
+  return resolveDefaultOrUnmatchedSlotPersistenceForLayouts({
+    currentSnapshot: options.currentSnapshot,
+    preservedLayoutIds,
+    targetSnapshot: options.targetSnapshot,
+  });
+}
+
+/**
+ * Default/unmatched slot preservation law:
+ *
+ * A target default/unmatched slot may reuse previous content only when:
+ * - the slot's owner layout is part of the preserved layout ancestor set;
+ * - the current visible snapshot proves the same slot had renderable content;
+ * - the navigation is not a traversal.
+ *
+ * Wire absence and UNMATCHED_SLOT markers are not semantic proof.
+ */
+function resolveDefaultOrUnmatchedSlotPersistenceForLayouts(options: {
+  currentSnapshot: RouteSnapshotV0;
+  preservedLayoutIds: readonly string[];
+  targetSnapshot: RouteSnapshotV0;
+}): readonly string[] {
+  const preservedLayoutIdSet = new Set(options.preservedLayoutIds);
+  const slotIdsWithContent = new Set<string>();
+  for (const binding of options.currentSnapshot.slotBindings) {
+    if (binding.state === "unmatched") continue;
+    slotIdsWithContent.add(binding.slotId);
+  }
+
+  const preservedSlotIds: string[] = [];
+  const seenSlotIds = new Set<string>();
+  for (const binding of options.targetSnapshot.slotBindings) {
+    if (binding.ownerLayoutId === null) continue;
+    if (!preservedLayoutIdSet.has(binding.ownerLayoutId)) continue;
+    if (binding.state === "active") continue;
+    if (!slotIdsWithContent.has(binding.slotId)) continue;
+    if (seenSlotIds.has(binding.slotId)) continue;
+
+    preservedSlotIds.push(binding.slotId);
+    seenSlotIds.add(binding.slotId);
+  }
+  return preservedSlotIds.sort(compareAppElementsSlotIds);
+}
+
 function planFlightResponseArrived(options: {
   event: Extract<NavigationEvent, { kind: "flightResponseArrived" }>;
   state: NavigationPlannerStateV0;
@@ -243,7 +372,9 @@ function planFlightResponseArrived(options: {
     return {
       kind: "proposeCommit",
       proposal: {
+        preserveAbsentSlots: true,
         preserveElementIds: [],
+        preservePreviousSlotIds: [],
         reason: "rootBoundaryUnknownFallback",
         targetSnapshot: options.event.result.targetSnapshot,
       },
@@ -255,10 +386,17 @@ function planFlightResponseArrived(options: {
   return {
     kind: "proposeCommit",
     proposal: {
-      preserveElementIds: resolveSameLayoutAncestorPersistence(
-        options.state.visibleSnapshot,
-        options.event.result.targetSnapshot,
-      ),
+      preserveAbsentSlots: false,
+      preserveElementIds: resolveCurrentRootBoundaryCommitElementPersistence({
+        currentSnapshot: options.state.visibleSnapshot,
+        lane: options.event.token.lane,
+        targetSnapshot: options.event.result.targetSnapshot,
+      }),
+      preservePreviousSlotIds: resolveCurrentRootBoundaryCommitSlotPersistence({
+        currentSnapshot: options.state.visibleSnapshot,
+        lane: options.event.token.lane,
+        targetSnapshot: options.event.result.targetSnapshot,
+      }),
       reason: "currentRootBoundary",
       targetSnapshot: options.event.result.targetSnapshot,
     },
@@ -323,5 +461,7 @@ function planNavigation(input: NavigationPlannerInput): NavigationDecisionV0 {
 export const navigationPlanner = {
   classifyRootBoundaryTransition,
   plan: planNavigation,
+  resolveCurrentRootBoundaryElementPersistence,
+  resolveMountedParallelSlotPersistence,
   resolveSameLayoutAncestorPersistence,
 };

@@ -44,7 +44,7 @@ describe("Image SSR rendering", () => {
     expect(html).toContain('data-nimg="1"');
   });
 
-  it("renders with priority (eager loading + fetchpriority)", () => {
+  it("renders with priority (preload + eager loading + fetchpriority)", () => {
     const html = ReactDOMServer.renderToString(
       React.createElement(Image, {
         alt: "priority image",
@@ -54,9 +54,34 @@ describe("Image SSR rendering", () => {
         priority: true,
       }),
     );
+    // Ported from Next.js:
+    // .nextjs-ref/test/e2e/next-image-new/app-dir/app-dir-static.test.ts
+    // .nextjs-ref/packages/next/src/client/image-component.tsx
+    expect(html).toContain('<link rel="preload"');
+    expect(html).toContain('as="image"');
+    expect(html).toContain('fetchPriority="high"');
+    expect(html).toContain(`imageSrcSet="${optUrlHtml("/hero.png", 640)} 640w`);
+    expect(html).not.toContain(`href="${optUrlHtml("/hero.png", 800)}"`);
     expect(html).toContain('loading="eager"');
     expect(html).toContain('fetchPriority="high"');
     expect(html).not.toContain('loading="lazy"');
+  });
+
+  it("renders an image preload for the modern preload prop", () => {
+    const html = ReactDOMServer.renderToString(
+      React.createElement(Image, {
+        alt: "preloaded image",
+        src: "/hero-preload.png",
+        width: 800,
+        height: 600,
+        preload: true,
+      }),
+    );
+    expect(html).toContain('<link rel="preload"');
+    expect(html).toContain('as="image"');
+    expect(html).toContain(`imageSrcSet="${optUrlHtml("/hero-preload.png", 640)} 640w`);
+    expect(html).not.toContain('loading="lazy"');
+    expect(html).not.toContain('fetchPriority="high"');
   });
 
   it("renders fill mode with absolute positioning", () => {
@@ -76,6 +101,27 @@ describe("Image SSR rendering", () => {
     expect(html).toContain("height:100%");
     expect(html).toContain('data-nimg="fill"');
     // Fill defaults sizes to 100vw
+    expect(html).toContain('sizes="100vw"');
+  });
+
+  it("renders remote fill mode with absolute positioning", () => {
+    // Ported from Next.js: test/unit/next-image-get-img-props.test.ts
+    // https://github.com/vercel/next.js/blob/canary/test/unit/next-image-get-img-props.test.ts
+    const html = ReactDOMServer.renderToString(
+      React.createElement(Image, {
+        alt: "remote fill image",
+        src: "https://images.unsplash.com/photo-fill",
+        fill: true,
+      }),
+    );
+    // Remote fill must preserve the same layout contract as local fill:
+    // the DOM img is absolutely positioned and marked as data-nimg="fill".
+    expect(html).not.toMatch(/width="\d+"/);
+    expect(html).not.toMatch(/height="\d+"/);
+    expect(html).toContain("position:absolute");
+    expect(html).toContain("width:100%");
+    expect(html).toContain("height:100%");
+    expect(html).toContain('data-nimg="fill"');
     expect(html).toContain('sizes="100vw"');
   });
 
@@ -784,17 +830,15 @@ describe("onLoad / onError handler attachment (SSR)", () => {
 // https://github.com/vercel/next.js/blob/canary/test/unit/image-optimizer/fetch-external-image.test.ts
 
 describe("dangerouslyAllowLocalIP private-IP guard", () => {
-  const previousNodeEnv = process.env.NODE_ENV;
-
   afterEach(() => {
-    process.env.NODE_ENV = previousNodeEnv;
+    vi.unstubAllEnvs();
     delete process.env.__VINEXT_IMAGE_REMOTE_PATTERNS;
     delete process.env.__VINEXT_IMAGE_DOMAINS;
     delete process.env.__VINEXT_IMAGE_DANGEROUSLY_ALLOW_LOCAL_IP;
   });
 
   it("blocks private-IP remote URLs in production (Image returns null)", async () => {
-    process.env.NODE_ENV = "production";
+    vi.stubEnv("NODE_ENV", "production");
     process.env.__VINEXT_IMAGE_REMOTE_PATTERNS = JSON.stringify([{ hostname: "**" }]);
     process.env.__VINEXT_IMAGE_DANGEROUSLY_ALLOW_LOCAL_IP = "false";
 
@@ -816,7 +860,7 @@ describe("dangerouslyAllowLocalIP private-IP guard", () => {
   });
 
   it("blocks private-IP remote URLs in production (getImageProps returns empty src)", async () => {
-    process.env.NODE_ENV = "production";
+    vi.stubEnv("NODE_ENV", "production");
     process.env.__VINEXT_IMAGE_REMOTE_PATTERNS = JSON.stringify([{ hostname: "**" }]);
     process.env.__VINEXT_IMAGE_DANGEROUSLY_ALLOW_LOCAL_IP = "false";
 
@@ -834,7 +878,7 @@ describe("dangerouslyAllowLocalIP private-IP guard", () => {
   });
 
   it("allows private-IP remote URLs when dangerouslyAllowLocalIP = true", async () => {
-    process.env.NODE_ENV = "production";
+    vi.stubEnv("NODE_ENV", "production");
     process.env.__VINEXT_IMAGE_REMOTE_PATTERNS = JSON.stringify([{ hostname: "**" }]);
     process.env.__VINEXT_IMAGE_DANGEROUSLY_ALLOW_LOCAL_IP = "true";
 
@@ -856,7 +900,7 @@ describe("dangerouslyAllowLocalIP private-IP guard", () => {
   });
 
   it("allows public-IP remote URLs regardless of dangerouslyAllowLocalIP", async () => {
-    process.env.NODE_ENV = "production";
+    vi.stubEnv("NODE_ENV", "production");
     process.env.__VINEXT_IMAGE_REMOTE_PATTERNS = JSON.stringify([{ hostname: "**" }]);
     process.env.__VINEXT_IMAGE_DANGEROUSLY_ALLOW_LOCAL_IP = "false";
 
@@ -878,7 +922,7 @@ describe("dangerouslyAllowLocalIP private-IP guard", () => {
   });
 
   it("warns but does not block private-IP remote URLs in development", async () => {
-    process.env.NODE_ENV = "development";
+    vi.stubEnv("NODE_ENV", "development");
     process.env.__VINEXT_IMAGE_REMOTE_PATTERNS = JSON.stringify([{ hostname: "**" }]);
     process.env.__VINEXT_IMAGE_DANGEROUSLY_ALLOW_LOCAL_IP = "false";
 
