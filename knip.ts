@@ -88,6 +88,10 @@ export default {
   ignoreDependencies: [
     "@typescript/native-preview",
 
+    // Used by workspace tsconfig.json files in `types` array but knip cannot
+    // trace tsconfig type declarations — it only analyzes JS/TS imports.
+    "@cloudflare/workers-types",
+
     // Declared at root package.json but imported from workspace/example code:
     //   @mdx-js/react — no direct imports; retained for MDX runtime resolution.
     //   @mdx-js/rollup — imported from examples/app-router-playground/vite.config.ts
