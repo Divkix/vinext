@@ -5,6 +5,7 @@ import {
   resolveAppPageActionRerenderTarget,
   resolveAppPageIntercept,
   resolveAppPageInterceptMatch,
+  resolveAppPageGenerateStaticParamsSources,
   validateAppPageDynamicParams,
 } from "../packages/vinext/src/server/app-page-request.js";
 
@@ -23,7 +24,23 @@ describe("app page request helpers", () => {
     });
 
     expect(response?.status).toBe(404);
-    await expect(response?.text()).resolves.toBe("Not Found");
+    await expect(response?.text()).resolves.toBe("This page could not be found");
+    expect(clearRequestContext).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns 404 when dynamicParams=false has no static params sources", async () => {
+    const clearRequestContext = vi.fn();
+
+    const response = await validateAppPageDynamicParams({
+      clearRequestContext,
+      enforceStaticParamsOnly: true,
+      generateStaticParams: undefined,
+      isDynamicRoute: true,
+      params: { slug: "anything" },
+    });
+
+    expect(response?.status).toBe(404);
+    await expect(response?.text()).resolves.toBe("This page could not be found");
     expect(clearRequestContext).toHaveBeenCalledTimes(1);
   });
 
@@ -44,22 +61,127 @@ describe("app page request helpers", () => {
     expect(clearRequestContext).not.toHaveBeenCalled();
   });
 
-  it("logs and falls through when generateStaticParams throws", async () => {
-    const logGenerateStaticParamsError = vi.fn();
+  it("requires every segment generateStaticParams source to allow the params", async () => {
+    const clearRequestContext = vi.fn();
+    const layoutGenerateStaticParams = async () => [{ category: "docs" }];
+    const pageGenerateStaticParams = async () => [{ slug: "intro" }];
 
     const response = await validateAppPageDynamicParams({
-      clearRequestContext() {},
+      clearRequestContext,
       enforceStaticParamsOnly: true,
-      async generateStaticParams() {
-        throw new Error("boom");
-      },
+      generateStaticParams: [layoutGenerateStaticParams, pageGenerateStaticParams],
       isDynamicRoute: true,
-      logGenerateStaticParamsError,
-      params: { slug: "post" },
+      params: { category: "docs", slug: "missing" },
+    });
+
+    expect(response?.status).toBe(404);
+    expect(clearRequestContext).toHaveBeenCalledTimes(1);
+  });
+
+  it("passes parent-only params to each generateStaticParams source", async () => {
+    const clearRequestContext = vi.fn();
+    const categoryGenerateStaticParams = vi.fn(() => [{ category: "docs" }]);
+    const itemGenerateStaticParams = vi.fn(
+      ({ params }: { params: Record<string, string | string[]> }) => {
+        if (params.category !== "docs" || params.slug !== undefined) {
+          return [];
+        }
+        return [{ slug: "intro" }];
+      },
+    );
+
+    const response = await validateAppPageDynamicParams({
+      clearRequestContext,
+      enforceStaticParamsOnly: true,
+      generateStaticParams: resolveAppPageGenerateStaticParamsSources({
+        layouts: [null, { generateStaticParams: categoryGenerateStaticParams }],
+        layoutTreePositions: [0, 1],
+        page: { generateStaticParams: itemGenerateStaticParams },
+        routeSegments: ["[category]", "[slug]"],
+      }),
+      isDynamicRoute: true,
+      params: { category: "docs", slug: "intro" },
     });
 
     expect(response).toBeNull();
-    expect(logGenerateStaticParamsError).toHaveBeenCalledTimes(1);
+    expect(clearRequestContext).not.toHaveBeenCalled();
+    expect(categoryGenerateStaticParams).toHaveBeenCalledWith({ params: {} });
+    expect(itemGenerateStaticParams).toHaveBeenCalledWith({ params: { category: "docs" } });
+  });
+
+  // Ported from Next.js: packages/next/src/build/static-paths/app.test.ts
+  // https://github.com/vercel/next.js/blob/canary/packages/next/src/build/static-paths/app.test.ts
+  it("throws when generateStaticParams throws", async () => {
+    const error = new Error("boom");
+
+    await expect(
+      validateAppPageDynamicParams({
+        clearRequestContext() {},
+        enforceStaticParamsOnly: true,
+        async generateStaticParams() {
+          throw error;
+        },
+        isDynamicRoute: true,
+        params: { slug: "post" },
+      }),
+    ).rejects.toThrow(error);
+  });
+
+  // Ported from Next.js: packages/next/src/build/static-paths/app.test.ts
+  // https://github.com/vercel/next.js/blob/canary/packages/next/src/build/static-paths/app.test.ts
+  it("throws when generateStaticParams rejects", async () => {
+    const error = new Error("async boom");
+
+    await expect(
+      validateAppPageDynamicParams({
+        clearRequestContext() {},
+        enforceStaticParamsOnly: true,
+        async generateStaticParams() {
+          return Promise.reject(error);
+        },
+        isDynamicRoute: true,
+        params: { slug: "post" },
+      }),
+    ).rejects.toThrow(error);
+  });
+
+  // Ported from Next.js: packages/next/src/build/static-paths/app.test.ts
+  // https://github.com/vercel/next.js/blob/canary/packages/next/src/build/static-paths/app.test.ts
+  it("does not check remaining sources when an earlier generateStaticParams source throws", async () => {
+    const clearRequestContext = vi.fn();
+    const throwsSource = vi.fn(() => {
+      throw new Error("source 1 failed");
+    });
+    const rejectsSource = vi.fn(async () => [{ slug: "other" }]);
+
+    await expect(
+      validateAppPageDynamicParams({
+        clearRequestContext,
+        enforceStaticParamsOnly: true,
+        generateStaticParams: [throwsSource, rejectsSource],
+        isDynamicRoute: true,
+        params: { slug: "target" },
+      }),
+    ).rejects.toThrow("source 1 failed");
+
+    expect(clearRequestContext).not.toHaveBeenCalled();
+    expect(throwsSource).toHaveBeenCalledTimes(1);
+    expect(rejectsSource).not.toHaveBeenCalled();
+  });
+
+  it("returns 404 when generateStaticParams excludes the requested params", async () => {
+    const clearRequestContext = vi.fn();
+
+    const response = await validateAppPageDynamicParams({
+      clearRequestContext,
+      enforceStaticParamsOnly: true,
+      generateStaticParams: async () => [{ slug: "other" }],
+      isDynamicRoute: true,
+      params: { slug: "target" },
+    });
+
+    expect(response?.status).toBe(404);
+    expect(clearRequestContext).toHaveBeenCalledTimes(1);
   });
 
   it("renders intercepted source routes on RSC navigations", async () => {

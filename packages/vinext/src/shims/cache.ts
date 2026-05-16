@@ -17,8 +17,8 @@
  *   setCacheHandler(new MyCacheHandler());
  */
 
-import { markDynamicUsage as _markDynamic } from "./headers.js";
-import { AsyncLocalStorage } from "node:async_hooks";
+import { getHeadersAccessPhase, markDynamicUsage as _markDynamic } from "./headers.js";
+import { getOrCreateAls } from "./internal/als-registry.js";
 import { fnv1a64 } from "../utils/hash.js";
 import {
   isInsideUnifiedScope,
@@ -28,6 +28,8 @@ import {
 import { workUnitAsyncStorage } from "./internal/work-unit-async-storage.js";
 import { makeHangingPromise } from "./internal/make-hanging-promise.js";
 import { readCacheControlNumberField } from "../utils/cache-control-metadata.js";
+import { encodeCacheTag, encodeCacheTags } from "../utils/encode-cache-tag.js";
+import type { RenderObservation } from "../server/cache-proof.js";
 
 // ---------------------------------------------------------------------------
 // Lazy accessor for cache context — avoids circular imports with cache-runtime.
@@ -96,6 +98,7 @@ export type CachedAppPageValue = {
   rscData: ArrayBuffer | undefined;
   headers: Record<string, string | string[]> | undefined;
   postponed: string | undefined;
+  renderObservation?: RenderObservation;
   status: number | undefined;
 };
 
@@ -388,7 +391,14 @@ export async function revalidateTag(
   } else if (profile && typeof profile === "object") {
     durations = profile;
   }
-  await _getActiveHandler().revalidateTag(tag, durations);
+  // Notify the client router whenever the server-side cache is fully
+  // invalidated (no SWR window). An unknown profile name resolves to no
+  // durations, in which case the handler treats it as a full invalidation —
+  // so we mark here too, matching what actually happens server-side.
+  if (!profile || !durations || durations.expire === 0) {
+    markActionRevalidation(ACTION_DID_REVALIDATE_STATIC_AND_DYNAMIC);
+  }
+  await _getActiveHandler().revalidateTag(encodeCacheTag(tag), durations);
 }
 
 /**
@@ -407,10 +417,11 @@ export async function revalidateTag(
  * layout/page hierarchy tags, so only no-type invalidation applies there.
  */
 export async function revalidatePath(path: string, type?: "page" | "layout"): Promise<void> {
+  markActionRevalidation(ACTION_DID_REVALIDATE_STATIC_AND_DYNAMIC);
   // Strip trailing slash so root "/" becomes "" — avoids double-slash in _N_T_//layout
   const stem = path.endsWith("/") ? path.slice(0, -1) : path;
   const tag = type ? `_N_T_${stem}/${type}` : `_N_T_${stem || "/"}`;
-  await _getActiveHandler().revalidateTag(tag);
+  await _getActiveHandler().revalidateTag(encodeCacheTag(tag));
 }
 
 /**
@@ -418,10 +429,12 @@ export async function revalidatePath(path: string, type?: "page" | "layout"): Pr
  *
  * In Next.js, calling `refresh()` inside a Server Action triggers a
  * client-side router refresh so the user immediately sees updated data.
- * vinext does not yet implement the Server Actions refresh protocol,
- * so this function has no effect.
+ * vinext reports the dynamic-only invalidation through the Server Action
+ * response header that the client router already understands.
  */
-export function refresh(): void {}
+export function refresh(): void {
+  markActionRevalidation(ACTION_DID_REVALIDATE_DYNAMIC_ONLY);
+}
 
 /**
  * Expire a cache tag immediately (Next.js 16).
@@ -431,8 +444,9 @@ export function refresh(): void {}
  * `updateTag` invalidates synchronously within the same request context.
  */
 export async function updateTag(tag: string): Promise<void> {
+  markActionRevalidation(ACTION_DID_REVALIDATE_STATIC_AND_DYNAMIC);
   // Expire the tag immediately (same as revalidateTag without SWR)
-  await _getActiveHandler().revalidateTag(tag);
+  await _getActiveHandler().revalidateTag(encodeCacheTag(tag));
 }
 
 /**
@@ -468,6 +482,7 @@ const _resolvedIOPromise: Promise<void> = Promise.resolve(undefined);
  *
  * See: https://github.com/vercel/next.js/pull/92521
  * Guard removed: https://github.com/vercel/next.js/pull/92923
+ * Stabilized (renamed from unstable_io): https://github.com/vercel/next.js/pull/93621
  *
  * Ported from Next.js: packages/next/src/server/request/io.ts
  * https://github.com/vercel/next.js/blob/canary/packages/next/src/server/request/io.ts
@@ -484,7 +499,7 @@ const _resolvedIOPromise: Promise<void> = Promise.resolve(undefined);
  * When no work unit store is present (e.g. client-side, standalone script),
  * resolves immediately — matching the browser/client implementation.
  */
-export function unstable_io(): Promise<void> {
+export function io(): Promise<void> {
   const workUnitStore = workUnitAsyncStorage.getStore();
 
   if (workUnitStore) {
@@ -500,7 +515,7 @@ export function unstable_io(): Promise<void> {
         return makeHangingPromise(
           workUnitStore.renderSignal,
           /* route */ workUnitStore.route ?? "unknown",
-          "`unstable_io()`",
+          "`io()`",
         );
       case "cache":
       case "private-cache":
@@ -518,6 +533,21 @@ export function unstable_io(): Promise<void> {
   return _resolvedIOPromise;
 }
 
+/**
+ * @deprecated Use `io` instead. Kept as a transitional alias since vinext
+ * shipped the unstable name longer than upstream Next.js (see #805). Will be
+ * removed in a future minor.
+ */
+export function unstable_io(): Promise<void> {
+  if (!_unstableIoWarned) {
+    _unstableIoWarned = true;
+    console.warn("[vinext] `unstable_io` is deprecated. Import `io` from 'next/cache' instead.");
+  }
+  return io();
+}
+
+let _unstableIoWarned = false;
+
 // ---------------------------------------------------------------------------
 // Request-scoped cacheLife for page-level "use cache" directives.
 // When cacheLife() is called outside a "use cache" function context (e.g.,
@@ -527,22 +557,27 @@ export function unstable_io(): Promise<void> {
 // Uses AsyncLocalStorage for request isolation on concurrent workers.
 // ---------------------------------------------------------------------------
 export type UnstableCacheRevalidationMode = "foreground" | "background";
+export type ActionRevalidationKind = 0 | 1 | 2;
 
 export type CacheState = {
+  actionRevalidationKind: ActionRevalidationKind;
   requestScopedCacheLife: CacheLifeConfig | null;
   unstableCacheRevalidation: UnstableCacheRevalidationMode;
 };
 
-const _ALS_KEY = Symbol.for("vinext.cache.als");
 const _FALLBACK_KEY = Symbol.for("vinext.cache.fallback");
 const _g = globalThis as unknown as Record<PropertyKey, unknown>;
-const _cacheAls = (_g[_ALS_KEY] ??=
-  new AsyncLocalStorage<CacheState>()) as AsyncLocalStorage<CacheState>;
+const _cacheAls = getOrCreateAls<CacheState>("vinext.cache.als");
 
 const _cacheFallbackState = (_g[_FALLBACK_KEY] ??= {
+  actionRevalidationKind: 0,
   requestScopedCacheLife: null,
   unstableCacheRevalidation: "foreground",
 } satisfies CacheState) as CacheState;
+
+const ACTION_DID_NOT_REVALIDATE = 0 satisfies ActionRevalidationKind;
+const ACTION_DID_REVALIDATE_STATIC_AND_DYNAMIC = 1 satisfies ActionRevalidationKind;
+const ACTION_DID_REVALIDATE_DYNAMIC_ONLY = 2 satisfies ActionRevalidationKind;
 
 function _getCacheState(): CacheState {
   if (isInsideUnifiedScope()) {
@@ -562,11 +597,13 @@ export function _runWithCacheState<T>(fn: () => T | Promise<T>): T | Promise<T>;
 export function _runWithCacheState<T>(fn: () => T | Promise<T>): T | Promise<T> {
   if (isInsideUnifiedScope()) {
     return runWithUnifiedStateMutation((uCtx) => {
+      uCtx.actionRevalidationKind = ACTION_DID_NOT_REVALIDATE;
       uCtx.requestScopedCacheLife = null;
       uCtx.unstableCacheRevalidation = "foreground";
     }, fn);
   }
   const state: CacheState = {
+    actionRevalidationKind: ACTION_DID_NOT_REVALIDATE,
     requestScopedCacheLife: null,
     unstableCacheRevalidation: "foreground",
   };
@@ -579,7 +616,28 @@ export function _runWithCacheState<T>(fn: () => T | Promise<T>): T | Promise<T> 
  * @internal
  */
 export function _initRequestScopedCacheState(): void {
-  _getCacheState().requestScopedCacheLife = null;
+  const state = _getCacheState();
+  state.actionRevalidationKind = ACTION_DID_NOT_REVALIDATE;
+  state.requestScopedCacheLife = null;
+}
+
+function markActionRevalidation(kind: ActionRevalidationKind): void {
+  if (getHeadersAccessPhase() !== "action") return;
+
+  const state = _getCacheState();
+  // Static/data invalidation includes the dynamic refresh case, so never
+  // downgrade from kind 1 to kind 2 if both APIs run in one action.
+  state.actionRevalidationKind =
+    state.actionRevalidationKind === ACTION_DID_REVALIDATE_STATIC_AND_DYNAMIC
+      ? ACTION_DID_REVALIDATE_STATIC_AND_DYNAMIC
+      : kind;
+}
+
+export function getAndClearActionRevalidationKind(): ActionRevalidationKind {
+  const state = _getCacheState();
+  const kind = state.actionRevalidationKind;
+  state.actionRevalidationKind = ACTION_DID_NOT_REVALIDATE;
+  return kind;
 }
 
 /**
@@ -736,11 +794,63 @@ export function cacheTag(...tags: string[]): void {
   try {
     const ctx = _getCacheContextFn?.();
     if (ctx) {
-      ctx.tags.push(...tags);
+      ctx.tags.push(...encodeCacheTags(tags));
     }
   } catch {
     // Not in a cache context — no-op
   }
+}
+
+/**
+ * @deprecated Use `cacheLife` instead. `unstable_cacheLife` was stabilized
+ * upstream and the `unstable_`-prefixed name will be removed in a future
+ * version of Next.js. Kept as a delegating alias for parity.
+ *
+ * Emits a one-time deprecation warning via `console.error` (matching Next.js),
+ * then delegates to `cacheLife`.
+ *
+ * Ported from Next.js: packages/next/cache.js
+ * https://github.com/vercel/next.js/blob/canary/packages/next/cache.js
+ *
+ * Asserted by Next.js test:
+ * test/e2e/app-dir/cache-components-errors/cache-components-unstable-deprecations.test.ts
+ */
+let _unstableCacheLifeWarned = false;
+export function unstable_cacheLife(profile: string | CacheLifeConfig): void {
+  if (!_unstableCacheLifeWarned) {
+    _unstableCacheLifeWarned = true;
+    const error = new Error(
+      "`unstable_cacheLife` was recently stabilized and should be imported as `cacheLife`. The `unstable` prefixed form will be removed in a future version of Next.js.",
+    );
+    console.error(error);
+  }
+  return cacheLife(profile);
+}
+
+/**
+ * @deprecated Use `cacheTag` instead. `unstable_cacheTag` was stabilized
+ * upstream and the `unstable_`-prefixed name will be removed in a future
+ * version of Next.js. Kept as a delegating alias for parity.
+ *
+ * Emits a one-time deprecation warning via `console.error` (matching Next.js),
+ * then delegates to `cacheTag`.
+ *
+ * Ported from Next.js: packages/next/cache.js
+ * https://github.com/vercel/next.js/blob/canary/packages/next/cache.js
+ *
+ * Asserted by Next.js test:
+ * test/e2e/app-dir/cache-components-errors/cache-components-unstable-deprecations.test.ts
+ */
+let _unstableCacheTagWarned = false;
+export function unstable_cacheTag(...tags: string[]): void {
+  if (!_unstableCacheTagWarned) {
+    _unstableCacheTagWarned = true;
+    const error = new Error(
+      "`unstable_cacheTag` was recently stabilized and should be imported as `cacheTag`. The `unstable` prefixed form will be removed in a future version of Next.js.",
+    );
+    console.error(error);
+  }
+  return cacheTag(...tags);
 }
 
 // ---------------------------------------------------------------------------
@@ -752,9 +862,7 @@ export function cacheTag(...tags: string[]): void {
  * Stored on globalThis via Symbol so headers.ts can detect the scope without
  * a direct import (avoiding circular dependencies).
  */
-const _UNSTABLE_CACHE_ALS_KEY = Symbol.for("vinext.unstableCache.als");
-const _unstableCacheAls = (_g[_UNSTABLE_CACHE_ALS_KEY] ??=
-  new AsyncLocalStorage<boolean>()) as AsyncLocalStorage<boolean>;
+const _unstableCacheAls = getOrCreateAls<boolean>("vinext.unstableCache.als");
 
 /**
  * Wrapper used to serialize `unstable_cache` results so that `undefined` can
@@ -892,7 +1000,7 @@ export function unstable_cache<T extends (...args: any[]) => Promise<any>>(
   // different functions may hash to the same key, or the same function may
   // hash differently across builds. Always pass explicit keyParts in
   // production to get a stable, collision-free cache key.
-  const tags = options?.tags ?? [];
+  const tags = encodeCacheTags(options?.tags ?? []);
   const revalidateSeconds = options?.revalidate;
 
   const cachedFn = async (...args: Parameters<T>) => {

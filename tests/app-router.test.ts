@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import zlib from "node:zlib";
@@ -40,6 +41,56 @@ function textContentByTestId(html: string, testId: string): string {
   }
 
   return decodeHtmlText(html.slice(contentStart + 1, contentEnd));
+}
+
+async function withCountingFetchTarget<T>(
+  fn: (targetUrl: string, getRequestCount: () => number) => Promise<T>,
+): Promise<T> {
+  let requestCount = 0;
+  const upstream = http.createServer((_req, res) => {
+    requestCount += 1;
+    res.setHeader("content-type", "application/json");
+    res.end(JSON.stringify({ count: requestCount }));
+  });
+
+  await new Promise<void>((resolve, reject) => {
+    upstream.once("error", reject);
+    upstream.listen(0, "127.0.0.1", () => {
+      upstream.off("error", reject);
+      resolve();
+    });
+  });
+
+  const address = upstream.address();
+  if (!address || typeof address === "string") {
+    await new Promise<void>((resolve, reject) => {
+      upstream.close((error) => (error ? reject(error) : resolve()));
+    });
+    throw new Error("Counting fetch target did not bind to a TCP port");
+  }
+
+  try {
+    return await fn(`http://127.0.0.1:${address.port}/tick`, () => requestCount);
+  } finally {
+    await new Promise<void>((resolve, reject) => {
+      upstream.close((error) => (error ? reject(error) : resolve()));
+    });
+  }
+}
+
+async function waitForCondition(
+  condition: () => boolean,
+  options?: { intervalMs?: number; timeoutMs?: number },
+): Promise<void> {
+  const intervalMs = options?.intervalMs ?? 100;
+  const deadline = Date.now() + (options?.timeoutMs ?? 3000);
+
+  while (!condition()) {
+    if (Date.now() >= deadline) {
+      throw new Error("Timed out waiting for condition");
+    }
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
 }
 
 describe("App Router integration", () => {
@@ -112,6 +163,20 @@ describe("App Router integration", () => {
     expect(html).toContain("hello-world");
   });
 
+  // Ported from Next.js: test/e2e/app-dir/cache-components/cache-components.params.test.ts
+  // https://github.com/vercel/next.js/blob/canary/test/e2e/app-dir/cache-components/cache-components.params.test.ts
+  it("renders pages with params named then, catch, finally, and status", async () => {
+    const { res, html } = await fetchHtml(baseUrl, "/params-shadow/foo/bar/baz/qux");
+    expect(res.status).toBe(200);
+    expect(html).toContain("Params Shadow Test");
+    expect(textContentByTestId(html, "then")).toBe("foo");
+    expect(textContentByTestId(html, "catch")).toBe("bar");
+    expect(textContentByTestId(html, "finally")).toBe("baz");
+    expect(textContentByTestId(html, "status")).toBe("qux");
+    // The params object must remain thenable (Promise methods are not shadowed)
+    expect(textContentByTestId(html, "is-thenable")).toBe("yes");
+  });
+
   it("does not collapse encoded slashes onto nested routes in dev", async () => {
     const encodedRes = await fetch(`${baseUrl}/headers%2Foverride-from-middleware`);
     expect(encodedRes.status).toBe(404);
@@ -145,6 +210,21 @@ describe("App Router integration", () => {
   it("returns 404 for non-existent routes", async () => {
     const res = await fetch(`${baseUrl}/nonexistent`);
     expect(res.status).toBe(404);
+  });
+
+  // Next.js sets the RSC response Content-Type to exactly "text/x-component"
+  // (no charset). Several Next.js tests use strict equality:
+  //   .nextjs-ref/test/e2e/app-dir/app/index.test.ts L362, L371
+  //   .nextjs-ref/test/e2e/app-dir/segment-cache/deployment-skew/deployment-skew.test.ts L80
+  // Source constant:
+  //   .nextjs-ref/packages/next/src/client/components/app-router-headers.ts L17
+  //   export const RSC_CONTENT_TYPE_HEADER = 'text/x-component' as const
+  it("uses text/x-component for the RSC Content-Type with no charset suffix", async () => {
+    const res = await fetch(`${baseUrl}/about.rsc`, {
+      headers: { Accept: "text/x-component", RSC: "1" },
+    });
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toBe("text/x-component");
   });
 
   // Dual-router coexistence: the app-basic fixture has both app/ and pages/
@@ -224,6 +304,63 @@ describe("App Router integration", () => {
     expect(html).not.toContain("NOT_FOUND");
   });
 
+  it("does not dedupe identical fetches in app route handlers", async () => {
+    await withCountingFetchTarget(async (targetUrl, getRequestCount) => {
+      process.env.TEST_FETCH_DEDUPE_TARGET = targetUrl;
+      try {
+        const res = await fetch(`${baseUrl}/api/fetch-dedupe`);
+        expect(res.status).toBe(200);
+        expect(await res.json()).toEqual({ counts: [1, 2] });
+        expect(getRequestCount()).toBe(2);
+      } finally {
+        delete process.env.TEST_FETCH_DEDUPE_TARGET;
+      }
+    });
+  });
+
+  it("does not dedupe identical fetches in middleware", async () => {
+    await withCountingFetchTarget(async (targetUrl, getRequestCount) => {
+      process.env.TEST_FETCH_DEDUPE_TARGET = targetUrl;
+      try {
+        const res = await fetch(`${baseUrl}/middleware-fetch-dedupe`);
+        expect(res.status).toBe(200);
+        expect(await res.json()).toEqual({ counts: [1, 2] });
+        expect(getRequestCount()).toBe(2);
+      } finally {
+        delete process.env.TEST_FETCH_DEDUPE_TARGET;
+      }
+    });
+  });
+
+  it("dedupes identical fetches during app page server component render", async () => {
+    await withCountingFetchTarget(async (targetUrl, getRequestCount) => {
+      process.env.TEST_FETCH_DEDUPE_TARGET = targetUrl;
+      try {
+        const { res, html } = await fetchHtml(baseUrl, "/fetch-dedupe-render");
+        expect(res.status).toBe(200);
+        expect(textContentByTestId(html, "fetch-dedupe-counts")).toBe("[1,1]");
+        expect(getRequestCount()).toBe(1);
+      } finally {
+        delete process.env.TEST_FETCH_DEDUPE_TARGET;
+      }
+    });
+  });
+
+  it("dedupes identical no-store fetches across generateMetadata and page render", async () => {
+    await withCountingFetchTarget(async (targetUrl, getRequestCount) => {
+      process.env.TEST_FETCH_DEDUPE_TARGET = targetUrl;
+      try {
+        const { res, html } = await fetchHtml(baseUrl, "/fetch-dedupe-metadata");
+        expect(res.status).toBe(200);
+        expect(html).toContain("<title>Product 1</title>");
+        expect(textContentByTestId(html, "fetch-dedupe-metadata-count")).toBe("1");
+        expect(getRequestCount()).toBe(1);
+      } finally {
+        delete process.env.TEST_FETCH_DEDUPE_TARGET;
+      }
+    });
+  });
+
   it("SSR renders 'use client' components that use usePathname/useSearchParams", async () => {
     const res = await fetch(`${baseUrl}/client-nav-test?q=hello`);
     expect(res.status).toBe(200);
@@ -234,6 +371,14 @@ describe("App Router integration", () => {
     expect(html).toContain("client-nav-info");
     expect(html).toContain("/client-nav-test");
     expect(html).toContain("hello");
+  });
+
+  it("SSR renders a real app route that calls useRouter()", async () => {
+    const { res, html } = await fetchHtml(baseUrl, "/nextjs-compat/hooks-router");
+    expect(res.status).toBe(200);
+    expect(html).toContain("Router Test Page");
+    expect(html).toContain("/nextjs-compat/hooks-router");
+    expect(html).not.toContain("invariant expected app router to be mounted");
   });
 
   it("applies nested layouts (dashboard layout wraps dashboard pages)", async () => {
@@ -393,6 +538,21 @@ describe("App Router integration", () => {
     const html = await res.text();
     expect(html).toContain('data-testid="team-slot-layout"');
     expect(html).toContain('data-testid="team-members-page"');
+  });
+
+  it("renders nested parallel route from layout-only parent", async () => {
+    // Ported from Next.js: test/e2e/app-dir/parallel-routes-and-interception/parallel-routes-and-interception.test.ts (line 510)
+    // https://github.com/vercel/next.js/blob/canary/test/e2e/app-dir/parallel-routes-and-interception/parallel-routes-and-interception.test.ts
+    // Fixture: home/layout.tsx + @parallelB/default.tsx + @parallelB/nested/page.tsx (no home/page.tsx)
+    const res = await fetch(`${baseUrl}/parallel-nested/home/nested`);
+    expect(res.status).toBe(200);
+
+    const html = await res.text();
+    // Parent layout should be present
+    expect(html).toContain('data-testid="home-layout"');
+    // @parallelB slot should show the nested sub-page
+    expect(html).toContain('data-testid="parallelB-nested-page"');
+    expect(html).toContain("Hello from nested parallel page!");
   });
 
   // --- useSelectedLayoutSegment(s) ---
@@ -692,6 +852,20 @@ describe("App Router integration", () => {
     expect(data).toEqual({ id: "99", name: "Widget" });
   });
 
+  // Ported from Next.js: test/e2e/app-dir/cache-components/cache-components.params.test.ts
+  // https://github.com/vercel/next.js/blob/canary/test/e2e/app-dir/cache-components/cache-components.params.test.ts
+  it("passes params named then, catch, finally, and status to route handlers", async () => {
+    const res = await fetch(`${baseUrl}/api/params-shadow/foo/bar/baz/qux`);
+    expect(res.status).toBe(200);
+    const data = await res.json();
+    expect(data.then).toBe("foo");
+    expect(data.catch).toBe("bar");
+    expect(data.finally).toBe("baz");
+    expect(data.status).toBe("qux");
+    // The params object must remain thenable (Promise methods are not shadowed)
+    expect(data.isThenable).toBe(true);
+  });
+
   it("ignores default export route handlers and returns 405", async () => {
     const res = await fetch(`${baseUrl}/api/invalid-default`);
     expect(res.status).toBe(405);
@@ -787,6 +961,41 @@ describe("App Router integration", () => {
     // Should include noindex meta
     expect(html).toContain('name="robots"');
     expect(html).toContain('content="noindex"');
+  });
+
+  it("notFound() from async page with loading.tsx returns 404 (NEXT_NOT_FOUND digest)", async () => {
+    // Same regression path as redirect-with-loading.tsx, but for notFound().
+    // Distinct from forbidden/unauthorized: notFound() throws the bare
+    // "NEXT_NOT_FOUND" digest (not "NEXT_HTTP_ERROR_FALLBACK;404"), which
+    // takes a separate branch in resolveAppPageSpecialError. This is the
+    // most common loading-boundary special-error case in real apps —
+    // a dynamic detail page with a loading state that calls notFound()
+    // when the record is missing.
+    const res = await fetch(`${baseUrl}/notfound-loading`);
+    expect(res.status).toBe(404);
+    const html = await res.text();
+    expect(html).toContain("404 - Page Not Found");
+  });
+
+  it("forbidden() from async page with loading.tsx returns 403 (digest status preserved)", async () => {
+    // Same regression path as the redirect()-with-loading.tsx tests, but
+    // for forbidden() — verifies the post-shell digest swap reads the
+    // status code from NEXT_HTTP_ERROR_FALLBACK;403 rather than coercing
+    // to 404, and renders the root forbidden.tsx boundary.
+    const res = await fetch(`${baseUrl}/forbidden-loading`);
+    expect(res.status).toBe(403);
+    const html = await res.text();
+    expect(html).toContain("403 - Forbidden");
+  });
+
+  it("unauthorized() from async page with loading.tsx returns 401 (digest status preserved)", async () => {
+    // Same regression path as forbidden-loading but for unauthorized() —
+    // verifies the post-shell digest swap honors NEXT_HTTP_ERROR_FALLBACK;401
+    // and renders the root unauthorized.tsx boundary.
+    const res = await fetch(`${baseUrl}/unauthorized-loading`);
+    expect(res.status).toBe(401);
+    const html = await res.text();
+    expect(html).toContain("401 - Unauthorized");
   });
 
   it("forbidden() thrown from a layout uses the forbidden boundary", async () => {
@@ -889,6 +1098,35 @@ describe("App Router integration", () => {
     const { res, html } = await fetchHtml(baseUrl, "/probe-async-search");
     expect(res.status).toBe(200);
     expect(html).toContain("probe-async-search-page");
+  });
+
+  it("redirect() from async page with loading.tsx returns 307 (digest captured during shell render)", async () => {
+    // Regression: when a page has a loading.tsx sibling and the page
+    // function is async, the probe used to fire-and-forget the page
+    // promise (to preserve loading.tsx streaming for non-redirecting
+    // pages). The route-level Suspense boundary would absorb the
+    // redirect throw, and React would serialize a "Switched to client
+    // rendering" error into a 200 body instead of returning a clean 307.
+    //
+    // Fix: the probe is skipped entirely for hasLoadingBoundary routes;
+    // the rscErrorTracker captures the NEXT_REDIRECT digest from React's
+    // onError during shell render; the lifecycle inspects the tracker
+    // after the shell promise resolves and swaps the response to a 307.
+    const res = await fetch(`${baseUrl}/protected-loading`, { redirect: "manual" });
+    expect(res.status).toBe(307);
+    expect(res.headers.get("location")).toMatch(/\/$/);
+  });
+
+  it("permanentRedirect() from async page with loading.tsx returns 308 (digest status preserved)", async () => {
+    // Same regression path as the redirect()-with-loading.tsx test above,
+    // but verifies the post-shell digest swap honors the status code from
+    // the NEXT_REDIRECT digest (308) rather than coercing to the 307
+    // default.
+    const res = await fetch(`${baseUrl}/permanent-protected-loading`, {
+      redirect: "manual",
+    });
+    expect(res.status).toBe(308);
+    expect(res.headers.get("location")).toMatch(/\/$/);
   });
 
   it("permanentRedirect() returns 308 status code", async () => {
@@ -1335,6 +1573,53 @@ describe("App Router integration", () => {
     expect(html).toContain("any-random-slug");
   });
 
+  it("applies dynamicParams = false exported from a layout to child pages", async () => {
+    const known = await fetch(`${baseUrl}/layout-segment-config/dynamic/known`);
+    expect(known.status).toBe(200);
+    expect(await known.text()).toContain('data-testid="layout-segment-config-dynamic"');
+
+    const unknown = await fetch(`${baseUrl}/layout-segment-config/dynamic/unknown`);
+    expect(unknown.status).toBe(404);
+  });
+
+  it("uses layout-level generateStaticParams when enforcing dynamicParams = false", async () => {
+    const known = await fetch(`${baseUrl}/layout-segment-config/layout-gsp/known`);
+    expect(known.status).toBe(200);
+    expect(await known.text()).toContain('data-testid="layout-segment-config-layout-gsp"');
+
+    const unknown = await fetch(`${baseUrl}/layout-segment-config/layout-gsp/unknown`);
+    expect(unknown.status).toBe(404);
+  });
+
+  it("returns 404 when dynamicParams = false has no generateStaticParams sources", async () => {
+    const res = await fetch(`${baseUrl}/layout-segment-config/no-gsp/anything`);
+    expect(res.status).toBe(404);
+  });
+
+  it("passes parent-only params to nested generateStaticParams during dynamicParams validation", async () => {
+    const known = await fetch(`${baseUrl}/layout-segment-config/nested-gsp/docs/intro`);
+    expect(known.status).toBe(200);
+    expect(await known.text()).toContain('data-testid="layout-segment-config-nested-gsp"');
+
+    const unknown = await fetch(`${baseUrl}/layout-segment-config/nested-gsp/docs/missing`);
+    expect(unknown.status).toBe(404);
+  });
+
+  it("defaults dynamicParams to false under a dynamic = 'error' layout", async () => {
+    const known = await fetch(`${baseUrl}/layout-segment-config/dynamic-error/known`);
+    expect(known.status).toBe(200);
+    expect(await known.text()).toContain('data-testid="layout-segment-config-dynamic-error"');
+
+    const unknown = await fetch(`${baseUrl}/layout-segment-config/dynamic-error/unknown`);
+    expect(unknown.status).toBe(404);
+  });
+
+  it("applies dynamic = 'error' as only-cache fetch policy", async () => {
+    const res = await fetch(`${baseUrl}/layout-segment-config/dynamic-error-fetch`);
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain("only-cache");
+  });
+
   it("generateStaticParams receives parent params in nested dynamic routes", async () => {
     // /shop/[category]/[item] — the item page's generateStaticParams receives { category }
     const res = await fetch(`${baseUrl}/shop/electronics/phone`);
@@ -1375,6 +1660,23 @@ describe("App Router integration", () => {
     const cacheControl = res.headers.get("cache-control");
     expect(cacheControl).toContain("s-maxage=60");
     expect(cacheControl).toContain("stale-while-revalidate");
+  });
+
+  it("applies revalidate exported from a layout to child pages", async () => {
+    const res = await fetch(`${baseUrl}/layout-segment-config/revalidate`);
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain('data-testid="layout-segment-config-revalidate"');
+
+    const cacheControl = res.headers.get("cache-control");
+    expect(cacheControl).toContain("s-maxage=30");
+    expect(cacheControl).toContain("stale-while-revalidate");
+  });
+
+  it("applies dynamic = 'force-dynamic' exported from a layout to child pages", async () => {
+    const res = await fetch(`${baseUrl}/layout-segment-config/force-dynamic`);
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain('data-testid="layout-segment-config-force-dynamic"');
+    expect(res.headers.get("cache-control")).toContain("no-store");
   });
 
   it("search page renders Form component with SSR", async () => {
@@ -1578,11 +1880,12 @@ describe("App Router integration", () => {
   });
 
   it("blocks RSC stream requests with cross-origin Origin header", async () => {
-    const res = await fetch(`${baseUrl}/about`, {
+    const res = await fetch(`${baseUrl}/about.rsc`, {
       headers: {
         Origin: "https://evil.com",
         Host: new URL(baseUrl).host,
         Accept: "text/x-component",
+        RSC: "1",
       },
     });
     expect(res.status).toBe(403);
@@ -1917,12 +2220,12 @@ describe("App Router Production server (startProdServer)", () => {
     expect(res.headers.get("content-type")).toContain("text/x-component");
   });
 
-  it("returns RSC stream for Accept: text/x-component", async () => {
+  it("returns HTML for header-only RSC requests at canonical page URLs", async () => {
     const res = await fetch(`${baseUrl}/about`, {
-      headers: { Accept: "text/x-component" },
+      headers: { Accept: "text/x-component", RSC: "1" },
     });
     expect(res.status).toBe(200);
-    expect(res.headers.get("content-type")).toContain("text/x-component");
+    expect(res.headers.get("content-type")).toContain("text/html");
   });
 
   it("serves route handlers (GET /api/hello)", async () => {
@@ -2137,9 +2440,49 @@ describe("App Router Production server (startProdServer)", () => {
     expect(res3.headers.get("x-vinext-cache")).toBe("MISS");
   });
 
+  it("dedupes identical no-store fetches across metadata and page render during ISR background regeneration", async () => {
+    await withCountingFetchTarget(async (targetUrl, getRequestCount) => {
+      process.env.TEST_FETCH_DEDUPE_TARGET = targetUrl;
+      try {
+        const warmRes = await fetch(`${baseUrl}/fetch-dedupe-isr-metadata`);
+        expect(warmRes.status).toBe(200);
+        expect(await warmRes.text()).toContain("<title>ISR Product 1</title>");
+        expect(getRequestCount()).toBe(1);
+
+        await new Promise((resolve) => setTimeout(resolve, 1500));
+
+        const staleRes = await fetch(`${baseUrl}/fetch-dedupe-isr-metadata`);
+        expect(staleRes.status).toBe(200);
+        await staleRes.arrayBuffer();
+
+        await waitForCondition(() => getRequestCount() > 1, {
+          intervalMs: 100,
+          timeoutMs: 3000,
+        });
+        // Poll for count stabilization rather than assuming a fixed window —
+        // a stray third fetch would betray dedupe leaking across the
+        // metadata + page boundary in background regeneration.
+        let stableCount = getRequestCount();
+        let stableSince = Date.now();
+        while (Date.now() - stableSince < 500) {
+          await new Promise((resolve) => setTimeout(resolve, 50));
+          const current = getRequestCount();
+          if (current !== stableCount) {
+            stableCount = current;
+            stableSince = Date.now();
+          }
+        }
+
+        expect(stableCount).toBe(2);
+      } finally {
+        delete process.env.TEST_FETCH_DEDUPE_TARGET;
+      }
+    });
+  });
+
   it("page ISR + searchParams: RSC requests stay dynamic instead of serving cached query data", async () => {
-    const res1 = await fetch(`${baseUrl}/isr-dynamic-search?filter=crimson`, {
-      headers: { Accept: "text/x-component" },
+    const res1 = await fetch(`${baseUrl}/isr-dynamic-search.rsc?filter=crimson`, {
+      headers: { Accept: "text/x-component", RSC: "1" },
     });
     expect(res1.status).toBe(200);
     expect(res1.headers.get("content-type")).toContain("text/x-component");
@@ -2147,8 +2490,8 @@ describe("App Router Production server (startProdServer)", () => {
     const rsc1 = await res1.text();
     expect(rsc1).toContain("crimson");
 
-    const res2 = await fetch(`${baseUrl}/isr-dynamic-search?filter=indigo`, {
-      headers: { Accept: "text/x-component" },
+    const res2 = await fetch(`${baseUrl}/isr-dynamic-search.rsc?filter=indigo`, {
+      headers: { Accept: "text/x-component", RSC: "1" },
     });
     expect(res2.status).toBe(200);
     expect(res2.headers.get("x-vinext-cache")).toBeNull();
@@ -2482,7 +2825,7 @@ describe("App Router Production server self-hosted next/font/google headers", ()
   // downloaded Google Fonts `.woff2` files into `<root>/.vinext/fonts/`
   // and wrote `path.join(fontDir, filename)` — an absolute filesystem
   // path — into the cached `@font-face` CSS's `src: url(...)`. The CSS
-  // was then embedded verbatim as `_selfHostedCSS` in the server bundle
+  // was then embedded verbatim as `selfHostedCSS` in the server bundle
   // and every downstream consumer (the body preload tags, the Link
   // response header, and the injected style block) read the same
   // leaked filesystem path. In production this produced high-priority
@@ -3482,8 +3825,9 @@ describe("App Router next.config.js features (generateRscEntry)", () => {
         { source: "/old-blog/:slug", destination: "/blog/:slug", permanent: false },
       ],
     });
+    expect(code).toContain("createAppRscHandler");
     expect(code).toContain("__configRedirects");
-    expect(code).toContain("matchRedirect");
+    expect(code).toContain("configRedirects: __configRedirects");
     expect(code).toContain("/old-about");
     expect(code).toContain("/old-blog/:slug");
     expect(code).toContain("permanent");
@@ -3498,7 +3842,7 @@ describe("App Router next.config.js features (generateRscEntry)", () => {
       },
     });
     expect(code).toContain("__configRewrites");
-    expect(code).toContain("matchRewrite");
+    expect(code).toContain("configRewrites: __configRewrites");
     expect(code).toContain("beforeFiles");
     expect(code).toContain("afterFiles");
     expect(code).toContain("fallback");
@@ -3512,7 +3856,7 @@ describe("App Router next.config.js features (generateRscEntry)", () => {
       headers: [{ source: "/api/(.*)", headers: [{ key: "X-Custom-Header", value: "vinext" }] }],
     });
     expect(code).toContain("__configHeaders");
-    expect(code).toContain("applyConfigHeadersToResponse");
+    expect(code).toContain("configHeaders: __configHeaders");
     expect(code).toContain("X-Custom-Header");
     expect(code).toContain("vinext");
   });
@@ -3531,25 +3875,22 @@ describe("App Router next.config.js features (generateRscEntry)", () => {
     const code = generateRscEntry("/tmp/test/app", minimalRoutes, null, [], null, "", false, {
       redirects: [{ source: "/docs/:path*", destination: "/wiki/:path*", permanent: false }],
     });
-    // matchConfigPattern is now used internally by matchRedirect/matchRewrite via config-matchers import
-    expect(code).toContain("matchRedirect");
-    // Should handle catch-all patterns
+    expect(code).toContain("configRedirects: __configRedirects");
     expect(code).toContain(":path*");
   });
 
-  it("applies redirects before middleware in the handler", () => {
+  it("delegates request lifecycle to the typed App RSC handler", () => {
     const code = generateRscEntry("/tmp/test/app", minimalRoutes, null, [], null, "", false, {
       redirects: [{ source: "/old", destination: "/new", permanent: true }],
     });
-    // The redirect check should appear before middleware and route matching
-    const redirectIdx = code.indexOf("matchRedirect(__redirPathname");
-    const routeMatchIdx = code.indexOf("matchRoute(cleanPathname");
-    expect(redirectIdx).toBeGreaterThan(-1);
-    expect(routeMatchIdx).toBeGreaterThan(-1);
-    expect(redirectIdx).toBeLessThan(routeMatchIdx);
+    expect(code).toContain("export default __createAppRscHandler({");
+    expect(code).toContain("configRedirects: __configRedirects");
+    expect(code).toContain("dispatchMatchedPage({");
+    expect(code).toContain("dispatchMatchedRouteHandler({");
+    expect(code).toContain("matchRoute,");
   });
 
-  it("applies beforeFiles rewrites before route matching", () => {
+  it("describes beforeFiles rewrites in the generated app shape", () => {
     const code = generateRscEntry("/tmp/test/app", minimalRoutes, null, [], null, "", false, {
       rewrites: {
         beforeFiles: [{ source: "/old", destination: "/new" }],
@@ -3557,19 +3898,11 @@ describe("App Router next.config.js features (generateRscEntry)", () => {
         fallback: [],
       },
     });
-    const beforeIdx = code.indexOf("__configRewrites.beforeFiles");
-    const routeMatchIdx = code.indexOf("matchRoute(cleanPathname");
-    expect(beforeIdx).toBeGreaterThan(-1);
-    expect(routeMatchIdx).toBeGreaterThan(-1);
-    expect(beforeIdx).toBeLessThan(routeMatchIdx);
+    expect(code).toContain("configRewrites: __configRewrites");
+    expect(code).toContain('"beforeFiles":[{"source":"/old","destination":"/new"}]');
   });
 
-  it("strips .rsc suffix before matching beforeFiles rewrite rules", () => {
-    // RSC (soft-nav) requests arrive as /some/path.rsc but rewrite patterns
-    // are defined without the extension. The generated code must strip .rsc
-    // before calling matchRewrite for beforeFiles.
-    // beforeFiles now runs after middleware (using __postMwReqCtx), and
-    // cleanPathname has already had .rsc stripped at that point.
+  it("passes the typed handler the generated route matcher and config", () => {
     const code = generateRscEntry("/tmp/test/app", minimalRoutes, null, [], null, "", false, {
       rewrites: {
         beforeFiles: [{ source: "/old", destination: "/new" }],
@@ -3577,19 +3910,12 @@ describe("App Router next.config.js features (generateRscEntry)", () => {
         fallback: [],
       },
     });
-    // The generated code uses cleanPathname (already .rsc-stripped) when
-    // calling matchRewrite for beforeFiles.
-    const beforeFilesCallIdx = code.indexOf(
-      "matchRewrite(cleanPathname, __configRewrites.beforeFiles",
-    );
-    expect(beforeFilesCallIdx).toBeGreaterThan(-1);
-    // The cleanPathname assignment (stripping .rsc) must appear before the beforeFiles call
-    const cleanPathnameIdx = code.indexOf("cleanPathname = pathname.replace");
-    expect(cleanPathnameIdx).toBeGreaterThan(-1);
-    expect(cleanPathnameIdx).toBeLessThan(beforeFilesCallIdx);
+    expect(code).toContain("const __routeMatcher = __createAppRscRouteMatcher(routes);");
+    expect(code).toContain("matchRoute,");
+    expect(code).toContain("configRewrites: __configRewrites");
   });
 
-  it("applies afterFiles rewrites in the handler code", () => {
+  it("describes afterFiles rewrites in the generated app shape", () => {
     const code = generateRscEntry("/tmp/test/app", minimalRoutes, null, [], null, "", false, {
       rewrites: {
         beforeFiles: [],
@@ -3597,13 +3923,8 @@ describe("App Router next.config.js features (generateRscEntry)", () => {
         fallback: [],
       },
     });
-    expect(code).toContain("__configRewrites.afterFiles");
-    // afterFiles rewrite applies in the request handler, after beforeFiles
-    const afterIdx = code.indexOf("__configRewrites.afterFiles");
-    const beforeIdx = code.indexOf("__configRewrites.beforeFiles");
-    expect(afterIdx).toBeGreaterThan(-1);
-    expect(beforeIdx).toBeGreaterThan(-1);
-    expect(afterIdx).toBeGreaterThan(beforeIdx);
+    expect(code).toContain('"afterFiles":[{"source":"/old","destination":"/new"}]');
+    expect(code).toContain("configRewrites: __configRewrites");
   });
 
   it("applies fallback rewrites when no route matches", () => {
@@ -3614,14 +3935,11 @@ describe("App Router next.config.js features (generateRscEntry)", () => {
         fallback: [{ source: "/fallback", destination: "/about" }],
       },
     });
-    // Fallback rewrites should be inside a "!match" block
-    expect(code).toContain("__configRewrites.fallback");
-    const fallbackIdx = code.indexOf("__configRewrites.fallback");
-    const noMatchIdx = code.indexOf("if (!match");
-    expect(fallbackIdx).toBeGreaterThan(noMatchIdx);
+    expect(code).toContain("configRewrites: __configRewrites");
+    expect(code).toContain('"fallback":[{"source":"/fallback","destination":"/about"}]');
   });
 
-  it("generates external URL proxy helpers for external rewrites", () => {
+  it("describes external beforeFiles rewrites in the generated config", () => {
     const code = generateRscEntry("/tmp/test/app", minimalRoutes, null, [], null, "", false, {
       rewrites: {
         beforeFiles: [{ source: "/ph/:path*", destination: "https://us.i.posthog.com/:path*" }],
@@ -3629,14 +3947,11 @@ describe("App Router next.config.js features (generateRscEntry)", () => {
         fallback: [],
       },
     });
-    // Should include the external URL detection and proxy functions
-    expect(code).toContain("isExternalUrl");
-    expect(code).toContain("proxyExternalRequest");
-    // beforeFiles rewrite should check for external URL
-    expect(code).toContain("isExternalUrl(__rewritten)");
+    expect(code).toContain("configRewrites: __configRewrites");
+    expect(code).toContain("https://us.i.posthog.com/:path*");
   });
 
-  it("generates external URL checks for afterFiles rewrites", () => {
+  it("describes external afterFiles rewrites in the generated config", () => {
     const code = generateRscEntry("/tmp/test/app", minimalRoutes, null, [], null, "", false, {
       rewrites: {
         beforeFiles: [],
@@ -3644,10 +3959,11 @@ describe("App Router next.config.js features (generateRscEntry)", () => {
         fallback: [],
       },
     });
-    expect(code).toContain("isExternalUrl(__afterRewritten)");
+    expect(code).toContain("configRewrites: __configRewrites");
+    expect(code).toContain("https://api.example.com/:path*");
   });
 
-  it("generates external URL checks for fallback rewrites", () => {
+  it("describes external fallback rewrites in the generated config", () => {
     const code = generateRscEntry("/tmp/test/app", minimalRoutes, null, [], null, "", false, {
       rewrites: {
         beforeFiles: [],
@@ -3657,22 +3973,20 @@ describe("App Router next.config.js features (generateRscEntry)", () => {
         ],
       },
     });
-    expect(code).toContain("isExternalUrl(__fallbackRewritten)");
+    expect(code).toContain("configRewrites: __configRewrites");
+    expect(code).toContain("https://fallback.example.com/:path*");
   });
 
-  it("adds basePath prefix to redirect destinations", () => {
+  it("passes basePath and redirect config to the generated handler", () => {
     const code = generateRscEntry("/tmp/test/app", minimalRoutes, null, [], null, "/app", false, {
       redirects: [{ source: "/old", destination: "/new", permanent: true }],
     });
-    // Generated code should prepend basePath to redirect destination
-    expect(code).toContain("__basePath");
-    expect(code).toContain("!isExternalUrl(__redir.destination)");
-    expect(code).toContain("hasBasePath(__redir.destination, __basePath)");
+    expect(code).toContain('const __basePath = "/app"');
+    expect(code).toContain("basePath: __basePath");
+    expect(code).toContain("configRedirects: __configRedirects");
   });
 
-  it("dispatches server actions before applying afterFiles rewrites", () => {
-    // Server actions must run before afterFiles rewrites — otherwise a rewrite
-    // could redirect an action POST away from the originating route.
+  it("passes server action handlers and afterFiles rewrites to the typed handler", () => {
     const code = generateRscEntry("/tmp/test/app", minimalRoutes, null, [], null, "", false, {
       rewrites: {
         beforeFiles: [],
@@ -3680,11 +3994,10 @@ describe("App Router next.config.js features (generateRscEntry)", () => {
         fallback: [],
       },
     });
-    const actionIdx = code.indexOf("loadServerAction");
-    const afterFilesIdx = code.indexOf("__configRewrites.afterFiles");
-    expect(actionIdx).toBeGreaterThan(-1);
-    expect(afterFilesIdx).toBeGreaterThan(-1);
-    expect(actionIdx).toBeLessThan(afterFilesIdx);
+    expect(code).toContain("handleServerActionRequest({");
+    expect(code).toContain("loadServerAction");
+    expect(code).toContain('"afterFiles":[{"source":"/x","destination":"/y"}]');
+    expect(code).toContain("configRewrites: __configRewrites");
   });
 
   it("embeds allowedOrigins when provided", () => {
@@ -3707,8 +4020,8 @@ describe("App Router next.config.js features (generateRscEntry)", () => {
 
   it("origin validation does not use x-forwarded-host", () => {
     const code = generateRscEntry("/tmp/test/app", minimalRoutes, null, [], null, "", false);
-    const actionStart = code.indexOf("const serverActionResponse");
-    const actionEnd = code.indexOf("if (serverActionResponse)", actionStart);
+    const actionStart = code.indexOf("handleServerActionRequest({");
+    const actionEnd = code.indexOf("i18nConfig: __i18nConfig", actionStart);
     const actionOptions = code.slice(actionStart, actionEnd);
 
     // CSRF behavior belongs to the shared action helper. The generated entry
@@ -3726,15 +4039,7 @@ describe("App Router next.config.js features (generateRscEntry)", () => {
     // Should include the dev origin validation function definition
     expect(code).toContain("__validateDevRequestOrigin");
     expect(code).toContain("__safeDevHosts");
-    // Should call dev origin validation inside _handleRequest
-    const callSite = code.indexOf("const __originBlock = __validateDevRequestOrigin(request)");
-    const handleRequestIdx = code.indexOf(
-      "async function _handleRequest(request, __reqCtx, _mwCtx)",
-    );
-    expect(callSite).toBeGreaterThan(-1);
-    expect(handleRequestIdx).toBeGreaterThan(-1);
-    // The call should be inside the function body (after the function declaration)
-    expect(callSite).toBeGreaterThan(handleRequestIdx);
+    expect(code).toContain("validateDevRequestOrigin: __validateDevRequestOrigin");
   });
 
   it("embeds allowedDevOrigins in dev origin check code", () => {
@@ -3797,6 +4102,28 @@ describe("App Router next.config.js features (generateRscEntry)", () => {
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
+  });
+
+  describe("RSC error runtime delegation", () => {
+    it("imports RSC error helpers from a normal server module", () => {
+      const code = generateRscEntry("/tmp/test/app", minimalRoutes, null, [], null, "", false);
+
+      expect(code).toContain("sanitizeErrorForClient as __sanitizeErrorForClient");
+      expect(code).toContain("server/app-rsc-errors.js");
+      expect(code).toContain("createAppRscOnErrorHandler");
+      expect(code).toContain("server/app-rsc-error-handler.js");
+    });
+
+    it("keeps request-specific onError wiring in the generated entry", () => {
+      const code = generateRscEntry("/tmp/test/app", minimalRoutes, null, [], null, "", false);
+
+      expect(code).toContain("createRscOnErrorHandler(pathname, routePath)");
+      expect(code).toContain(
+        "createAppRscOnErrorHandler(_reportRequestError, request, pathname, routePath)",
+      );
+      expect(code).not.toContain("function createRscOnErrorHandler(request, pathname, routePath)");
+      expect(code).not.toContain("return __createRscOnErrorHandler({");
+    });
   });
 });
 
@@ -4000,6 +4327,41 @@ describe("App Router middleware with NextRequest", () => {
   });
 });
 
+describe("RSC Flight hint fix", () => {
+  it("generateRscEntry delegates renderToReadableStream hint normalization", () => {
+    // The RSC entry should shadow renderToReadableStream with a wrapper that
+    // rewrites Flight HL hint "stylesheet" → "style" at the stream source,
+    // so all consumers (SSR embed, client-side nav, server actions) get clean data.
+    const route: AppRoute = {
+      pattern: "/",
+      pagePath: "/tmp/test/app/page.tsx",
+      routePath: null,
+      layouts: ["/tmp/test/app/layout.tsx"],
+      templates: [],
+      parallelSlots: [],
+      loadingPath: null,
+      errorPath: null,
+      layoutErrorPaths: [null],
+      notFoundPath: null,
+      notFoundPaths: [null],
+      forbiddenPaths: [],
+      forbiddenPath: null,
+      unauthorizedPaths: [],
+      unauthorizedPath: null,
+      routeSegments: [],
+      layoutTreePositions: [0],
+      isDynamic: false,
+      params: [],
+      patternParts: ["/"],
+    };
+    const code = generateRscEntry("/tmp/test/app", [route]);
+    expect(code).toContain("_renderToReadableStream");
+    expect(code).toContain("createRscRenderer");
+    expect(code).toContain(
+      "const renderToReadableStream = createRscRenderer(_renderToReadableStream",
+    );
+  });
+});
 // ── Client reference preloading (Issue #256) ─────────────────────────────────
 //
 // On the first SSR request after server start, client reference modules are
@@ -4409,10 +4771,10 @@ describe("generateRscEntry ISR code generation", () => {
     expect(code).toContain('process.env.NODE_ENV === "production"');
   });
 
-  it("generated handler exports async function handler(request, ctx)", () => {
+  it("generated handler delegates request and ctx handling to createAppRscHandler", () => {
     const code = generateRscEntry("/tmp/test/app", minimalRoutes);
-    // The handler must accept a ctx param so ExecutionContext is threaded through
-    expect(code).toMatch(/export default async function handler\s*\(\s*request\s*,\s*ctx\s*\)/);
+    expect(code).toContain("createAppRscHandler");
+    expect(code).toContain("export default __createAppRscHandler({");
   });
 
   it("generated code stores root layout params separately from leaf params", () => {
@@ -4431,9 +4793,15 @@ describe("generateRscEntry ISR code generation", () => {
     const code = generateRscEntry("/tmp/test/app", routes);
 
     // The user-declared rootParamNames must flow through to the route's entry,
-    // narrower than the full leaf params list.
+    // narrower than the full leaf params list. The typed RSC handler owns
+    // setting the per-request root params from this route shape.
     expect(code).toContain('rootParamNames: ["lang","locale"]');
     expect(code).not.toContain('rootParamNames: ["lang","locale","slug"]');
+    expect(code).toContain("rootParamNamesByPattern: rootParamNamesMap");
+    expect(code).not.toContain("__setRootParams(__pickRootParams(params, route.rootParamNames));");
+    expect(code).toContain("clearAppRequestContext as __clearRequestContext");
+    expect(code).toContain("server/app-request-context.js");
+    expect(code).not.toContain("function __clearRequestContext() {");
   });
 
   it("root params runtime getter returns current request values", async () => {
@@ -4485,7 +4853,9 @@ describe("generateRscEntry ISR code generation", () => {
           layoutPath: "/tmp/test/app/@modal/layout.tsx",
           loadingPath: null,
           name: "modal",
+          hasPage: false,
           ownerDir: "/tmp/test/app/@modal",
+          ownerTreePath: "/",
           pagePath: null,
           routeSegments: null,
         },
@@ -4544,11 +4914,9 @@ describe("generateRscEntry ISR code generation", () => {
     expect(code).toContain('["locale"]');
   });
 
-  it("generated code accepts both vinext and Next.js action header names", () => {
+  it("generated code delegates server-action header handling to the typed handler", () => {
     const code = generateRscEntry("/tmp/test/app", minimalRoutes);
-    // Compat contract: server actions arriving via either x-rsc-action
-    // (vinext) or next-action (Next.js) must dispatch identically.
-    expect(code).toContain('"x-rsc-action"');
-    expect(code).toContain('"next-action"');
+    expect(code).toContain("handleServerActionRequest({");
+    expect(code).toContain("actionId,");
   });
 });

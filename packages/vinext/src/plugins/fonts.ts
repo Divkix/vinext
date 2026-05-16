@@ -9,9 +9,11 @@
  *      delete the generated ~1,900-line runtime catalog while keeping ESM import
  *      semantics intact.
  *   2. During production builds, fetches Google Fonts CSS + font files, caches
- *      them locally under `.vinext/fonts/`, and injects `_selfHostedCSS` into
+ *      them locally under `.vinext/fonts/`, and injects `_vinext.font` into
  *      statically analyzable font loader calls so fonts are served from the
- *      deployed origin rather than fonts.googleapis.com.
+ *      deployed origin rather than fonts.googleapis.com. Static calls also
+ *      receive adjusted fallback CSS when Next.js-compatible fallback metrics
+ *      exist for the selected Google Font.
  *
  * `createLocalFontsPlugin` — vinext:local-fonts
  *   When a source file calls localFont({ src: "./font.woff2" }) or
@@ -27,9 +29,14 @@ import { parseAst } from "vite";
 import path from "node:path";
 import fs from "node:fs";
 import MagicString from "magic-string";
+import {
+  buildFallbackFontFace,
+  getFallbackFontOverrideMetrics,
+} from "../build/google-fonts/fallback-metrics.js";
 import { validateGoogleFontOptions } from "../build/google-fonts/validate.js";
 import { getFontAxes } from "../build/google-fonts/get-axes.js";
 import { buildGoogleFontsUrl } from "../build/google-fonts/build-url.js";
+import { CONTENT_TYPES } from "../server/static-file-cache.js";
 
 /**
  * Thrown when Google Fonts returns a non-2xx response. Distinct from a raw
@@ -72,8 +79,8 @@ const GOOGLE_FONT_UTILITY_EXPORTS = new Set([
  * and writes an `@font-face` CSS snippet whose `src: url(...)` references
  * the files by absolute filesystem path — convenient for disk, unusable at
  * runtime because browsers resolve relative to the origin. Before the CSS
- * is embedded in the bundle as `_selfHostedCSS`, the filesystem prefix is
- * rewritten to this URL prefix by `_rewriteCachedFontCssToServedUrls()`,
+ * is embedded in the bundle as `_vinext.font.selfHostedCSS`, the filesystem
+ * prefix is rewritten to this URL prefix by `_rewriteCachedFontCssToServedUrls()`,
  * and the matching `writeBundle` hook in `createGoogleFontsPlugin` copies
  * the font files into `<clientOutDir>/<assetsDir>/_vinext_fonts/` so the
  * rewritten URL actually resolves against the origin at request time.
@@ -99,8 +106,8 @@ function formatGoogleFontsErrorBody(body: string): string {
  * plugin's `writeBundle` hook copies the font files to.
  *
  * This is called once per transform, before the CSS string is embedded in
- * the bundle as `_selfHostedCSS`. Every downstream consumer reads from the
- * same rewritten CSS: the injected `<style data-vinext-fonts>` block, the
+ * the bundle as `_vinext.font.selfHostedCSS`. Every downstream consumer reads
+ * from the same rewritten CSS: the injected `<style data-vinext-fonts>` block, the
  * HTML body's `<link rel="preload">` tags (via `collectFontPreloadsFromCSS`
  * in `shims/font-google-base.ts`), and the HTTP `Link:` response header
  * (via `buildAppPageFontLinkHeader` in `server/app-page-execution.ts`).
@@ -641,7 +648,6 @@ export function _findCallEnd(code: string, objEnd: number): number | null {
 export function createGoogleFontsPlugin(fontGoogleShimPath: string, shimsDir: string): Plugin {
   // Vite does not bind `this` to the plugin object when calling hooks, so
   // plugin state must be held in closure variables rather than as properties.
-  let isBuild = false;
   const fontCache = new Map<string, string>(); // url -> local @font-face CSS
   let cacheDir = "";
 
@@ -650,8 +656,52 @@ export function createGoogleFontsPlugin(fontGoogleShimPath: string, shimsDir: st
     enforce: "pre",
 
     configResolved(config) {
-      isBuild = config.command === "build";
       cacheDir = path.join(config.root, ".vinext", "fonts");
+    },
+
+    // Dev-mode equivalent of the production `writeBundle` copy step. In dev
+    // there is no client output directory to copy files into, so the cached
+    // .vinext/fonts/ tree is served directly under the same URL prefix that
+    // `_rewriteCachedFontCssToServedUrls()` embeds into the @font-face CSS
+    // (`/<assetsDir>/_vinext_fonts/...`). Without this hook the rewritten
+    // URLs 404 — and once `_vinext.font.selfHostedCSS` is injected, the shim no longer
+    // emits the fonts.googleapis.com `<link>`, so a 404 here means no
+    // glyphs render at all (no CDN fallback path).
+    configureServer(server) {
+      if (!cacheDir) return;
+      const assetsDir =
+        server.environments?.client?.config?.build?.assetsDir ??
+        server.config?.build?.assetsDir ??
+        DEFAULT_ASSETS_DIR;
+      const urlPrefix = `/${assetsDir}/${VINEXT_FONT_URL_NAMESPACE}/`;
+      server.middlewares.use((req, res, next) => {
+        const url = req.url;
+        if (!url || !url.startsWith(urlPrefix)) return next();
+        const rawPath = url.slice(urlPrefix.length).split("?")[0];
+        let decoded: string;
+        try {
+          decoded = decodeURIComponent(rawPath);
+        } catch {
+          return next();
+        }
+        const filePath = path.resolve(cacheDir, decoded);
+        // Path traversal guard — `decoded` came from the URL, so refuse
+        // anything that escapes the cache root (e.g. `..%2F..%2Fetc/passwd`).
+        if (filePath !== cacheDir && !filePath.startsWith(cacheDir + path.sep)) {
+          return next();
+        }
+        fs.stat(filePath, (err, stat) => {
+          if (err || !stat.isFile()) return next();
+          const ext = path.extname(filePath).toLowerCase();
+          // CONTENT_TYPES is the same map prod-server uses, so fonts get
+          // identical MIME types in dev and prod. fetchAndCacheFont only
+          // ever writes .woff2/.woff/.ttf, all of which are covered.
+          res.setHeader("Content-Type", CONTENT_TYPES[ext] ?? "application/octet-stream");
+          res.setHeader("Cache-Control", "no-cache");
+          res.setHeader("Access-Control-Allow-Origin", "*");
+          fs.createReadStream(filePath).pipe(res);
+        });
+      });
     },
 
     transform: {
@@ -847,7 +897,7 @@ export function createGoogleFontsPlugin(fontGoogleShimPath: string, shimsDir: st
 
           // Rewrite absolute `.vinext/fonts/` filesystem paths in the cached
           // CSS to served URLs under `/<assetsDir>/_vinext_fonts/` so the
-          // embedded `_selfHostedCSS` string has origin-relative URLs that
+          // embedded `_vinext.font.selfHostedCSS` string has origin-relative URLs that
           // the browser can actually resolve. The plugin's writeBundle hook
           // copies the referenced font files to the matching location under
           // the client output directory so the URLs serve 200s, not 404s.
@@ -865,9 +915,36 @@ export function createGoogleFontsPlugin(fontGoogleShimPath: string, shimsDir: st
             cacheDir,
             transformAssetsDir,
           );
+          const fallbackMetrics =
+            validated.adjustFontFallback === false
+              ? undefined
+              : getFallbackFontOverrideMetrics(family);
+          const adjustedFallbackCSS = fallbackMetrics
+            ? buildFallbackFontFace(family, fallbackMetrics)
+            : undefined;
+          const validatedFontWeight =
+            validated.weights.length === 1 && validated.weights[0] !== "variable"
+              ? Number(validated.weights[0])
+              : undefined;
+          const validatedFontStyle =
+            validated.styles.length === 1 ? validated.styles[0] : undefined;
 
-          // Inject _selfHostedCSS into the options object
-          const escapedCSS = JSON.stringify(servedCSS);
+          // Inject the internal transform-to-runtime payload into the options object.
+          const internalFontProperties = [`selfHostedCSS: ${JSON.stringify(servedCSS)}`];
+          if (adjustedFallbackCSS) {
+            internalFontProperties.push(
+              `adjustedFallbackCSS: ${JSON.stringify(adjustedFallbackCSS)}`,
+            );
+          }
+          if (Number.isFinite(validatedFontWeight)) {
+            internalFontProperties.push(`fontWeight: ${validatedFontWeight}`);
+          }
+          if (validatedFontStyle) {
+            internalFontProperties.push(`fontStyle: ${JSON.stringify(validatedFontStyle)}`);
+          }
+          const injectedProperties = [
+            `_vinext: { font: { ${internalFontProperties.join(", ")} } }`,
+          ];
           const closingBrace = optionsStr.lastIndexOf("}");
           const beforeBrace = optionsStr.slice(0, closingBrace).trim();
           // Determine the separator to insert before the new property:
@@ -878,7 +955,7 @@ export function createGoogleFontsPlugin(fontGoogleShimPath: string, shimsDir: st
           const optionsWithCSS =
             optionsStr.slice(0, closingBrace) +
             separator +
-            `_selfHostedCSS: ${escapedCSS}` +
+            injectedProperties.join(", ") +
             optionsStr.slice(closingBrace);
 
           const replacement = `${calleeSource}(${optionsWithCSS})`;
@@ -887,68 +964,72 @@ export function createGoogleFontsPlugin(fontGoogleShimPath: string, shimsDir: st
           hasChanges = true;
         }
 
-        if (isBuild) {
-          // Match: Identifier( — where the argument starts with {
-          // The regex intentionally does NOT capture the options object; we use
-          // _findBalancedObject() to handle nested braces correctly.
-          const namedCallRe = /\b([A-Za-z_$][A-Za-z0-9_$]*)\s*\(\s*(?=\{)/g;
-          let namedCallMatch;
-          while ((namedCallMatch = namedCallRe.exec(code)) !== null) {
-            const [fullMatch, localName] = namedCallMatch;
-            const importedName = fontLocals.get(localName);
-            if (!importedName) continue;
+        // Self-host injection runs in both dev and build. In dev, the
+        // companion `configureServer` hook serves the cached files
+        // directly from `.vinext/fonts/` so the rewritten URLs resolve
+        // against the dev origin; in build, the `writeBundle` hook copies
+        // them into the client output directory.
 
-            const callStart = namedCallMatch.index;
-            // The regex consumed up to (but not including) the '{' due to the
-            // lookahead — find the balanced object starting at the lookahead pos.
-            const openParenEnd = callStart + fullMatch.length;
-            const objRange = _findBalancedObject(code, openParenEnd);
-            if (!objRange) continue;
-            const optionsStr = code.slice(objRange[0], objRange[1]);
-            const callEnd = _findCallEnd(code, objRange[1]);
-            if (callEnd === null) continue;
+        // Match: Identifier( — where the argument starts with {
+        // The regex intentionally does NOT capture the options object; we use
+        // _findBalancedObject() to handle nested braces correctly.
+        const namedCallRe = /\b([A-Za-z_$][A-Za-z0-9_$]*)\s*\(\s*(?=\{)/g;
+        let namedCallMatch;
+        while ((namedCallMatch = namedCallRe.exec(code)) !== null) {
+          const [fullMatch, localName] = namedCallMatch;
+          const importedName = fontLocals.get(localName);
+          if (!importedName) continue;
 
-            if (overwrittenRanges.some(([start, end]) => callStart < end && callEnd > start)) {
-              continue;
-            }
+          const callStart = namedCallMatch.index;
+          // The regex consumed up to (but not including) the '{' due to the
+          // lookahead — find the balanced object starting at the lookahead pos.
+          const openParenEnd = callStart + fullMatch.length;
+          const objRange = _findBalancedObject(code, openParenEnd);
+          if (!objRange) continue;
+          const optionsStr = code.slice(objRange[0], objRange[1]);
+          const callEnd = _findCallEnd(code, objRange[1]);
+          if (callEnd === null) continue;
 
-            await injectSelfHostedCss(
-              callStart,
-              callEnd,
-              optionsStr,
-              importedName.replace(/_/g, " "),
-              localName,
-            );
+          if (overwrittenRanges.some(([start, end]) => callStart < end && callEnd > start)) {
+            continue;
           }
 
-          // Match: Identifier.Identifier( — where the argument starts with {
-          const memberCallRe =
-            /\b([A-Za-z_$][A-Za-z0-9_$]*)\.([A-Za-z_$][A-Za-z0-9_$]*)\s*\(\s*(?=\{)/g;
-          let memberCallMatch;
-          while ((memberCallMatch = memberCallRe.exec(code)) !== null) {
-            const [fullMatch, objectName, propName] = memberCallMatch;
-            if (!proxyObjectLocals.has(objectName)) continue;
+          await injectSelfHostedCss(
+            callStart,
+            callEnd,
+            optionsStr,
+            importedName.replace(/_/g, " "),
+            localName,
+          );
+        }
 
-            const callStart = memberCallMatch.index;
-            const openParenEnd = callStart + fullMatch.length;
-            const objRange = _findBalancedObject(code, openParenEnd);
-            if (!objRange) continue;
-            const optionsStr = code.slice(objRange[0], objRange[1]);
-            const callEnd = _findCallEnd(code, objRange[1]);
-            if (callEnd === null) continue;
+        // Match: Identifier.Identifier( — where the argument starts with {
+        const memberCallRe =
+          /\b([A-Za-z_$][A-Za-z0-9_$]*)\.([A-Za-z_$][A-Za-z0-9_$]*)\s*\(\s*(?=\{)/g;
+        let memberCallMatch;
+        while ((memberCallMatch = memberCallRe.exec(code)) !== null) {
+          const [fullMatch, objectName, propName] = memberCallMatch;
+          if (!proxyObjectLocals.has(objectName)) continue;
 
-            if (overwrittenRanges.some(([start, end]) => callStart < end && callEnd > start)) {
-              continue;
-            }
+          const callStart = memberCallMatch.index;
+          const openParenEnd = callStart + fullMatch.length;
+          const objRange = _findBalancedObject(code, openParenEnd);
+          if (!objRange) continue;
+          const optionsStr = code.slice(objRange[0], objRange[1]);
+          const callEnd = _findCallEnd(code, objRange[1]);
+          if (callEnd === null) continue;
 
-            await injectSelfHostedCss(
-              callStart,
-              callEnd,
-              optionsStr,
-              propertyNameToGoogleFontFamily(propName),
-              `${objectName}.${propName}`,
-            );
+          if (overwrittenRanges.some(([start, end]) => callStart < end && callEnd > start)) {
+            continue;
           }
+
+          await injectSelfHostedCss(
+            callStart,
+            callEnd,
+            optionsStr,
+            propertyNameToGoogleFontFamily(propName),
+            `${objectName}.${propName}`,
+          );
         }
 
         if (!hasChanges) return null;

@@ -29,6 +29,12 @@ import { loadDotenv } from "./config/dotenv.js";
 import { loadNextConfig, resolveNextConfig, PHASE_PRODUCTION_BUILD } from "./config/next-config.js";
 import { emitStandaloneOutput } from "./build/standalone.js";
 import { resolveVinextPackageRoot } from "./utils/vinext-root.js";
+import { parseArgs } from "./cli-args.js";
+import {
+  type DevLockfile,
+  formatAlreadyRunningError,
+  tryAcquireLockfile,
+} from "./server/dev-lockfile.js";
 
 // ─── Resolve Vite from the project root ────────────────────────────────────────
 //
@@ -92,47 +98,6 @@ const VERSION = JSON.parse(fs.readFileSync(new URL("../package.json", import.met
 
 const command = process.argv[2];
 const rawArgs = process.argv.slice(3);
-
-type ParsedArgs = {
-  port?: number;
-  hostname?: string;
-  help?: boolean;
-  verbose?: boolean;
-  turbopack?: boolean; // accepted for compat, always ignored
-  experimental?: boolean; // accepted for compat, always ignored
-  prerenderAll?: boolean;
-  precompress?: boolean;
-};
-
-function parseArgs(args: string[]): ParsedArgs {
-  const result: ParsedArgs = {};
-  for (let i = 0; i < args.length; i++) {
-    const arg = args[i];
-    if (arg === "--help" || arg === "-h") {
-      result.help = true;
-    } else if (arg === "--verbose") {
-      result.verbose = true;
-    } else if (arg === "--turbopack") {
-      result.turbopack = true; // no-op, accepted for script compat
-    } else if (arg === "--experimental-https") {
-      result.experimental = true; // no-op
-    } else if (arg === "--prerender-all") {
-      result.prerenderAll = true;
-    } else if (arg === "--precompress") {
-      result.precompress = true;
-      process.env.VINEXT_PRECOMPRESS = "1";
-    } else if (arg === "--port" || arg === "-p") {
-      result.port = parseInt(args[++i], 10);
-    } else if (arg.startsWith("--port=")) {
-      result.port = parseInt(arg.split("=")[1], 10);
-    } else if (arg === "--hostname" || arg === "-H") {
-      result.hostname = args[++i];
-    } else if (arg.startsWith("--hostname=")) {
-      result.hostname = arg.split("=")[1];
-    }
-  }
-  return result;
-}
 
 // ─── Build logger ─────────────────────────────────────────────────────────────
 
@@ -339,20 +304,115 @@ async function dev() {
   const port = parsed.port ?? 3000;
   const host = parsed.hostname ?? "localhost";
 
+  // Acquire the dev lock file. If another live `vinext dev` is running in this
+  // directory, print an actionable error (PID + URL) and exit. This is
+  // especially useful for AI coding agents, which frequently attempt to start
+  // a dev server without knowing one is already running.
+  //
+  // Disabled when VINEXT_NO_DEV_LOCK is set (escape hatch for unusual setups).
+  let lockfile: DevLockfile | undefined;
+  // Capture the acquisition timestamp so we can preserve it across the
+  // post-listen update(). `startedAt` is meant to reflect when this process
+  // started, not when the URL was resolved.
+  const startedAt = Date.now();
+  if (process.env.VINEXT_NO_DEV_LOCK !== "1") {
+    const root = process.cwd();
+    // Substitute "localhost" for wildcard binds so the URL is actually
+    // clickable when surfaced in the lock file before server.listen() has
+    // had a chance to resolve the real URL.
+    const initialDisplayHost = host === "0.0.0.0" ? "localhost" : host;
+    const acquired = tryAcquireLockfile({
+      root,
+      info: {
+        pid: process.pid,
+        port,
+        hostname: host,
+        appUrl: `http://${initialDisplayHost}:${port}`,
+        startedAt,
+        cwd: root,
+      },
+    });
+    if (!acquired.ok) {
+      console.error(
+        "\n  " +
+          formatAlreadyRunningError({
+            existing: acquired.existing,
+            cwd: root,
+            lockfilePath: acquired.lockfilePath,
+          }).replace(/\n/g, "\n  ") +
+          "\n",
+      );
+      process.exit(1);
+    }
+    lockfile = acquired.lockfile;
+  }
+
   console.log(`\n  vinext dev  (Vite ${getViteVersion()})\n`);
 
   const config = buildViteConfig({
     server: { port, host },
   });
 
-  const server = await vite.createServer(config);
-  await server.listen();
+  // If anything between here and the first successful listen() throws (e.g.
+  // strictPort and the port is taken), release the lock immediately so we
+  // don't leave a misleading "server running" entry behind in the brief
+  // window before the exit handler runs. The exit handler still serves as
+  // a safety net for unexpected exit paths.
+  let server;
+  try {
+    server = await vite.createServer(config);
+    await server.listen();
+  } catch (err) {
+    lockfile?.release();
+    throw err;
+  }
   server.printUrls();
+
+  // Once the server is actually listening, the port may have changed (e.g.
+  // Vite picked a free port if the requested one was in use). Update the
+  // lock file so other tools see the right port/URL.
+  //
+  // Prefer Vite's resolvedUrls.local[0] because it handles wildcard binds
+  // (e.g. host "0.0.0.0") by substituting "localhost" so the URL is
+  // actually clickable. Fall back to httpServer.address() if Vite didn't
+  // populate resolvedUrls for some reason.
+  if (lockfile) {
+    const resolved = server.resolvedUrls?.local[0];
+    let actualPort = port;
+    let appUrl: string;
+    if (resolved) {
+      appUrl = resolved.replace(/\/$/, "");
+      try {
+        const parsed = new URL(appUrl);
+        actualPort = parsed.port ? Number.parseInt(parsed.port, 10) : actualPort;
+      } catch {
+        // ignore — keep requested port
+      }
+    } else {
+      const address = server.httpServer?.address();
+      actualPort = typeof address === "object" && address ? address.port : port;
+      appUrl = `http://${host === "0.0.0.0" ? "localhost" : host}:${actualPort}`;
+    }
+    lockfile.update({
+      pid: process.pid,
+      port: actualPort,
+      hostname: host,
+      appUrl,
+      // Preserve the original acquire-time startedAt rather than resetting
+      // to "now". startedAt represents when the process started.
+      startedAt,
+      cwd: process.cwd(),
+    });
+  }
 }
 
 async function buildApp() {
   const parsed = parseArgs(rawArgs);
   if (parsed.help) return printHelp("build");
+
+  if (parsed.precompress) {
+    process.env.VINEXT_PRECOMPRESS = "1";
+  }
 
   loadDotenv({
     root: process.cwd(),
@@ -399,7 +459,7 @@ async function buildApp() {
     : createBuildLogger(vite);
 
   // For App Router: upgrade React if needed for react-server-dom-webpack compatibility.
-  // Without this, builds with react<19.2.5 produce a Worker that crashes at
+  // Without this, builds with older React versions can produce a Worker that crashes at
   // runtime with "Cannot read properties of undefined (reading 'moduleMap')".
   if (isApp) {
     const reactUpgrade = getReactUpgradeDeps(process.cwd());
@@ -407,7 +467,11 @@ async function buildApp() {
       const installCmd = detectPackageManager(process.cwd()).replace(/ -D$/, "");
       const [pm, ...pmArgs] = installCmd.split(" ");
       console.log("  Upgrading React for RSC compatibility...");
-      execFileSync(pm, [...pmArgs, ...reactUpgrade], { cwd: process.cwd(), stdio: "inherit" });
+      execFileSync(pm, [...pmArgs, ...reactUpgrade], {
+        cwd: process.cwd(),
+        stdio: "inherit",
+        shell: process.platform === "win32",
+      });
     }
   }
 
@@ -517,7 +581,10 @@ async function buildApp() {
       : "Pre-rendering all routes (output: 'export')...";
     process.stdout.write("\x1b[0m");
     console.log(`  ${label}`);
-    prerenderResult = await runPrerender({ root: process.cwd() });
+    prerenderResult = await runPrerender({
+      root: process.cwd(),
+      concurrency: parsed.prerenderConcurrency,
+    });
   }
 
   // Precompression runs as a Vite plugin writeBundle hook (vinext:precompress).
@@ -581,13 +648,25 @@ async function lint() {
   try {
     if (hasEslint && hasNextLintConfig) {
       console.log("  Using eslint (with existing config)\n");
-      execFileSync("npx", ["eslint", "."], { cwd, stdio: "inherit" });
+      execFileSync("npx", ["eslint", "."], {
+        cwd,
+        stdio: "inherit",
+        shell: process.platform === "win32",
+      });
     } else if (hasOxlint) {
       console.log("  Using oxlint\n");
-      execFileSync("npx", ["oxlint", "."], { cwd, stdio: "inherit" });
+      execFileSync("npx", ["oxlint", "."], {
+        cwd,
+        stdio: "inherit",
+        shell: process.platform === "win32",
+      });
     } else if (hasEslint) {
       console.log("  Using eslint\n");
-      execFileSync("npx", ["eslint", "."], { cwd, stdio: "inherit" });
+      execFileSync("npx", ["eslint", "."], {
+        cwd,
+        stdio: "inherit",
+        shell: process.platform === "win32",
+      });
     } else {
       console.log(
         "  No linter found. Install eslint or oxlint:\n\n" +
@@ -622,6 +701,7 @@ async function deployCommand() {
     dryRun: parsed.dryRun,
     name: parsed.name,
     prerenderAll: parsed.prerenderAll,
+    prerenderConcurrency: parsed.prerenderConcurrency,
     experimentalTPR: parsed.experimentalTPR,
     tprCoverage: parsed.tprCoverage,
     tprLimit: parsed.tprLimit,
@@ -692,6 +772,8 @@ function printHelp(cmd?: string) {
     --verbose            Show full Vite/Rollup build output (suppressed by default)
     --prerender-all      Pre-render discovered routes after building (future releases
                          will serve these files in vinext start)
+    --prerender-concurrency <count>
+                         Maximum number of routes to pre-render in parallel
     --precompress        Precompress static assets at build time (.br, .gz, .zst)
     -h, --help           Show this help
 `);
@@ -737,6 +819,8 @@ function printHelp(cmd?: string) {
     --dry-run                Generate config files without building or deploying
     --prerender-all          Pre-render discovered routes after building (future
                              releases will auto-populate the remote cache)
+    --prerender-concurrency <count>
+                             Maximum number of routes to pre-render in parallel
     -h, --help               Show this help
 
   Experimental:

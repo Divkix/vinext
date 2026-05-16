@@ -1,5 +1,6 @@
+import { installEdgeGlobals } from "./edge-globals.js";
 import type { Route } from "../routing/pages-router.js";
-import { addQueryParam } from "../utils/query.js";
+import { mergeRouteParamsIntoQuery, parseQueryString } from "../utils/query.js";
 import {
   createPagesReqRes,
   parsePagesApiBody,
@@ -8,6 +9,12 @@ import {
   type PagesReqResResponse,
   PagesApiBodyParseError,
 } from "./pages-node-compat.js";
+import { internalServerErrorResponse } from "./http-error-responses.js";
+
+// Expose edge-runtime globals (e.g. AsyncLocalStorage) so API handlers
+// configured with `runtime: 'edge'` can reference them without an import,
+// matching Next.js behavior.
+installEdgeGlobals();
 
 type PagesApiRouteModule = {
   default?: (req: PagesReqResRequest, res: PagesReqResResponse) => void | Promise<void>;
@@ -28,17 +35,7 @@ type HandlePagesApiRouteOptions = {
 };
 
 function buildPagesApiQuery(url: string, params: PagesRequestQuery): PagesRequestQuery {
-  const query: PagesRequestQuery = { ...params };
-  const search = url.split("?")[1];
-  if (!search) {
-    return query;
-  }
-
-  for (const [key, value] of new URLSearchParams(search)) {
-    addQueryParam(query, key, value);
-  }
-
-  return query;
+  return mergeRouteParamsIntoQuery(parseQueryString(url), params);
 }
 
 export async function handlePagesApiRoute(options: HandlePagesApiRouteOptions): Promise<Response> {
@@ -77,6 +74,6 @@ export async function handlePagesApiRoute(options: HandlePagesApiRouteOptions): 
       error instanceof Error ? error : new Error(String(error)),
       route.pattern,
     );
-    return new Response("Internal Server Error", { status: 500 });
+    return internalServerErrorResponse();
   }
 }

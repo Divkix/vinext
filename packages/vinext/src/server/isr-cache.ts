@@ -23,6 +23,14 @@ import {
 import { fnv1a64 } from "../utils/hash.js";
 import { getRequestExecutionContext } from "vinext/shims/request-context";
 import { reportRequestError, type OnRequestErrorContext } from "./instrumentation.js";
+import { normalizeMountedSlotsHeader } from "./app-mounted-slots-header.js";
+import {
+  APP_RSC_RENDER_MODE_NAVIGATION,
+  shouldUsePreserveUiCacheVariant,
+  type AppRscRenderMode,
+} from "./app-rsc-render-mode.js";
+import type { RenderObservation } from "./cache-proof.js";
+export { normalizeMountedSlotsHeader };
 
 export type ISRCacheEntry = {
   value: CacheHandlerValue;
@@ -167,8 +175,9 @@ export function buildAppPageCacheValue(
   html: string,
   rscData?: ArrayBuffer,
   status?: number,
+  renderObservation?: RenderObservation,
 ): CachedAppPageValue {
-  return {
+  const value: CachedAppPageValue = {
     kind: "APP_PAGE",
     html,
     rscData,
@@ -176,6 +185,10 @@ export function buildAppPageCacheValue(
     postponed: undefined,
     status,
   };
+  if (renderObservation) {
+    value.renderObservation = renderObservation;
+  }
+  return value;
 }
 
 function normalizeCachePathname(pathname: string): string {
@@ -200,20 +213,6 @@ export function isrCacheKey(router: "pages" | "app", pathname: string, buildId?:
 }
 
 /**
- * Normalize the App Router mounted-slot header before it participates in cache
- * keys. The client can send mounted slot ids in different orders as navigation
- * state changes, but equivalent slot sets must map to the same RSC cache entry.
- */
-export function normalizeMountedSlotsHeader(raw: string | null | undefined): string | null {
-  if (!raw) return null;
-
-  const normalized = Array.from(new Set(raw.split(/\s+/).filter(Boolean)))
-    .sort()
-    .join(" ");
-  return normalized || null;
-}
-
-/**
  * Compute an App Router ISR key for one cache artifact.
  *
  * App pages store HTML, RSC payloads, and route-handler responses separately.
@@ -233,10 +232,27 @@ export function appIsrHtmlKey(pathname: string): string {
   return appIsrCacheKey(pathname, "html");
 }
 
-export function appIsrRscKey(pathname: string, mountedSlotsHeader?: string | null): string {
+/**
+ * Build the ISR cache key for an RSC payload.
+ *
+ * Note: the key format changed from `rsc:<hash>` to `rsc:slots:<hash>` (and
+ * optionally `rsc:slots:<hash>:preserve-ui`). Existing cached entries under
+ * the old format will become unreachable after deployment. This is acceptable
+ * because ISR entries have TTLs and will be regenerated on the next request.
+ */
+export function appIsrRscKey(
+  pathname: string,
+  mountedSlotsHeader?: string | null,
+  renderMode: AppRscRenderMode = APP_RSC_RENDER_MODE_NAVIGATION,
+): string {
   const normalizedMountedSlotsHeader = normalizeMountedSlotsHeader(mountedSlotsHeader);
-  if (!normalizedMountedSlotsHeader) return appIsrCacheKey(pathname, "rsc");
-  return appIsrCacheKey(pathname, `rsc:${fnv1a64(normalizedMountedSlotsHeader)}`);
+  const variant = [
+    normalizedMountedSlotsHeader ? `slots:${fnv1a64(normalizedMountedSlotsHeader)}` : null,
+    shouldUsePreserveUiCacheVariant(renderMode) ? "preserve-ui" : null,
+  ]
+    .filter((part) => part !== null)
+    .join(":");
+  return appIsrCacheKey(pathname, variant ? `rsc:${variant}` : "rsc");
 }
 
 export function appIsrRouteKey(pathname: string): string {

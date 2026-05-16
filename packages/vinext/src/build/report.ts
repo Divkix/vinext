@@ -43,6 +43,23 @@ export type RouteRow = {
   prerendered?: boolean;
 };
 
+type AppRouteRenderEntry = Pick<AppRoute, "pagePath" | "routePath" | "parallelSlots">;
+
+export function getAppRouteRenderEntryPath(route: AppRouteRenderEntry): string | null {
+  if (route.pagePath) return route.pagePath;
+  if (route.routePath) return null;
+
+  for (const slot of route.parallelSlots) {
+    if (slot.pagePath) return slot.pagePath;
+  }
+
+  for (const slot of route.parallelSlots) {
+    if (slot.defaultPath) return slot.defaultPath;
+  }
+
+  return null;
+}
+
 // ─── Regex-based export detection ────────────────────────────────────────────
 
 /**
@@ -84,19 +101,22 @@ export function extractExportConstString(code: string, name: string): string | n
 }
 
 /**
- * Extracts the numeric value of `export const <name> = <number>`.
- * Supports integers, decimals, negative values, and `Infinity`.
+ * Extracts the numeric value of `export const <name> = <number|false>`.
+ * Supports integers, decimals, negative values, `Infinity`, and `false`.
+ * `false` is returned as `Infinity` because `export const revalidate = false`
+ * means "cache indefinitely" in Next.js segment config.
  * Handles optional TypeScript type annotations.
- * Returns null if the export is absent or not a number.
+ * Returns null if the export is absent or not a number/`false`.
  */
 export function extractExportConstNumber(code: string, name: string): number | null {
   const re = new RegExp(
-    `^\\s*export\\s+const\\s+${name}\\s*(?::[^=]+)?\\s*=\\s*(-?\\d+(?:\\.\\d+)?|Infinity)`,
+    `^\\s*export\\s+const\\s+${name}\\s*(?::[^=]+)?\\s*=\\s*(-?\\d+(?:\\.\\d+)?|Infinity|false)(?![\\w$])`,
     "m",
   );
   const m = re.exec(code);
   if (!m) return null;
-  return m[1] === "Infinity" ? Infinity : parseFloat(m[1]);
+  if (m[1] === "Infinity" || m[1] === "false") return Infinity;
+  return parseFloat(m[1]);
 }
 
 /**
@@ -791,7 +811,12 @@ export function buildReportRows(options: {
   }
 
   for (const route of options.appRoutes ?? []) {
-    const { type, revalidate } = classifyAppRoute(route.pagePath, route.routePath, route.isDynamic);
+    const renderEntryPath = getAppRouteRenderEntryPath(route);
+    const { type, revalidate } = classifyAppRoute(
+      renderEntryPath,
+      route.routePath,
+      route.isDynamic,
+    );
     if (type === "unknown" && renderedRoutes.has(route.pattern)) {
       // Speculative prerender confirmed this route is static.
       rows.push({ pattern: route.pattern, type: "static", prerendered: true });

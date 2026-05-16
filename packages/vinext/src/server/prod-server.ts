@@ -45,13 +45,19 @@ import {
   type ImageConfig,
 } from "./image-optimization.js";
 import { normalizePath } from "./normalize-path.js";
-import { applyConfigHeadersToHeaderRecord, isOpenRedirectShaped } from "./request-pipeline.js";
-import { hasBasePath, stripBasePath } from "../utils/base-path.js";
+import {
+  applyConfigHeadersToHeaderRecord,
+  filterInternalHeaders,
+  isOpenRedirectShaped,
+} from "./request-pipeline.js";
+import { notFoundResponse } from "./http-error-responses.js";
+import { hasBasePath, stripBasePath, removeTrailingSlash } from "../utils/base-path.js";
 import { computeLazyChunks } from "../utils/lazy-chunks.js";
 import { manifestFileWithBase } from "../utils/manifest-paths.js";
 import { normalizePathnameForRouteMatchStrict } from "../routing/utils.js";
 import type { ExecutionContextLike } from "vinext/shims/request-context";
 import { readPrerenderSecret } from "../build/server-manifest.js";
+import { VINEXT_PRERENDER_SECRET_HEADER, VINEXT_STATIC_FILE_HEADER } from "./headers.js";
 import { seedMemoryCacheFromPrerender } from "./seed-cache.js";
 import { installSocketErrorBackstop } from "./socket-error-backstop.js";
 
@@ -75,6 +81,12 @@ export type ProdServerOptions = {
   outDir?: string;
   /** Disable compression (default: false) */
   noCompression?: boolean;
+  /**
+   * Narrow startup context for callers that need a more precise log line.
+   * Omitted for normal `vinext start` so the existing production-server output
+   * remains stable.
+   */
+  purpose?: "prerender";
 };
 
 /** Content types that benefit from compression. */
@@ -250,6 +262,16 @@ type ResponseWithVinextStreamingMetadata = Response & {
 
 function isVinextStreamedHtmlResponse(response: Response): boolean {
   return (response as ResponseWithVinextStreamingMetadata).__vinextStreamedHtmlResponse === true;
+}
+
+function logProdServerStarted(host: string, port: number, purpose: ProdServerOptions["purpose"]) {
+  const url = `http://${host}:${port}`;
+  if (purpose === "prerender") {
+    console.log(`[vinext] Production server for prerendering running at ${url}`);
+    return;
+  }
+
+  console.log(`[vinext] Production server running at ${url}`);
 }
 
 /**
@@ -687,15 +709,17 @@ function nodeToWebRequest(req: IncomingMessage, urlOverride?: string): Request {
   const origin = `${proto}://${host}`;
   const url = new URL(urlOverride ?? req.url ?? "/", origin);
 
-  const headers = new Headers();
+  const rawHeaders = new Headers();
   for (const [key, value] of Object.entries(req.headers)) {
     if (value === undefined) continue;
     if (Array.isArray(value)) {
-      for (const v of value) headers.append(key, v);
+      for (const v of value) rawHeaders.append(key, v);
     } else {
-      headers.set(key, value);
+      rawHeaders.set(key, value);
     }
   }
+  // Strip internal headers that should not be honored from external requests.
+  const headers = filterInternalHeaders(rawHeaders);
 
   const method = req.method ?? "GET";
   const hasBody = method !== "GET" && method !== "HEAD";
@@ -826,6 +850,7 @@ export async function startProdServer(options: ProdServerOptions = {}) {
     host = "0.0.0.0",
     outDir = path.resolve("dist"),
     noCompression = false,
+    purpose,
   } = options;
 
   const compress = !noCompression;
@@ -845,10 +870,10 @@ export async function startProdServer(options: ProdServerOptions = {}) {
   }
 
   if (isAppRouter) {
-    return startAppRouterServer({ port, host, clientDir, rscEntryPath, compress });
+    return startAppRouterServer({ port, host, clientDir, rscEntryPath, compress, purpose });
   }
 
-  return startPagesRouterServer({ port, host, clientDir, serverEntryPath, compress });
+  return startPagesRouterServer({ port, host, clientDir, serverEntryPath, compress, purpose });
 }
 
 // ─── App Router Production Server ─────────────────────────────────────────────
@@ -859,6 +884,7 @@ type AppRouterServerOptions = {
   clientDir: string;
   rscEntryPath: string;
   compress: boolean;
+  purpose?: ProdServerOptions["purpose"];
 };
 
 type WorkerAppRouterEntry = {
@@ -914,7 +940,7 @@ function resolveAppRouterHandler(entry: unknown): (request: Request) => Promise<
  * 4. Stream the Web Response back (with optional compression)
  */
 async function startAppRouterServer(options: AppRouterServerOptions) {
-  const { port, host, clientDir, rscEntryPath, compress } = options;
+  const { port, host, clientDir, rscEntryPath, compress, purpose } = options;
 
   // Load image config written at build time by vinext:image-config plugin.
   // This provides SVG/security header settings for the image optimization endpoint.
@@ -954,7 +980,7 @@ async function startAppRouterServer(options: AppRouterServerOptions) {
   // .br/.gz/.zst variants (generated at build time) are detected automatically.
   const staticCache = await StaticFileCache.create(clientDir);
 
-  const server = createServer(async (req, res) => {
+  const handleRequest = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
     const rawUrl = req.url ?? "/";
     const rawPathname = rawUrl.split("?")[0];
 
@@ -964,7 +990,7 @@ async function startAppRouterServer(options: AppRouterServerOptions) {
     // below and would otherwise reach the trailing-slash redirect emitter.
     if (isOpenRedirectShaped(rawPathname)) {
       res.writeHead(404);
-      res.end("404 Not Found");
+      res.end("This page could not be found");
       return;
     }
 
@@ -990,7 +1016,7 @@ async function startAppRouterServer(options: AppRouterServerOptions) {
       pathname === "/__vinext/prerender/static-params" ||
       pathname === "/__vinext/prerender/pages-static-paths"
     ) {
-      const secret = req.headers["x-vinext-prerender-secret"];
+      const secret = req.headers[VINEXT_PRERENDER_SECRET_HEADER];
       if (!prerenderSecret || secret !== prerenderSecret) {
         res.writeHead(403);
         res.end("Forbidden");
@@ -1069,7 +1095,7 @@ async function startAppRouterServer(options: AppRouterServerOptions) {
       const request = nodeToWebRequest(req, normalizedUrl);
       const response = await rscHandler(request);
 
-      const staticFileSignal = response.headers.get("x-vinext-static-file");
+      const staticFileSignal = response.headers.get(VINEXT_STATIC_FILE_HEADER);
       if (staticFileSignal) {
         let staticFilePath = "/";
         try {
@@ -1080,7 +1106,7 @@ async function startAppRouterServer(options: AppRouterServerOptions) {
 
         const staticResponseHeaders = omitHeadersCaseInsensitive(
           mergeResponseHeaders({}, response),
-          ["x-vinext-static-file", "content-encoding", "content-length", "content-type"],
+          [VINEXT_STATIC_FILE_HEADER, "content-encoding", "content-length", "content-type"],
         );
 
         const served = await tryServeStatic(
@@ -1098,10 +1124,7 @@ async function startAppRouterServer(options: AppRouterServerOptions) {
           return;
         }
         await sendWebResponse(
-          new Response("Not Found", {
-            status: 404,
-            headers: toWebHeaders(staticResponseHeaders),
-          }),
+          notFoundResponse({ headers: toWebHeaders(staticResponseHeaders) }),
           req,
           res,
           compress,
@@ -1118,13 +1141,17 @@ async function startAppRouterServer(options: AppRouterServerOptions) {
         res.end("Internal Server Error");
       }
     }
+  };
+
+  const server = createServer((req, res) => {
+    void handleRequest(req, res);
   });
 
   await new Promise<void>((resolve) => {
     server.listen(port, host, () => {
       const addr = server.address();
       const actualPort = typeof addr === "object" && addr ? addr.port : port;
-      console.log(`[vinext] Production server running at http://${host}:${actualPort}`);
+      logProdServerStarted(host, actualPort, purpose);
       resolve();
     });
   });
@@ -1142,7 +1169,30 @@ type PagesRouterServerOptions = {
   clientDir: string;
   serverEntryPath: string;
   compress: boolean;
+  purpose?: ProdServerOptions["purpose"];
 };
+
+type PagesServerEntryPageRoute = {
+  pattern: string;
+  module?: {
+    getStaticPaths?: (opts: { locales: string[]; defaultLocale: string }) => Promise<unknown>;
+  };
+};
+
+function isPagesServerEntryPageRoute(value: unknown): value is PagesServerEntryPageRoute {
+  if (!value || typeof value !== "object" || !("pattern" in value)) return false;
+  if (typeof value.pattern !== "string") return false;
+
+  if (!("module" in value) || value.module === undefined) return true;
+  const pageModule = value.module;
+  if (!pageModule || typeof pageModule !== "object") return false;
+
+  return !("getStaticPaths" in pageModule) || typeof pageModule.getStaticPaths === "function";
+}
+
+function readPagesServerEntryPageRoutes(value: unknown): PagesServerEntryPageRoute[] | undefined {
+  return Array.isArray(value) && value.every(isPagesServerEntryPageRoute) ? value : undefined;
+}
 
 /**
  * Start the Pages Router production server.
@@ -1154,7 +1204,7 @@ type PagesRouterServerOptions = {
  * - vinextConfig — embedded next.config.js settings
  */
 async function startPagesRouterServer(options: PagesRouterServerOptions) {
-  const { port, host, clientDir, serverEntryPath, compress } = options;
+  const { port, host, clientDir, serverEntryPath, compress, purpose } = options;
 
   // Import the server entry module (use file:// URL for reliable dynamic import).
   // Cache-bust with mtime so that rebuilds to the same output path always load
@@ -1162,6 +1212,9 @@ async function startPagesRouterServer(options: PagesRouterServerOptions) {
   const serverMtime = fs.statSync(serverEntryPath).mtimeMs;
   const serverEntry = await import(`${pathToFileURL(serverEntryPath).href}?t=${serverMtime}`);
   const { renderPage, handleApiRoute: handleApi, runMiddleware, vinextConfig } = serverEntry;
+  const matchPageRoute =
+    typeof serverEntry.matchPageRoute === "function" ? serverEntry.matchPageRoute : undefined;
+  const pageRoutes = readPagesServerEntryPageRoutes(serverEntry.pageRoutes);
 
   // Load prerender secret written at build time by vinext:server-manifest plugin.
   // Used to authenticate internal /__vinext/prerender/* HTTP endpoints.
@@ -1187,6 +1240,7 @@ async function startPagesRouterServer(options: PagesRouterServerOptions) {
   const pagesImageConfig: ImageConfig | undefined = vinextConfig?.images
     ? {
         dangerouslyAllowSVG: vinextConfig.images.dangerouslyAllowSVG,
+        dangerouslyAllowLocalIP: vinextConfig.images.dangerouslyAllowLocalIP,
         contentDispositionType: vinextConfig.images.contentDispositionType,
         contentSecurityPolicy: vinextConfig.images.contentSecurityPolicy,
       }
@@ -1220,7 +1274,7 @@ async function startPagesRouterServer(options: PagesRouterServerOptions) {
   // Build the static file metadata cache at startup (same as App Router).
   const staticCache = await StaticFileCache.create(clientDir);
 
-  const server = createServer(async (req, res) => {
+  const handleRequest = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
     const rawUrl = req.url ?? "/";
     const rawPagesPathnameBeforeNormalize = rawUrl.split("?")[0];
 
@@ -1230,7 +1284,7 @@ async function startPagesRouterServer(options: PagesRouterServerOptions) {
     // below and would otherwise reach the trailing-slash redirect emitter.
     if (isOpenRedirectShaped(rawPagesPathnameBeforeNormalize)) {
       res.writeHead(404);
-      res.end("404 Not Found");
+      res.end("This page could not be found");
       return;
     }
 
@@ -1254,7 +1308,7 @@ async function startPagesRouterServer(options: PagesRouterServerOptions) {
     // Internal prerender endpoint — only reachable with the correct build-time secret.
     // Used by the prerender phase to fetch getStaticPaths results via HTTP.
     if (pathname === "/__vinext/prerender/pages-static-paths") {
-      const secret = req.headers["x-vinext-prerender-secret"];
+      const secret = req.headers[VINEXT_PRERENDER_SECRET_HEADER];
       if (!prerenderSecret || secret !== prerenderSecret) {
         res.writeHead(403);
         res.end("Forbidden");
@@ -1265,17 +1319,6 @@ async function startPagesRouterServer(options: PagesRouterServerOptions) {
       const localesRaw = parsedUrl.searchParams.get("locales");
       const locales: string[] = localesRaw ? JSON.parse(localesRaw) : [];
       const defaultLocale = parsedUrl.searchParams.get("defaultLocale") ?? "";
-      const pageRoutes = serverEntry.pageRoutes as
-        | Array<{
-            pattern: string;
-            module?: {
-              getStaticPaths?: (opts: {
-                locales: string[];
-                defaultLocale: string;
-              }) => Promise<unknown>;
-            };
-          }>
-        | undefined;
       const route = pageRoutes?.find((r) => r.pattern === pattern);
       const fn = route?.module?.getStaticPaths;
       if (typeof fn !== "function") {
@@ -1371,7 +1414,7 @@ async function startPagesRouterServer(options: PagesRouterServerOptions) {
           return;
         } else if (!trailingSlash && hasTrailing) {
           const qs = url.includes("?") ? url.slice(url.indexOf("?")) : "";
-          res.writeHead(308, { Location: basePath + pathname.replace(/\/+$/, "") + qs });
+          res.writeHead(308, { Location: basePath + removeTrailingSlash(pathname) + qs });
           res.end();
           return;
         }
@@ -1383,10 +1426,13 @@ async function startPagesRouterServer(options: PagesRouterServerOptions) {
         : undefined;
       const protocol = rawProtocol === "https" || rawProtocol === "http" ? rawProtocol : "http";
       const hostHeader = resolveHost(req, `${host}:${port}`);
-      const reqHeaders = Object.entries(req.headers).reduce((h, [k, v]) => {
+      const rawReqHeaders = Object.entries(req.headers).reduce((h, [k, v]) => {
         if (v) h.set(k, Array.isArray(v) ? v.join(", ") : v);
         return h;
       }, new Headers());
+      // Strip internal headers from inbound requests before any handler or
+      // middleware sees them.
+      const reqHeaders = filterInternalHeaders(rawReqHeaders);
       const method = req.method ?? "GET";
       const hasBody = method !== "GET" && method !== "HEAD";
       let webRequest = new Request(`${protocol}://${hostHeader}${url}`, {
@@ -1428,7 +1474,7 @@ async function startPagesRouterServer(options: PagesRouterServerOptions) {
       // ── 5. Run middleware ─────────────────────────────────────────
       let resolvedUrl = url;
       const middlewareHeaders: Record<string, string | string[]> = {};
-      let middlewareRewriteStatus: number | undefined;
+      let middlewareStatus: number | undefined;
       if (typeof runMiddleware === "function") {
         const result = await runMiddleware(webRequest, undefined);
 
@@ -1506,9 +1552,10 @@ async function startPagesRouterServer(options: PagesRouterServerOptions) {
           resolvedUrl = result.rewriteUrl;
         }
 
-        // Apply custom status code from middleware rewrite
-        // (e.g. NextResponse.rewrite(url, { status: 403 }))
-        middlewareRewriteStatus = result.rewriteStatus;
+        // Apply custom status code from middleware continue/rewrite responses.
+        // Examples: NextResponse.next({ status: 404 }) and
+        // NextResponse.rewrite(url, { status: 403 }).
+        middlewareStatus = result.status ?? result.rewriteStatus;
       }
 
       // Unpack x-middleware-request-* headers into the actual request and strip
@@ -1518,6 +1565,7 @@ async function startPagesRouterServer(options: PagesRouterServerOptions) {
       const { postMwReqCtx, request: postMwReq } = applyMiddlewareRequestHeaders(
         middlewareHeaders,
         webRequest,
+        { preserveCredentialHeaders: isExternalUrl(resolvedUrl) },
       );
       webRequest = postMwReq;
 
@@ -1595,11 +1643,7 @@ async function startPagesRouterServer(options: PagesRouterServerOptions) {
           response = new Response("404 - API route not found", { status: 404 });
         }
 
-        const mergedResponse = mergeWebResponse(
-          middlewareHeaders,
-          response,
-          middlewareRewriteStatus,
-        );
+        const mergedResponse = mergeWebResponse(middlewareHeaders, response, middlewareStatus);
 
         if (!mergedResponse.body) {
           await sendWebResponse(mergedResponse, req, res, compress);
@@ -1627,8 +1671,11 @@ async function startPagesRouterServer(options: PagesRouterServerOptions) {
         return;
       }
 
+      const pageMatch = matchPageRoute ? matchPageRoute(resolvedPathname, webRequest) : null;
+
       // ── 9. Apply afterFiles rewrites from next.config.js ──────────
-      if (configRewrites.afterFiles?.length) {
+      // These run after non-dynamic page routes but before dynamic routes.
+      if ((!pageMatch || pageMatch.route.isDynamic) && configRewrites.afterFiles?.length) {
         const rewritten = matchRewrite(resolvedPathname, configRewrites.afterFiles, postMwReqCtx);
         if (rewritten) {
           if (isExternalUrl(rewritten)) {
@@ -1679,13 +1726,13 @@ async function startPagesRouterServer(options: PagesRouterServerOptions) {
 
       if (!response) {
         res.writeHead(404);
-        res.end("404 - Not found");
+        res.end("This page could not be found");
         return;
       }
 
       // Capture the streaming marker before mergeWebResponse rebuilds the Response.
       const shouldStreamPagesResponse = isVinextStreamedHtmlResponse(response);
-      const mergedResponse = mergeWebResponse(middlewareHeaders, response, middlewareRewriteStatus);
+      const mergedResponse = mergeWebResponse(middlewareHeaders, response, middlewareStatus);
 
       if (shouldStreamPagesResponse || !mergedResponse.body) {
         await sendWebResponse(mergedResponse, req, res, compress);
@@ -1714,13 +1761,17 @@ async function startPagesRouterServer(options: PagesRouterServerOptions) {
         res.end("Internal Server Error");
       }
     }
+  };
+
+  const server = createServer((req, res) => {
+    void handleRequest(req, res);
   });
 
   await new Promise<void>((resolve) => {
     server.listen(port, host, () => {
       const addr = server.address();
       const actualPort = typeof addr === "object" && addr ? addr.port : port;
-      console.log(`[vinext] Production server running at http://${host}:${actualPort}`);
+      logProdServerStarted(host, actualPort, purpose);
       resolve();
     });
   });

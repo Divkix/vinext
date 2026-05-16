@@ -1,3 +1,4 @@
+import { installEdgeGlobals } from "./edge-globals.js";
 import type { NextI18nConfig } from "../config/next-config.js";
 import { normalizePathnameForRouteMatchStrict } from "../routing/utils.js";
 import {
@@ -7,9 +8,19 @@ import {
 } from "vinext/shims/request-context";
 import { NextFetchEvent, NextRequest } from "vinext/shims/server";
 import { normalizePath } from "./normalize-path.js";
+import {
+  MIDDLEWARE_HEADER_PREFIX,
+  MIDDLEWARE_NEXT_HEADER,
+  MIDDLEWARE_REWRITE_HEADER,
+} from "./headers.js";
 import { MatcherConfig, matchesMiddleware } from "./middleware-matcher.js";
 import { shouldKeepMiddlewareHeader } from "./middleware-request-headers.js";
 import { processMiddlewareHeaders } from "./request-pipeline.js";
+import { badRequestResponse, internalServerErrorResponse } from "./http-error-responses.js";
+
+// Expose edge-runtime globals (e.g. AsyncLocalStorage) so user middleware can
+// reference them without an import, matching Next.js.
+installEdgeGlobals();
 
 export type MiddlewareModule = Record<string, unknown>;
 
@@ -19,6 +30,7 @@ export type MiddlewareResult = {
   redirectStatus?: number;
   rewriteUrl?: string;
   rewriteStatus?: number;
+  status?: number;
   responseHeaders?: Headers;
   response?: Response;
   waitUntilPromises?: Promise<unknown>[];
@@ -98,7 +110,7 @@ function stripMiddlewareHeadersFromResponse(response: Response): Response {
 function collectMiddlewareHeaders(response: Response): Headers {
   const responseHeaders = new Headers();
   for (const [key, value] of response.headers) {
-    if (!key.startsWith("x-middleware-") || shouldKeepMiddlewareHeader(key)) {
+    if (!key.startsWith(MIDDLEWARE_HEADER_PREFIX) || shouldKeepMiddlewareHeader(key)) {
       responseHeaders.append(key, value);
     }
   }
@@ -122,7 +134,7 @@ function resolveMiddlewarePathname(request: Request): string | Response {
   try {
     return normalizePath(normalizePathnameForRouteMatchStrict(url.pathname));
   } catch {
-    return new Response("Bad Request", { status: 400 });
+    return badRequestResponse();
   }
 }
 
@@ -133,11 +145,13 @@ function createNextRequest(
   basePath?: string,
 ): NextRequest {
   const url = new URL(request.url);
-  let mwRequest = request;
+  // Middleware gets an isolated body branch; downstream routing keeps owning
+  // the original request body.
+  let mwRequest = request.body && !request.bodyUsed ? request.clone() : request;
   if (normalizedPathname !== url.pathname) {
     const mwUrl = new URL(url);
     mwUrl.pathname = normalizedPathname;
-    mwRequest = new Request(mwUrl, request);
+    mwRequest = new Request(mwUrl, mwRequest);
   }
 
   const nextConfig =
@@ -193,7 +207,7 @@ export async function executeMiddleware(
       : "Internal Server Error";
     return {
       continue: false,
-      response: new Response(message, { status: 500 }),
+      response: internalServerErrorResponse(message),
       waitUntilPromises,
     };
   }
@@ -204,10 +218,11 @@ export async function executeMiddleware(
     return { continue: true, waitUntilPromises };
   }
 
-  if (response.headers.get("x-middleware-next") === "1") {
+  if (response.headers.get(MIDDLEWARE_NEXT_HEADER) === "1") {
     return {
       continue: true,
       responseHeaders: collectMiddlewareHeaders(response),
+      status: response.status !== 200 ? response.status : undefined,
       waitUntilPromises,
     };
   }
@@ -217,7 +232,7 @@ export async function executeMiddleware(
     if (location) {
       const responseHeaders = new Headers();
       for (const [key, value] of response.headers) {
-        if (!key.startsWith("x-middleware-") && key.toLowerCase() !== "location") {
+        if (!key.startsWith(MIDDLEWARE_HEADER_PREFIX) && key.toLowerCase() !== "location") {
           responseHeaders.append(key, value);
         }
       }
@@ -232,7 +247,7 @@ export async function executeMiddleware(
     }
   }
 
-  const rewriteUrl = response.headers.get("x-middleware-rewrite");
+  const rewriteUrl = response.headers.get(MIDDLEWARE_REWRITE_HEADER);
   if (rewriteUrl) {
     let rewritePath: string;
     try {
@@ -250,6 +265,7 @@ export async function executeMiddleware(
       rewriteUrl: rewritePath,
       rewriteStatus: response.status !== 200 ? response.status : undefined,
       responseHeaders: collectMiddlewareHeaders(response),
+      status: response.status !== 200 ? response.status : undefined,
       waitUntilPromises,
     };
   }

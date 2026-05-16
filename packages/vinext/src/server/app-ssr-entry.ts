@@ -1,13 +1,15 @@
 /// <reference types="@vitejs/plugin-rsc/types" />
 
 import type { ReactNode } from "react";
+import type { ReactFormState } from "react-dom/client";
 import { Fragment, createElement as createReactElement, use } from "react";
 import { createFromReadableStream } from "@vitejs/plugin-rsc/ssr";
 import { renderToReadableStream, renderToStaticMarkup } from "react-dom/server.edge";
-import * as clientReferences from "virtual:vite-rsc/client-references";
+import clientReferences from "virtual:vite-rsc/client-references";
 import type { NavigationContext } from "vinext/shims/navigation";
 import {
   ServerInsertedHTMLContext,
+  appRouterInstance,
   clearServerInsertedHTML,
   renderServerInsertedHTML,
   setNavigationContext,
@@ -15,6 +17,7 @@ import {
 } from "vinext/shims/navigation";
 import { runWithNavigationContext } from "vinext/shims/navigation-state";
 import { isOpenRedirectShaped } from "./request-pipeline.js";
+import { notFoundResponse } from "./http-error-responses.js";
 import { withScriptNonce } from "vinext/shims/script-nonce-context";
 import {
   createInlineScriptTag,
@@ -24,12 +27,12 @@ import {
 } from "./html.js";
 import { createRscEmbedTransform, createTickBufferedTransform } from "./app-ssr-stream.js";
 import { deferUntilStreamConsumed } from "./app-page-stream.js";
-import {
-  normalizeAppElements,
-  readAppElementsMetadata,
-  type AppWireElements,
-} from "./app-elements.js";
+import { createSsrErrorMetaRenderer } from "./app-ssr-error-meta.js";
+import { AppElementsWire, type AppWireElements } from "./app-elements.js";
 import { ElementsContext, Slot } from "vinext/shims/slot";
+import { AppRouterContext } from "vinext/shims/internal/app-router-context";
+import { createClientReferencePreloader } from "./app-client-reference-preloader.js";
+import { RSC_FORM_STATE_GLOBAL } from "./app-browser-hydration.js";
 
 export type FontPreload = {
   href: string;
@@ -42,37 +45,19 @@ export type FontData = {
   preloads?: FontPreload[];
 };
 
-type ClientRequire = (id: string) => Promise<unknown>;
-
-let clientRefsPreloaded = false;
-
-function getClientReferenceRequire(): ClientRequire | undefined {
-  return (
-    globalThis as typeof globalThis & {
-      __vite_rsc_client_require__?: ClientRequire;
+const clientReferencePreloader = createClientReferencePreloader({
+  getReferences() {
+    return clientReferences;
+  },
+  getClientRequire() {
+    return globalThis.__vite_rsc_client_require__;
+  },
+  onPreloadError(id, error) {
+    if (process.env.NODE_ENV !== "production") {
+      console.warn("[vinext] failed to preload client ref:", id, error);
     }
-  ).__vite_rsc_client_require__;
-}
-
-async function preloadClientReferences(): Promise<void> {
-  if (clientRefsPreloaded) return;
-
-  const refs = (clientReferences as { default?: Record<string, unknown> }).default;
-  const clientRequire = getClientReferenceRequire();
-  if (!refs || !clientRequire) return;
-
-  await Promise.all(
-    Object.keys(refs).map((id) =>
-      clientRequire(id).catch((error) => {
-        if (process.env.NODE_ENV !== "production") {
-          console.warn("[vinext] failed to preload client ref:", id, error);
-        }
-      }),
-    ),
-  );
-
-  clientRefsPreloaded = true;
-}
+  },
+});
 
 function ssrErrorDigest(input: string): string {
   let hash = 5381;
@@ -137,6 +122,7 @@ function extractModulePreloadHtml(bootstrapScriptContent?: string, nonce?: strin
 function buildHeadInjectionHtml(
   navContext: NavigationContext | null,
   bootstrapScriptContent: string | undefined,
+  formState: ReactFormState | null,
   insertedHTML: string,
   fontHTML: string,
   scriptNonce?: string,
@@ -153,10 +139,18 @@ function buildHeadInjectionHtml(
     "self.__VINEXT_RSC_NAV__=" + safeJsonStringify(navPayload),
     scriptNonce,
   );
+  const formStateScript =
+    formState === null
+      ? ""
+      : createInlineScriptTag(
+          "self[" + safeJsonStringify(RSC_FORM_STATE_GLOBAL) + "]=" + safeJsonStringify(formState),
+          scriptNonce,
+        );
 
   return (
     paramsScript +
     navScript +
+    formStateScript +
     extractModulePreloadHtml(bootstrapScriptContent, scriptNonce) +
     insertedHTML +
     fontHTML
@@ -175,10 +169,16 @@ export async function handleSsr(
     sideStream?: ReadableStream<Uint8Array>;
     /** Out-parameter: filled with accumulated raw RSC bytes when sideStream is consumed. */
     capturedRscDataRef?: { value: Promise<ArrayBuffer> | null };
+    formState?: ReactFormState | null;
+    basePath?: string;
+    /** When true, wait for the full React tree (including Suspense boundaries)
+     *  to resolve before returning the HTML stream. Used for static prerender
+     *  and ISR cache writes to avoid caching fallback content. */
+    waitForAllReady?: boolean;
   },
 ): Promise<ReadableStream<Uint8Array>> {
   return runWithNavigationContext(async () => {
-    await preloadClientReferences();
+    await clientReferencePreloader.preload();
 
     if (navContext) {
       setNavigationContext(navContext);
@@ -217,8 +217,8 @@ export async function handleSsr(
           flightRoot = createFromReadableStream<AppWireElements>(ssrStream);
         }
         const wireElements = use(flightRoot);
-        const elements = normalizeAppElements(wireElements);
-        const metadata = readAppElementsMetadata(elements);
+        const elements = AppElementsWire.decode(wireElements);
+        const metadata = AppElementsWire.readMetadata(elements);
         return createReactElement(
           ElementsContext.Provider,
           { value: elements },
@@ -226,7 +226,14 @@ export async function handleSsr(
         );
       }
 
-      const root = createReactElement(VinextFlightRoot);
+      const flightRootElement = createReactElement(VinextFlightRoot);
+      const root = AppRouterContext
+        ? createReactElement(
+            AppRouterContext.Provider,
+            { value: appRouterInstance },
+            flightRootElement,
+          )
+        : flightRootElement;
       const ssrTree = ServerInsertedHTMLContext
         ? createReactElement(
             ServerInsertedHTMLContext.Provider,
@@ -237,11 +244,17 @@ export async function handleSsr(
       const ssrRoot = withScriptNonce(ssrTree, options?.scriptNonce);
 
       const bootstrapScriptContent = await import.meta.viteRsc.loadBootstrapScriptContent("index");
+      const errorMetaRenderer = createSsrErrorMetaRenderer({
+        basePath: options?.basePath,
+      });
 
       const htmlStream = await renderToReadableStream(ssrRoot, {
         bootstrapScriptContent,
+        formState: options?.formState ?? null,
         nonce: options?.scriptNonce,
         onError(error) {
+          errorMetaRenderer.capture(error);
+
           if (error && typeof error === "object" && "digest" in error) {
             return String(error.digest);
           }
@@ -256,17 +269,27 @@ export async function handleSsr(
         },
       });
 
+      // When producing static output (prerender / ISR cache writes), wait for
+      // the full React tree to resolve before emitting bytes. This prevents
+      // Suspense fallback content from being serialized to the cache.
+      // Matches Next.js waitForAllReady forkpoint in renderToNodeFizzStream.
+      if (options?.waitForAllReady === true) {
+        await htmlStream.allReady;
+      }
+
       const fontHTML = renderFontHtml(fontData, options?.scriptNonce);
       let didInjectHeadHTML = false;
       const getInsertedHTML = (): string => {
         const insertedHTML = renderInsertedHtml(renderServerInsertedHTML());
-        if (didInjectHeadHTML) return insertedHTML;
+        const errorMetaHTML = errorMetaRenderer.flush();
+        if (didInjectHeadHTML) return insertedHTML + errorMetaHTML;
 
         didInjectHeadHTML = true;
         return buildHeadInjectionHtml(
           navContext,
           bootstrapScriptContent,
-          insertedHTML,
+          options?.formState ?? null,
+          insertedHTML + errorMetaHTML,
           fontHTML,
           options?.scriptNonce,
         );
@@ -289,7 +312,7 @@ export default {
     // Block protocol-relative URL open redirects (including percent-encoded
     // variants like /%5Cevil.com/). See request-pipeline.ts for details.
     if (isOpenRedirectShaped(url.pathname)) {
-      return new Response("404 Not Found", { status: 404 });
+      return notFoundResponse();
     }
 
     const rscModule = await import.meta.viteRsc.loadModule<{
@@ -302,7 +325,7 @@ export default {
     }
 
     if (result == null) {
-      return new Response("Not Found", { status: 404 });
+      return notFoundResponse();
     }
 
     return new Response(String(result), { status: 200 });

@@ -6,7 +6,7 @@
  * Vite plugin to wrap them with `registerCachedFunction()`.
  *
  * The runtime:
- * 1. Generates a cache key from build ID + function identity + serialized arguments
+ * 1. Generates a cache key from deployment/build ID + function identity + serialized arguments
  * 2. Checks the CacheHandler for a cached value
  * 3. On HIT: returns the cached value (deserialized via RSC stream)
  * 4. On MISS: creates an AsyncLocalStorage context for cacheLife/cacheTag,
@@ -28,7 +28,6 @@
  * - "use cache: private"  — per-request cache (not shared across requests)
  */
 
-import { AsyncLocalStorage } from "node:async_hooks";
 import {
   getCacheHandler,
   cacheLifeProfiles,
@@ -37,6 +36,8 @@ import {
   type CacheControlMetadata,
   type CacheLifeConfig,
 } from "./cache.js";
+import { VINEXT_RSC_MARKER_HEADER } from "../server/headers.js";
+import { getOrCreateAls } from "./internal/als-registry.js";
 import {
   isInsideUnifiedScope,
   getRequestContext,
@@ -58,10 +59,7 @@ export type CacheContext = {
 
 // Store on globalThis via Symbol so headers.ts can detect "use cache" scope
 // without a direct import (avoiding circular dependencies).
-const _CONTEXT_ALS_KEY = Symbol.for("vinext.cacheRuntime.contextAls");
-const _gCacheRuntime = globalThis as unknown as Record<PropertyKey, unknown>;
-export const cacheContextStorage = (_gCacheRuntime[_CONTEXT_ALS_KEY] ??=
-  new AsyncLocalStorage<CacheContext>()) as AsyncLocalStorage<CacheContext>;
+export const cacheContextStorage = getOrCreateAls<CacheContext>("vinext.cacheRuntime.contextAls");
 
 // Register the context accessor so cacheLife()/cacheTag() in cache.ts can
 // access the context without a circular import.
@@ -93,11 +91,21 @@ type RscModule = {
   decodeReply: (body: string | FormData, options?: unknown) => Promise<unknown[]>;
 };
 
-function getUseCacheBuildId(): string | undefined {
+function getUseCacheDeploymentIdDefine(): string | undefined {
   try {
     // Keep this direct reference so Vite's define transform can inline it for
-    // Worker bundles where the process global might not exist at runtime. A
-    // typeof process guard would return before the inlined build ID is reached.
+    // Worker bundles where the process global might not exist at runtime.
+    return process.env.__VINEXT_DEPLOYMENT_ID || process.env.NEXT_DEPLOYMENT_ID;
+  } catch (error) {
+    if (error instanceof ReferenceError) return undefined;
+    throw error;
+  }
+}
+
+function getUseCacheBuildIdDefine(): string | undefined {
+  try {
+    // Keep this direct reference so Vite's define transform can inline it for
+    // Worker bundles where the process global might not exist at runtime.
     return process.env.__VINEXT_BUILD_ID;
   } catch (error) {
     if (error instanceof ReferenceError) return undefined;
@@ -105,8 +113,12 @@ function getUseCacheBuildId(): string | undefined {
   }
 }
 
-function buildUseCacheKey(id: string, buildId: string | undefined, argsKey?: string): string {
-  const scopedId = buildId ? `build:${encodeURIComponent(buildId)}:${id}` : id;
+function getUseCacheKeySeed(): string | undefined {
+  return getUseCacheDeploymentIdDefine() || getUseCacheBuildIdDefine();
+}
+
+function buildUseCacheKey(id: string, keySeed: string | undefined, argsKey?: string): string {
+  const scopedId = keySeed ? `build:${encodeURIComponent(keySeed)}:${id}` : id;
   return argsKey === undefined ? `use-cache:${scopedId}` : `use-cache:${scopedId}:${argsKey}`;
 }
 
@@ -252,11 +264,9 @@ export type PrivateCacheState = {
   _privateCache: Map<string, unknown> | null;
 };
 
-const _PRIVATE_ALS_KEY = Symbol.for("vinext.cacheRuntime.privateAls");
 const _PRIVATE_FALLBACK_KEY = Symbol.for("vinext.cacheRuntime.privateFallback");
 const _g = globalThis as unknown as Record<PropertyKey, unknown>;
-const _privateAls = (_g[_PRIVATE_ALS_KEY] ??=
-  new AsyncLocalStorage<PrivateCacheState>()) as AsyncLocalStorage<PrivateCacheState>;
+const _privateAls = getOrCreateAls<PrivateCacheState>("vinext.cacheRuntime.privateAls");
 
 const _privateFallbackState = (_g[_PRIVATE_FALLBACK_KEY] ??= {
   _privateCache: new Map<string, unknown>(),
@@ -337,11 +347,11 @@ export function registerCachedFunction<T extends (...args: any[]) => Promise<any
   // Per-request ("use cache: private") caching still works in dev since
   // it's scoped to a single request and doesn't persist across HMR.
   const isDev = typeof process !== "undefined" && process.env.NODE_ENV === "development";
-  const buildId = getUseCacheBuildId();
 
   // oxlint-disable-next-line @typescript-eslint/no-explicit-any
   const cachedFn = async (...args: any[]): Promise<any> => {
     const rsc = await getRscModule();
+    const keySeed = getUseCacheKeySeed();
 
     // Build the cache key. Use encodeReply (RSC protocol) when available —
     // it correctly handles React elements as temporary references (excluded
@@ -364,10 +374,10 @@ export function registerCachedFunction<T extends (...args: any[]) => Promise<any
         const encoded = await rsc.encodeReply(processedArgs, {
           temporaryReferences: tempRefs,
         });
-        cacheKey = buildUseCacheKey(id, buildId, await replyToCacheKey(encoded));
+        cacheKey = buildUseCacheKey(id, keySeed, await replyToCacheKey(encoded));
       } else {
         const argsKey = args.length > 0 ? stableStringify(args) : undefined;
-        cacheKey = buildUseCacheKey(id, buildId, argsKey);
+        cacheKey = buildUseCacheKey(id, keySeed, argsKey);
       }
     } catch {
       // Non-serializable arguments — run without caching
@@ -400,7 +410,7 @@ export function registerCachedFunction<T extends (...args: any[]) => Promise<any
     const existing = await handler.get(cacheKey, { kind: "FETCH" });
     if (existing?.value && existing.value.kind === "FETCH" && existing.cacheState !== "stale") {
       try {
-        if (rsc && existing.value.data.headers["x-vinext-rsc"] === "1") {
+        if (rsc && existing.value.data.headers[VINEXT_RSC_MARKER_HEADER] === "1") {
           // RSC-serialized entry: base64 → bytes → stream → deserialize
           const bytes = base64ToUint8(existing.value.data.body);
           const stream = uint8ToStream(bytes);
@@ -445,7 +455,7 @@ export function registerCachedFunction<T extends (...args: any[]) => Promise<any
         const stream = rsc.renderToReadableStream(result);
         const bytes = await collectStream(stream);
         body = uint8ToBase64(bytes);
-        headers["x-vinext-rsc"] = "1";
+        headers[VINEXT_RSC_MARKER_HEADER] = "1";
       } else {
         // JSON fallback
         body = JSON.stringify(result);

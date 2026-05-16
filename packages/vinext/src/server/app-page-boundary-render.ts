@@ -19,13 +19,7 @@ import {
   renderAppPageHtmlResponse,
   type AppPageSsrHandler,
 } from "./app-page-stream.js";
-import {
-  APP_INTERCEPTION_CONTEXT_KEY,
-  APP_ROOT_LAYOUT_KEY,
-  APP_ROUTE_KEY,
-  createAppPayloadRouteId,
-  type AppElements,
-} from "./app-elements.js";
+import { AppElementsWire, type AppElements } from "./app-elements.js";
 import { createAppPageLayoutEntries } from "./app-page-route-wiring.js";
 
 // oxlint-disable-next-line @typescript-eslint/no-explicit-any
@@ -41,12 +35,19 @@ type AppPageBoundaryOnError = (
 
 type AppPageBoundaryRscPayloadOptions<TModule extends AppPageModule = AppPageModule> = {
   element: ReactNode;
+  layoutModules: readonly (TModule | null | undefined)[];
   pathname: string;
   route?: AppPageBoundaryRoute<TModule> | null;
 };
 
+type AppPageBoundaryLayoutEntry = {
+  id: string;
+  treePath: string;
+};
+
 export type AppPageBoundaryRoute<TModule extends AppPageModule = AppPageModule> = {
   error?: TModule | null;
+  errorPaths?: readonly TModule[] | null;
   errors?: readonly (TModule | null | undefined)[] | null;
   forbidden?: TModule | null;
   layoutTreePositions?: readonly number[] | null;
@@ -162,26 +163,19 @@ function wrapRenderedBoundaryElement<TModule extends AppPageModule>(
   });
 }
 
-function resolveAppPageBoundaryRootLayoutTreePath<TModule extends AppPageModule>(
+function createAppPageBoundaryLayoutEntries<TModule extends AppPageModule>(
   route: AppPageBoundaryRoute<TModule> | null | undefined,
-): string | null {
-  if (route?.layouts) {
-    const rootLayoutEntry = createAppPageLayoutEntries({
-      errors: route.errors,
-      layoutTreePositions: route.layoutTreePositions,
-      layouts: route.layouts,
-      notFounds: null,
-      routeSegments: route.routeSegments,
-    })[0];
+  layoutModules: readonly (TModule | null | undefined)[],
+): readonly AppPageBoundaryLayoutEntry[] {
+  if (!route || layoutModules.length === 0) return [];
 
-    if (rootLayoutEntry) {
-      return rootLayoutEntry.treePath;
-    }
-  }
-
-  // Without route tree metadata we cannot derive a canonical root layout tree path.
-  // Returning null keeps boundary payloads soft-navigation compatible.
-  return null;
+  return createAppPageLayoutEntries({
+    errors: route.errors,
+    layoutTreePositions: route.layoutTreePositions,
+    layouts: layoutModules,
+    notFounds: null,
+    routeSegments: route.routeSegments,
+  });
 }
 
 function resolveHttpAccessFallbackHeadRouteSegments<TModule extends AppPageModule>(
@@ -219,12 +213,16 @@ function resolveHttpAccessFallbackHeadLayoutTreePositions<TModule extends AppPag
 function createAppPageBoundaryRscPayload<TModule extends AppPageModule>(
   options: AppPageBoundaryRscPayloadOptions<TModule>,
 ): AppElements {
-  const routeId = createAppPayloadRouteId(options.pathname, null);
+  const routeId = AppElementsWire.encodeRouteId(options.pathname, null);
+  const layoutEntries = createAppPageBoundaryLayoutEntries(options.route, options.layoutModules);
 
   return {
-    [APP_INTERCEPTION_CONTEXT_KEY]: null,
-    [APP_ROUTE_KEY]: routeId,
-    [APP_ROOT_LAYOUT_KEY]: resolveAppPageBoundaryRootLayoutTreePath(options.route),
+    ...AppElementsWire.createMetadataEntries({
+      interceptionContext: null,
+      layoutIds: layoutEntries.map((entry) => entry.id),
+      rootLayoutTreePath: layoutEntries[0]?.treePath ?? null,
+      routeId,
+    }),
     [routeId]: options.element,
   };
 }
@@ -241,6 +239,7 @@ async function renderAppPageBoundaryElementResponse<TModule extends AppPageModul
   const pathname = new URL(options.requestUrl).pathname;
   const payload = createAppPageBoundaryRscPayload({
     element: options.element,
+    layoutModules: options.layoutModules,
     pathname,
     route: options.route,
   });
@@ -346,6 +345,7 @@ export async function renderAppPageErrorBoundary<TModule extends AppPageModule>(
 ): Promise<Response | null> {
   const errorBoundary = resolveAppPageErrorBoundary({
     getDefaultExport,
+    errorModules: options.route?.errorPaths,
     globalErrorModule: options.globalErrorModule,
     layoutErrorModules: options.route?.errors,
     pageErrorModule: options.route?.error,

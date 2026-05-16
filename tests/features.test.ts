@@ -2133,6 +2133,21 @@ describe("metadata title templates", () => {
     expect(result.title).toBe("My Site");
   });
 
+  it("applies ancestor title template to child layout default title", () => {
+    // Next.js resolveTitle() applies the stashed ancestor template to title.default:
+    // https://github.com/vercel/next.js/blob/canary/packages/next/src/lib/metadata/resolvers/resolve-title.ts
+    const result = mergeMetadataEntries([
+      {
+        metadata: { title: { template: "%s | Site", default: "Site" } },
+      },
+      {
+        metadata: { title: { default: "Blog" } },
+      },
+    ]);
+
+    expect(result.title).toBe("Blog | Site");
+  });
+
   it("title.absolute skips all templates", () => {
     const result = mergeMetadata([
       { title: { template: "%s | My Site", default: "My Site" } },
@@ -2150,16 +2165,19 @@ describe("metadata title templates", () => {
     expect(result.title).toBe("Hello World - Blog");
   });
 
-  it("page template has no effect (page is terminal)", () => {
-    // If the page defines a template, it should be ignored
-    // Only layouts define templates, and page is always the last entry
+  it("applies ancestor template to page default while ignoring page template", () => {
     const result = mergeMetadata([
       { title: { template: "%s | Site", default: "Site" } },
       { title: { template: "%s - Page Template", default: "Page Default" } },
     ]);
-    // The page's template should be ignored; the page's default is used
-    // because the page has a title object (not a string), so we use its default
-    expect(result.title).toBe("Page Default");
+
+    expect(result.title).toBe("Page Default | Site");
+  });
+
+  it("does not apply a page template to the page's own default title", () => {
+    const result = mergeMetadata([{ title: { template: "%s | Page", default: "Page" } }]);
+
+    expect(result.title).toBe("Page");
   });
 
   it("preserves non-title metadata during merge", () => {
@@ -2178,8 +2196,10 @@ describe("metadata title templates", () => {
       { description: "From page" },
     ]);
     expect(result.description).toBe("From page");
-    // openGraph from layout should be inherited if page doesn't override it
-    expect(result.openGraph).toEqual({ title: "OG Layout" });
+    // openGraph from layout should be inherited if page doesn't override it.
+    // Next.js postProcessMetadata also fills openGraph.description from
+    // metadata.description when absent.
+    expect(result.openGraph).toEqual({ title: "OG Layout", description: "From page" });
   });
 
   it("simple string title without template passes through", () => {
@@ -2210,11 +2230,249 @@ describe("metadata title templates", () => {
       },
     ]);
 
+    // mergeMetadataEntries does raw segment merging only; post-processing is
+    // applied separately by postProcessMetadata (called by mergeMetadata and by
+    // resolveAppPageHead after file-based metadata is applied).
     expect(result).toEqual({
       description: "Page",
       openGraph: { title: "Slot OG title" },
-      title: "Page",
+      title: "Page | Root",
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Metadata segment merge tests
+// Ported from Next.js behavior:
+// - docs: https://nextjs.org/docs/app/api-reference/functions/generate-metadata#merging
+// - source: packages/next/src/lib/metadata/resolve-metadata.ts
+// https://github.com/vercel/next.js/blob/canary/packages/next/src/lib/metadata/resolve-metadata.ts
+
+describe("metadata segment merge", () => {
+  let mergeMetadata: typeof import("../packages/vinext/src/shims/metadata.js").mergeMetadata;
+
+  beforeAll(async () => {
+    const mod = await import("../packages/vinext/src/shims/metadata.js");
+    mergeMetadata = mod.mergeMetadata;
+  });
+
+  it("replaces openGraph instead of deep-merging subkeys", () => {
+    const result = mergeMetadata([
+      { openGraph: { siteName: "My Site", images: ["/og-root.png"], locale: "en-US" } },
+      { openGraph: { title: "Child Page" } },
+    ]);
+    expect(result.openGraph).toEqual({
+      title: "Child Page",
+    });
+    expect(result.twitter?.images).toBeUndefined();
+  });
+
+  it("replaces twitter instead of deep-merging subkeys", () => {
+    const result = mergeMetadata([
+      { twitter: { card: "summary", site: "@site" } },
+      { twitter: { title: "Tweet Title" } },
+    ]);
+    expect(result.twitter).toEqual({
+      title: "Tweet Title",
+      card: "summary",
+    });
+  });
+
+  it("replaces alternates instead of deep-merging subkeys", () => {
+    const result = mergeMetadata([
+      { alternates: { canonical: "https://example.com", languages: { "en-US": "/en" } } },
+      { alternates: { media: { print: "/print" } } },
+    ]);
+    expect(result.alternates).toEqual({
+      media: { print: "/print" },
+    });
+  });
+
+  it("replaces robots instead of deep-merging subkeys", () => {
+    const result = mergeMetadata([
+      { robots: { index: true, follow: true, googleBot: { index: true } } },
+      { robots: { follow: false } },
+    ]);
+    expect(result.robots).toEqual({
+      follow: false,
+    });
+  });
+
+  it("replaces robots string with object outright", () => {
+    const result = mergeMetadata([{ robots: "index, follow" }, { robots: { index: false } }]);
+    expect(result.robots).toEqual({ index: false });
+  });
+
+  it("replaces icons instead of deep-merging map objects", () => {
+    const result = mergeMetadata([
+      { icons: { icon: "/favicon.ico", apple: "/apple.png" } },
+      { icons: { shortcut: "/shortcut.png" } },
+    ]);
+    expect(result.icons).toEqual({
+      shortcut: "/shortcut.png",
+    });
+  });
+
+  it("replaces shorthand icon string with map object", () => {
+    const result = mergeMetadata([{ icons: "/favicon.ico" }, { icons: { apple: "/apple.png" } }]);
+    expect(result.icons).toEqual({ apple: "/apple.png" });
+  });
+
+  it("merges other custom meta tags", () => {
+    const result = mergeMetadata([
+      { other: { foo: "bar", baz: "qux" } },
+      { other: { baz: "override", new: "value" } },
+    ]);
+    expect(result.other).toEqual({
+      foo: "bar",
+      baz: "override",
+      new: "value",
+    });
+  });
+
+  it("preserves root openGraph when page does not override it", () => {
+    const result = mergeMetadata([
+      { openGraph: { title: "OG Layout", siteName: "Site" } },
+      { keywords: ["page"] },
+    ]);
+    expect(result.openGraph).toEqual({ title: "OG Layout", siteName: "Site" });
+  });
+
+  it("inherits openGraph.description from metadata.description when missing", () => {
+    const result = mergeMetadata([
+      { openGraph: { title: "OG Layout" } },
+      { description: "Page desc" },
+    ]);
+    expect(result.openGraph).toEqual({
+      title: "OG Layout",
+      description: "Page desc",
+    });
+  });
+
+  it("child openGraph replaces the whole parent openGraph object", () => {
+    const result = mergeMetadata([
+      { openGraph: { title: "Root", images: ["/og.png"] } },
+      { openGraph: { images: undefined } },
+    ]);
+    expect(result.openGraph?.title).toBeUndefined();
+    expect(result.openGraph?.images).toBeUndefined();
+    expect(result.twitter?.images).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Metadata OG/Twitter inheritance tests
+// Ported from Next.js behavior: packages/next/src/lib/metadata/resolve-metadata.ts
+// https://github.com/vercel/next.js/blob/canary/packages/next/src/lib/metadata/resolve-metadata.ts
+
+describe("metadata OG/Twitter inheritance", () => {
+  let mergeMetadata: typeof import("../packages/vinext/src/shims/metadata.js").mergeMetadata;
+  let MetadataHead: typeof import("../packages/vinext/src/shims/metadata.js").MetadataHead;
+  let React: typeof import("react");
+  let renderToStaticMarkup: typeof import("react-dom/server").renderToStaticMarkup;
+
+  beforeAll(async () => {
+    const mod = await import("../packages/vinext/src/shims/metadata.js");
+    mergeMetadata = mod.mergeMetadata;
+    MetadataHead = mod.MetadataHead;
+    React = await import("react");
+    renderToStaticMarkup = (await import("react-dom/server")).renderToStaticMarkup;
+  });
+
+  it("auto-fills twitter:title from openGraph:title", () => {
+    const result = mergeMetadata([{ openGraph: { title: "OG Title" } }]);
+    expect(result.twitter?.title).toBe("OG Title");
+  });
+
+  it("auto-fills twitter:description from openGraph:description", () => {
+    const result = mergeMetadata([{ openGraph: { description: "OG Desc" } }]);
+    expect(result.twitter?.description).toBe("OG Desc");
+  });
+
+  it("auto-fills twitter:images from openGraph:images", () => {
+    const result = mergeMetadata([{ openGraph: { images: ["/og.png"] } }]);
+    expect(result.twitter?.images).toEqual(["/og.png"]);
+  });
+
+  it("auto-fills twitter:title from metadata.title when openGraph.title is absent", () => {
+    const result = mergeMetadata([{ title: "Page Title", openGraph: {} }]);
+    expect(result.twitter?.title).toBe("Page Title");
+  });
+
+  it("auto-fills twitter:description from metadata.description when openGraph.description is absent", () => {
+    const result = mergeMetadata([{ description: "Page Desc", openGraph: {} }]);
+    expect(result.twitter?.description).toBe("Page Desc");
+  });
+
+  it("does not create twitter fields from metadata when openGraph is absent entirely", () => {
+    const result = mergeMetadata([{ title: "Page Title", description: "Page Desc" }]);
+    expect(result.twitter).toBeUndefined();
+  });
+
+  it("fills existing twitter title and description from metadata when openGraph is absent", () => {
+    const result = mergeMetadata([{ title: "Page Title", description: "Page Desc", twitter: {} }]);
+    expect(result.twitter?.title).toBe("Page Title");
+    expect(result.twitter?.description).toBe("Page Desc");
+    expect(result.twitter?.card).toBe("summary");
+  });
+
+  it("does not overwrite explicitly set twitter fields", () => {
+    const result = mergeMetadata([
+      { openGraph: { title: "OG Title", description: "OG Desc", images: ["/og.png"] } },
+      { twitter: { title: "Custom Twitter Title", description: "Custom Twitter Desc" } },
+    ]);
+    expect(result.twitter?.title).toBe("Custom Twitter Title");
+    expect(result.twitter?.description).toBe("Custom Twitter Desc");
+  });
+
+  it("does not auto-fill twitter:images when twitter.images is explicitly set to empty array", () => {
+    const result = mergeMetadata([
+      { openGraph: { images: ["/og.png"] } },
+      { twitter: { images: [] } },
+    ]);
+    expect(result.twitter?.images).toEqual([]);
+  });
+
+  it("auto-fills openGraph:title from metadata.title", () => {
+    const result = mergeMetadata([{ title: "Page Title", openGraph: {} }]);
+    expect(result.openGraph?.title).toBe("Page Title");
+  });
+
+  it("auto-fills openGraph:description from metadata.description", () => {
+    const result = mergeMetadata([{ description: "Page Desc", openGraph: {} }]);
+    expect(result.openGraph?.description).toBe("Page Desc");
+  });
+
+  it("renders twitter card tags when only openGraph is configured", () => {
+    const metadata = mergeMetadata([
+      {
+        openGraph: {
+          title: "My custom title",
+          description: "My custom description",
+          url: "https://example.com",
+          siteName: "My custom site name",
+          images: [{ url: "https://example.com/image.png", width: 800, height: 600 }],
+          locale: "en-US",
+          type: "website",
+        },
+      },
+    ]);
+    const html = renderToStaticMarkup(React.createElement(MetadataHead, { metadata }));
+    expect(html).toContain('name="twitter:card"');
+    expect(html).toContain('content="summary_large_image"');
+    expect(html).toContain('name="twitter:title"');
+    expect(html).toContain('content="My custom title"');
+    expect(html).toContain('name="twitter:description"');
+    expect(html).toContain('content="My custom description"');
+    expect(html).toContain('name="twitter:image"');
+    expect(html).toContain('content="https://example.com/image.png"');
+  });
+
+  it("renders twitter:card summary when no images are present", () => {
+    const metadata = mergeMetadata([{ openGraph: { title: "No Images" } }]);
+    const html = renderToStaticMarkup(React.createElement(MetadataHead, { metadata }));
+    expect(html).toContain('name="twitter:card"');
+    expect(html).toContain('content="summary"');
   });
 });
 
@@ -2627,11 +2885,11 @@ describe("fetch cache (extended fetch with next options)", () => {
     expect(typeof mod.getCollectedFetchTags).toBe("function");
   });
 
-  it("passes through fetch without next options unchanged", async () => {
+  it("passes through fetch without next options to persistent cache but dedupes within a render", async () => {
     const { withFetchCache } = await import("../packages/vinext/src/shims/fetch-cache.js");
 
     fetchCallCount = 0;
-    const cleanup = withFetchCache();
+    let cleanup = withFetchCache();
     try {
       const resp1 = await fetch(`${mockServerUrl}/plain`);
       const data1 = await resp1.json();
@@ -2639,7 +2897,13 @@ describe("fetch cache (extended fetch with next options)", () => {
 
       const resp2 = await fetch(`${mockServerUrl}/plain`);
       const data2 = await resp2.json();
-      expect(data2.count).toBe(2); // NOT cached — no next options
+      expect(data2.count).toBe(1); // Same render fetch is deduped
+
+      cleanup();
+      cleanup = withFetchCache();
+      const resp3 = await fetch(`${mockServerUrl}/plain`);
+      const data3 = await resp3.json();
+      expect(data3.count).toBe(2); // New render still bypasses persistent cache
     } finally {
       cleanup();
     }
@@ -2765,7 +3029,7 @@ describe("fetch cache (extended fetch with next options)", () => {
     }
   });
 
-  it("cache: 'no-store' bypasses cache", async () => {
+  it("cache: 'no-store' bypasses persistent cache but dedupes within a render", async () => {
     const { withFetchCache } = await import("../packages/vinext/src/shims/fetch-cache.js");
     const { setCacheHandler, MemoryCacheHandler } =
       await import("../packages/vinext/src/shims/cache.js");
@@ -2773,7 +3037,7 @@ describe("fetch cache (extended fetch with next options)", () => {
     setCacheHandler(new MemoryCacheHandler());
     fetchCallCount = 0;
 
-    const cleanup = withFetchCache();
+    let cleanup = withFetchCache();
     try {
       const resp1 = await fetch(`${mockServerUrl}/no-store`, {
         cache: "no-store",
@@ -2785,14 +3049,22 @@ describe("fetch cache (extended fetch with next options)", () => {
         cache: "no-store",
       });
       const data2 = await resp2.json();
-      expect(data2.count).toBe(2); // NOT cached
+      expect(data2.count).toBe(1); // Same render fetch is deduped
+
+      cleanup();
+      cleanup = withFetchCache();
+      const resp3 = await fetch(`${mockServerUrl}/no-store`, {
+        cache: "no-store",
+      });
+      const data3 = await resp3.json();
+      expect(data3.count).toBe(2); // New render still bypasses persistent cache
     } finally {
       cleanup();
       setCacheHandler(new MemoryCacheHandler());
     }
   });
 
-  it("next.revalidate: false bypasses cache", async () => {
+  it("next.revalidate: false bypasses persistent cache but dedupes within a render", async () => {
     const { withFetchCache } = await import("../packages/vinext/src/shims/fetch-cache.js");
     const { setCacheHandler, MemoryCacheHandler } =
       await import("../packages/vinext/src/shims/cache.js");
@@ -2800,18 +3072,23 @@ describe("fetch cache (extended fetch with next options)", () => {
     setCacheHandler(new MemoryCacheHandler());
     fetchCallCount = 0;
 
-    const cleanup = withFetchCache();
+    let cleanup = withFetchCache();
     try {
       await fetch(`${mockServerUrl}/no-rev`, { next: { revalidate: false } });
       await fetch(`${mockServerUrl}/no-rev`, { next: { revalidate: false } });
-      expect(fetchCallCount).toBe(2); // Both hit the network
+      expect(fetchCallCount).toBe(1);
+
+      cleanup();
+      cleanup = withFetchCache();
+      await fetch(`${mockServerUrl}/no-rev`, { next: { revalidate: false } });
+      expect(fetchCallCount).toBe(2);
     } finally {
       cleanup();
       setCacheHandler(new MemoryCacheHandler());
     }
   });
 
-  it("next.revalidate: 0 bypasses cache", async () => {
+  it("next.revalidate: 0 bypasses persistent cache but dedupes within a render", async () => {
     const { withFetchCache } = await import("../packages/vinext/src/shims/fetch-cache.js");
     const { setCacheHandler, MemoryCacheHandler } =
       await import("../packages/vinext/src/shims/cache.js");
@@ -2819,9 +3096,14 @@ describe("fetch cache (extended fetch with next options)", () => {
     setCacheHandler(new MemoryCacheHandler());
     fetchCallCount = 0;
 
-    const cleanup = withFetchCache();
+    let cleanup = withFetchCache();
     try {
       await fetch(`${mockServerUrl}/zero`, { next: { revalidate: 0 } });
+      await fetch(`${mockServerUrl}/zero`, { next: { revalidate: 0 } });
+      expect(fetchCallCount).toBe(1);
+
+      cleanup();
+      cleanup = withFetchCache();
       await fetch(`${mockServerUrl}/zero`, { next: { revalidate: 0 } });
       expect(fetchCallCount).toBe(2);
     } finally {
@@ -2838,7 +3120,7 @@ describe("fetch cache (extended fetch with next options)", () => {
     setCacheHandler(new MemoryCacheHandler());
     fetchCallCount = 0;
 
-    const cleanup = withFetchCache();
+    let cleanup = withFetchCache();
     try {
       // First fetch — cache miss, hits network
       const resp1 = await fetch(`${mockServerUrl}/tagged`, {
@@ -2859,7 +3141,10 @@ describe("fetch cache (extended fetch with next options)", () => {
       // Invalidate the tag
       await revalidateTag("posts");
 
-      // Third fetch — cache miss after tag invalidation
+      cleanup();
+      cleanup = withFetchCache();
+
+      // Third fetch — cache miss after tag invalidation in a later render
       const resp3 = await fetch(`${mockServerUrl}/tagged`, {
         next: { revalidate: 3600, tags: ["posts"] },
       });
@@ -4503,12 +4788,15 @@ describe("chained middleware → config rewrites", () => {
     const rootNodeModules = path.resolve(import.meta.dirname, "../node_modules");
     await fsp.symlink(rootNodeModules, path.join(chainTmpDir, "node_modules"), "junction");
 
-    // Config with afterFiles rewrite: /intermediate → /final
+    // Config with afterFiles rewrites:
+    // - /rewrite-source lacks a page file, so afterFiles can rewrite it to /final.
+    // - /intermediate owns a page file, so it wins before afterFiles.
     await fsp.writeFile(
       path.join(chainTmpDir, "next.config.mjs"),
       `export default {
   async rewrites() {
     return [
+      { source: "/rewrite-source", destination: "/final" },
       { source: "/intermediate", destination: "/final" },
     ];
   },
@@ -4517,14 +4805,14 @@ describe("chained middleware → config rewrites", () => {
 
     await fsp.mkdir(path.join(chainTmpDir, "pages"), { recursive: true });
 
-    // Middleware: rewrites /original → /intermediate
+    // Middleware: rewrites /original → /rewrite-source
     await fsp.writeFile(
       path.join(chainTmpDir, "middleware.ts"),
       `import { NextResponse } from "next/server";
 export function middleware(request) {
   const url = new URL(request.url);
   if (url.pathname === "/original") {
-    return NextResponse.rewrite(new URL("/intermediate", request.url));
+    return NextResponse.rewrite(new URL("/rewrite-source", request.url));
   }
   return NextResponse.next();
 }`,
@@ -4536,7 +4824,7 @@ export function middleware(request) {
       `export default function Original() { return <h1>ORIGINAL PAGE</h1>; }`,
     );
 
-    // /intermediate — middleware rewrites to here, then config rewrites to /final
+    // /intermediate — concrete page files win before afterFiles rewrites.
     await fsp.writeFile(
       path.join(chainTmpDir, "pages", "intermediate.tsx"),
       `export default function Intermediate() { return <h1>INTERMEDIATE PAGE</h1>; }`,
@@ -4548,7 +4836,6 @@ export function middleware(request) {
       `export default function Final() { return <h1>FINAL PAGE</h1>; }`,
     );
 
-    // /direct-intermediate — tests that config rewrite works independently
     await fsp.writeFile(
       path.join(chainTmpDir, "pages", "index.tsx"),
       `export default function Home() { return <h1>Home</h1>; }`,
@@ -4585,23 +4872,29 @@ export function middleware(request) {
     await fsp.rm(chainTmpDir, { recursive: true, force: true }).catch(() => {});
   }, 15000);
 
-  it("middleware rewrite alone works: /original renders /intermediate content", async () => {
-    // Middleware rewrites /original → /intermediate
-    // Without chaining, we'd see INTERMEDIATE PAGE content
+  it("chains middleware rewrites into afterFiles rewrites when no page file wins", async () => {
+    // Middleware rewrites /original to /rewrite-source. There is no page file at
+    // /rewrite-source, so the afterFiles rewrite can continue to /final.
     const res = await fetch(`${chainBaseUrl}/original`);
     const html = await res.text();
-    // The middleware first rewrites to /intermediate, then the config rewrite
-    // rewrites /intermediate → /final. So we expect FINAL PAGE.
     expect(html).toContain("FINAL PAGE");
+    expect(html).not.toContain("ORIGINAL PAGE");
   });
 
-  it("config rewrite alone works: /intermediate renders /final content", async () => {
-    const res = await fetch(`${chainBaseUrl}/intermediate`);
+  it("applies afterFiles rewrites for paths with no page file", async () => {
+    const res = await fetch(`${chainBaseUrl}/rewrite-source`);
     const html = await res.text();
     expect(html).toContain("FINAL PAGE");
   });
 
-  it("chained: /original → middleware → /intermediate → config → /final", async () => {
+  it("does not let afterFiles rewrites override concrete page files", async () => {
+    const res = await fetch(`${chainBaseUrl}/intermediate`);
+    const html = await res.text();
+    expect(html).toContain("INTERMEDIATE PAGE");
+    expect(html).not.toContain("FINAL PAGE");
+  });
+
+  it("chained: /original → middleware → /rewrite-source → config → /final", async () => {
     const res = await fetch(`${chainBaseUrl}/original`);
     expect(res.status).toBe(200);
     const html = await res.text();
@@ -4647,6 +4940,9 @@ export function middleware(request) {
   if (url.pathname === "/blocked") {
     return NextResponse.rewrite(new URL("/allowed", request.url), { status: 403 });
   }
+  if (url.pathname === "/next-status") {
+    return NextResponse.next({ status: 404 });
+  }
   return NextResponse.next();
 }`,
     );
@@ -4659,6 +4955,11 @@ export function middleware(request) {
     await fsp.writeFile(
       path.join(statusTmpDir, "pages", "index.tsx"),
       `export default function Home() { return <h1>Home</h1>; }`,
+    );
+
+    await fsp.writeFile(
+      path.join(statusTmpDir, "pages", "next-status.tsx"),
+      `export default function NextStatus() { return <h1>NEXT STATUS PAGE</h1>; }`,
     );
 
     const vinext = (await import("../packages/vinext/src/index.js")).default;
@@ -4698,6 +4999,13 @@ export function middleware(request) {
     expect(html).toContain("ALLOWED PAGE");
     // Status code should be 403 from the middleware rewrite
     expect(res.status).toBe(403);
+  });
+
+  it("middleware next with custom status returns that status code", async () => {
+    const res = await fetch(`${statusBaseUrl}/next-status`);
+    const html = await res.text();
+    expect(html).toContain("NEXT STATUS PAGE");
+    expect(res.status).toBe(404);
   });
 
   it("normal requests without rewrite status return 200", async () => {

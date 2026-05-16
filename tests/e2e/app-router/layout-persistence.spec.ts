@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import { waitForAppRouterHydration } from "../helpers";
+import { disableDevErrorOverlay, waitForAppRouterHydration } from "../helpers";
 
 const BASE = "http://localhost:4174";
 
@@ -110,6 +110,30 @@ test.describe("Layout persistence", () => {
 
     await expect(page.getByTestId("layout-count")).toHaveText("Layout count: 0");
   });
+
+  // Related Next.js coverage:
+  // https://github.com/vercel/next.js/blob/canary/test/e2e/app-dir/segment-cache/vary-params/vary-params.test.ts
+  test("dynamic segment layout counter survives param navigation while content updates", async ({
+    page,
+  }) => {
+    await page.goto(`${BASE}/blog/hello-world`);
+    await expect(page.locator("h1")).toHaveText("Blog Post");
+    await waitForAppRouterHydration(page);
+
+    await expect(page.getByTestId("layout-slug-awaited")).toHaveText("hello-world");
+    await expect(page.getByTestId("layout-slug-direct")).toHaveText("hello-world");
+    await expect(page.getByTestId("blog-page-slug")).toHaveText("Slug: hello-world");
+
+    const initialCount = await waitForInteractiveCounter(page, layoutCounter);
+    await incrementCounter(page, layoutCounter, initialCount + 1);
+
+    await page.getByTestId("blog-getting-started-link").click();
+    await expect(page.locator("h1")).toHaveText("Blog Post");
+    await expect(page.getByTestId("blog-page-slug")).toHaveText("Slug: getting-started");
+    await expect(page.getByTestId("layout-slug-awaited")).toHaveText("getting-started");
+    await expect(page.getByTestId("layout-slug-direct")).toHaveText("getting-started");
+    await expect(page.getByTestId("layout-count")).toHaveText(`Layout count: ${initialCount + 1}`);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -192,6 +216,10 @@ test.describe("Error recovery across navigation", () => {
 
     // Error boundary should be visible
     await expect(page.locator("#error-boundary")).toBeVisible({ timeout: 10_000 });
+
+    // Hide the dev error overlay so its modal backdrop doesn't block the
+    // error.tsx fallback's "Go home" link.
+    await disableDevErrorOverlay(page);
 
     // Client-navigate away to home via the link in the error boundary
     await page.click('[data-testid="error-go-home"]');

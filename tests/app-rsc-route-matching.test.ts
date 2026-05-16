@@ -49,10 +49,32 @@ describe("App RSC route matching", () => {
     });
   });
 
-  it("does not decode path segments during route matching", () => {
+  // Ported from Next.js: route-matcher.ts decodeURIComponent behaviour
+  // https://github.com/vercel/next.js/blob/canary/packages/next/src/shared/lib/router/utils/route-matcher.ts#L25-L27
+  it("decodes matched params via decodeURIComponent (mirrors Next.js)", () => {
     const matcher = createAppRscRouteMatcher([route("/files/:name", ["files", ":name"])]);
 
     expect(matcher.matchRoute("/files/a%2Fb")).toMatchObject({
+      params: { name: "a/b" },
+    });
+  });
+
+  it("canonicalizes encoded URL parts before matching app routes", () => {
+    // Next.js canonicalizes URL pathname parts before deriving dynamic segment
+    // cache keys; vinext should apply the same decode-first discipline at the
+    // App RSC route-match boundary so encoded static segments and params use
+    // one normalized representation.
+    // https://github.com/vercel/next.js/blob/47bcfa0956679c2a5fea0b941b76bb2d69878d9c/packages/next/src/client/route-params.ts
+    const matcher = createAppRscRouteMatcher([
+      route("/_sites/:subdomain", ["_sites", ":subdomain"]),
+      route("/files/:name", ["files", ":name"]),
+    ]);
+
+    expect(matcher.matchRoute("/%5Fsites/demo")).toMatchObject({
+      route: { pattern: "/_sites/:subdomain" },
+      params: { subdomain: "demo" },
+    });
+    expect(matcher.matchRoute("/files/a%252Fb")).toMatchObject({
       params: { name: "a%2Fb" },
     });
   });
@@ -97,6 +119,28 @@ describe("App RSC route matching", () => {
       targetPattern: "/photos/:id",
       page: "photo-page",
       matchedParams: { id: "target-id" },
+    });
+  });
+
+  it("canonicalizes encoded source path parts for interception params", () => {
+    const matcher = createAppRscRouteMatcher([
+      route("/_sites/:tenant", ["_sites", ":tenant"], {
+        modal: {
+          intercepts: [
+            {
+              targetPattern: "/photos/:id",
+              interceptLayouts: ["modal-layout"],
+              page: "photo-page",
+              params: ["id"],
+            },
+          ],
+        },
+      }),
+    ]);
+
+    expect(matcher.findIntercept("/photos/a%2Fb", "/%5Fsites/acme")).toMatchObject({
+      targetPattern: "/photos/:id",
+      matchedParams: { tenant: "acme", id: "a/b" },
     });
   });
 
