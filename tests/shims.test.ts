@@ -5720,8 +5720,7 @@ describe("use-cache deadlock probe behavior", () => {
     // NODE_ENV, but probe-globals.js (imported above) is from the original
     // module evaluation. Both use Symbol.for on globalThis, so they still
     // share the same global state despite being different module instances.
-    const originalNodeEnv = process.env.NODE_ENV;
-    process.env.NODE_ENV = "development";
+    vi.stubEnv("NODE_ENV", "development");
     vi.resetModules();
 
     const { registerCachedFunction } =
@@ -5738,7 +5737,7 @@ describe("use-cache deadlock probe behavior", () => {
       expect(probeCalled).toBe(false);
     } finally {
       setInsideUseCacheProbe(false);
-      process.env.NODE_ENV = originalNodeEnv;
+      vi.unstubAllEnvs();
       setUseCacheProbe(undefined);
     }
   });
@@ -5750,8 +5749,7 @@ describe("use-cache deadlock probe behavior", () => {
     // Install a probe that reports the function completed in isolation.
     setUseCacheProbe(async () => true);
 
-    const originalNodeEnv = process.env.NODE_ENV;
-    process.env.NODE_ENV = "development";
+    vi.stubEnv("NODE_ENV", "development");
     vi.useFakeTimers();
     vi.resetModules();
 
@@ -5788,7 +5786,7 @@ describe("use-cache deadlock probe behavior", () => {
     } finally {
       resolveHung?.("cleanup");
       vi.useRealTimers();
-      process.env.NODE_ENV = originalNodeEnv;
+      vi.unstubAllEnvs();
       setUseCacheProbe(undefined);
     }
   });
