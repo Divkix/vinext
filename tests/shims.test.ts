@@ -5705,8 +5705,8 @@ describe("use-cache errors", () => {
 });
 
 describe("use-cache deadlock probe behavior", () => {
-  it("does not schedule probe when isInsideUseCacheProbe is true", async () => {
-    const { setUseCacheProbe, setInsideUseCacheProbe } =
+  it("does not schedule probe when _probeDepth > 0", async () => {
+    const { setUseCacheProbe } =
       await import("../packages/vinext/src/shims/use-cache-probe-globals.js");
 
     let probeCalled = false;
@@ -5716,27 +5716,24 @@ describe("use-cache deadlock probe behavior", () => {
     });
 
     // Ensure dev mode path is taken by resetting modules and setting NODE_ENV.
-    // Note: vi.resetModules() re-evaluates cache-runtime.js with the new
-    // NODE_ENV, but probe-globals.js (imported above) is from the original
-    // module evaluation. Both use Symbol.for on globalThis, so they still
-    // share the same global state despite being different module instances.
     vi.stubEnv("NODE_ENV", "development");
     vi.resetModules();
 
     const { registerCachedFunction } =
       await import("../packages/vinext/src/shims/cache-runtime.js");
+    const { createRequestContext, runWithRequestContext } =
+      await import("../packages/vinext/src/shims/unified-request-context.js");
 
     const fn = async () => "result";
     const cached = registerCachedFunction(fn, "test:no-recurse", "");
 
-    setInsideUseCacheProbe(true);
-    let result: unknown;
+    // A probe re-execution sets _probeDepth === 1 on its request context.
+    const probeCtx = createRequestContext({ _probeDepth: 1 });
     try {
-      result = await cached();
+      const result = await runWithRequestContext(probeCtx, () => cached());
       expect(result).toBe("result");
       expect(probeCalled).toBe(false);
     } finally {
-      setInsideUseCacheProbe(false);
       vi.unstubAllEnvs();
       setUseCacheProbe(undefined);
     }

@@ -10,7 +10,11 @@
  */
 
 const SYMBOL = Symbol.for("vinext.dev.useCacheProbe");
-const INSIDE_PROBE_SYMBOL = Symbol.for("vinext.dev.useCacheProbe.inside");
+
+// DEPRECATED: use UnifiedRequestContext._probeDepth instead.
+// Kept for backwards compat so existing tests still compile.
+// oxlint-disable-next-line no-unused-vars
+const _INSIDE_PROBE_SYMBOL = Symbol.for("vinext.dev.useCacheProbe.inside");
 
 export type UseCacheProbeRequestSnapshot = {
   headers: [string, string][];
@@ -19,9 +23,17 @@ export type UseCacheProbeRequestSnapshot = {
   rootParams: Record<string, string | string[] | undefined>;
 };
 
+/** Wire-format for encoded probe arguments */
+export type EncodedArgsForProbe =
+  | { kind: "string"; data: string }
+  | {
+      kind: "formdata";
+      entries: Array<[string, string] | [string, { kind: "blob"; bytes: string; type: string }]>;
+    };
+
 export type UseCacheProbe = (msg: {
   id: string;
-  encodedArguments: string;
+  encodedArguments: EncodedArgsForProbe;
   request: UseCacheProbeRequestSnapshot;
   timeoutMs: number;
 }) => Promise<boolean>;
@@ -34,13 +46,22 @@ export function getUseCacheProbe(): UseCacheProbe | undefined {
   return (globalThis as Record<symbol, unknown>)[SYMBOL] as UseCacheProbe | undefined;
 }
 
-export function setInsideUseCacheProbe(value: boolean): void {
-  const current = ((globalThis as Record<symbol, unknown>)[INSIDE_PROBE_SYMBOL] as number) || 0;
-  (globalThis as Record<symbol, unknown>)[INSIDE_PROBE_SYMBOL] = value
-    ? current + 1
-    : Math.max(0, current - 1);
+/**
+ * @deprecated Use `getRequestContext()._probeDepth` instead.
+ * Kept for backwards compatibility — now a no-op.
+ */
+export function setInsideUseCacheProbe(_value: boolean): void {
+  // globalThis-based counter is deprecated because concurrent requests
+  // share globalThis, causing cross-request interference.  The real guard
+  // is UnifiedRequestContext._probeDepth.
 }
 
+/**
+ * @deprecated Use `(getRequestContext()._probeDepth ?? 0) > 0` instead.
+ * Kept for backwards compatibility — always returns false.
+ */
 export function isInsideUseCacheProbe(): boolean {
-  return (((globalThis as Record<symbol, unknown>)[INSIDE_PROBE_SYMBOL] as number) || 0) > 0;
+  // globalThis-based counter is deprecated because concurrent requests
+  // share globalThis, causing cross-request interference.
+  return false;
 }
