@@ -45,6 +45,15 @@ export type UnifiedRequestContext = {
   /** Per-request cache for cacheForRequest(). Keyed by factory function reference. */
   // oxlint-disable-next-line @typescript-eslint/no-explicit-any
   requestCache: WeakMap<(...args: any[]) => any, unknown>;
+
+  // ── use-cache-probe-globals.ts ─────────────────────────────────────
+  /**
+   * Probe recursion depth for "use cache" deadlock detection.
+   * 0 = regular request; >0 = inside a probe re-execution.
+   * Prevents concurrent requests from interfering with each other's
+   * probe scheduling (unlike a process-global counter).
+   */
+  _probeDepth: number;
 } & VinextHeadersShimState &
   I18nState &
   NavigationState &
@@ -109,6 +118,7 @@ export function createRequestContext(opts?: Partial<UnifiedRequestContext>): Uni
     ssrContext: null,
     ssrHeadChildren: [],
     rootParams: null,
+    _probeDepth: 0,
     ...opts,
   };
 }

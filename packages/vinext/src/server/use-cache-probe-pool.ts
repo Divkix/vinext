@@ -20,7 +20,8 @@
 import type { DevEnvironment } from "vite";
 import { createDirectRunner, type DevEnvironmentLike } from "./dev-module-runner.js";
 import type { ModuleRunner } from "vite/module-runner";
-import { setUseCacheProbe, setInsideUseCacheProbe } from "vinext/shims/use-cache-probe-globals";
+import { setUseCacheProbe } from "vinext/shims/use-cache-probe-globals";
+import type { EncodedArgsForProbe } from "vinext/shims/use-cache-probe-globals";
 import { UseCacheTimeoutError } from "vinext/shims/use-cache-errors";
 
 let _probeEnvironment: DevEnvironmentLike | DevEnvironment | null = null;
@@ -56,7 +57,6 @@ export function initUseCacheProbePool(environment: DevEnvironmentLike | DevEnvir
     const deadline = performance.now() + timeoutMs;
 
     let probeTimeoutTimer: ReturnType<typeof setTimeout> | undefined;
-    setInsideUseCacheProbe(true);
     try {
       // Import the cache-runtime shim in the isolated runner.
       // The shim's registerCachedFunction will create fresh module-scope state.
@@ -100,20 +100,17 @@ export function initUseCacheProbePool(environment: DevEnvironmentLike | DevEnvir
         variant,
       );
 
-      // Decode the arguments (simple JSON fallback; RSC encodeReply is
-      // not available in the probe because we lack the client environment).
-      // For deadlock detection, the exact argument values matter less than
-      // the fact that the function body executes with a fresh module scope.
-      let args: unknown[] = [];
-      try {
-        args = JSON.parse(encodedArguments);
-        if (!Array.isArray(args)) args = [args];
-      } catch {
-        args = [];
+      // Decode args via the probe runner's RSC decodeReply so
+      // thenable params/searchParams are reconstructed accurately.
+      const args = await decodeProbeArgs(runner, encodedArguments);
+      if (args === null) {
+        return false;
       }
 
       // Run the function with a reconstructed request store so private caches
       // that read cookies()/headers()/draftMode() see the same values.
+      // Mark the context as _probeDepth === 1 so nested 'use cache' calls
+      // skip probe scheduling (mirrors Next.js useCacheProbeMode).
       // Race against the internal timeout.
       const remaining = deadline - performance.now();
       if (remaining <= 0) {
@@ -141,7 +138,6 @@ export function initUseCacheProbePool(environment: DevEnvironmentLike | DevEnvir
       // fill is still stuck, this is evidence of a deadlock on shared state.
       return true;
     } finally {
-      setInsideUseCacheProbe(false);
       if (probeTimeoutTimer !== undefined) clearTimeout(probeTimeoutTimer);
       runner.close().catch(() => {});
     }
@@ -155,6 +151,49 @@ export function initUseCacheProbePool(environment: DevEnvironmentLike | DevEnvir
 export function tearDownUseCacheProbePool(): void {
   _probeEnvironment = null;
   setUseCacheProbe(undefined);
+}
+
+/**
+ * Decode probe arguments from the wire-format `EncodedArgsForProbe` using
+ * the probe runner's own RSC `decodeReply` so thenable params/searchParams
+ * are reconstructed accurately.  Mirrors Next.js `use-cache-probe-worker.ts`.
+ */
+async function decodeProbeArgs(
+  runner: ModuleRunner,
+  encoded: EncodedArgsForProbe,
+): Promise<unknown[] | null> {
+  try {
+    const rsc = (await runner.import("@vitejs/plugin-rsc/react/rsc")) as {
+      decodeReply: (
+        data: string | FormData,
+        options?: { temporaryReferences?: unknown },
+      ) => Promise<unknown[]>;
+    };
+
+    if (encoded.kind === "string") {
+      const decoded = await rsc.decodeReply(encoded.data, { temporaryReferences: undefined });
+      if (!Array.isArray(decoded)) return [decoded];
+      return decoded;
+    }
+
+    // formdata kind: reconstruct FormData from serialized entries.
+    const formData = new FormData();
+    for (const entry of encoded.entries) {
+      if (entry.length === 2 && typeof entry[1] === "string") {
+        formData.append(entry[0], entry[1]);
+      } else {
+        const blob = entry[1] as { kind: "blob"; bytes: string; type: string };
+        const bytes = Buffer.from(blob.bytes, "base64");
+        formData.append(entry[0], new File([bytes], "", { type: blob.type }));
+      }
+    }
+
+    const decoded = await rsc.decodeReply(formData, { temporaryReferences: undefined });
+    if (!Array.isArray(decoded)) return [decoded];
+    return decoded;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -192,6 +231,7 @@ async function runWithProbeRequestStore<T>(
     headersContext,
     executionContext: null,
     rootParams: requestSnapshot.rootParams,
+    _probeDepth: 1,
   });
 
   return runWithRequestContext(ctx, fn);

@@ -37,6 +37,7 @@ import {
   type CacheLifeConfig,
 } from "./cache.js";
 import { VINEXT_RSC_MARKER_HEADER } from "../server/headers.js";
+import type { EncodedArgsForProbe } from "./use-cache-probe-globals.js";
 import { getOrCreateAls } from "./internal/als-registry.js";
 import {
   isInsideUnifiedScope,
@@ -121,7 +122,6 @@ type ProbeModules = {
   UseCacheTimeoutError: typeof import("./use-cache-errors.js").UseCacheTimeoutError;
   UseCacheDeadlockError: typeof import("./use-cache-errors.js").UseCacheDeadlockError;
   getUseCacheProbe: typeof import("./use-cache-probe-globals.js").getUseCacheProbe;
-  isInsideUseCacheProbe: typeof import("./use-cache-probe-globals.js").isInsideUseCacheProbe;
 };
 
 // Lazy singleton for dev-only probe modules — eliminates microtask
@@ -138,7 +138,6 @@ async function loadProbeModules(): Promise<ProbeModules> {
     UseCacheTimeoutError: errors.UseCacheTimeoutError,
     UseCacheDeadlockError: errors.UseCacheDeadlockError,
     getUseCacheProbe: globals.getUseCacheProbe,
-    isInsideUseCacheProbe: globals.isInsideUseCacheProbe,
   };
 }
 
@@ -289,6 +288,39 @@ function resolveCacheLife(configs: CacheLifeConfig[]): CacheLifeConfig {
   }
 
   return result;
+}
+
+// ---------------------------------------------------------------------------
+// Encode probe arguments for transport to the isolated runner
+// ---------------------------------------------------------------------------
+
+/**
+ * Convert an `encodeReply` result (string | FormData) into a serializable
+ * wire-format that the probe runner can decode via `decodeReply`.
+ * This mirrors Next.js `EncodedArgumentsForProbe`: string replies are passed
+ * verbatim, FormData entries are sent as base64-encoded blobs so they survive
+ * JSON serialization.
+ */
+type EncodedEntry = [string, string] | [string, { kind: "blob"; bytes: string; type: string }];
+
+async function encodedArgumentsToProbe(encoded: string | FormData): Promise<EncodedArgsForProbe> {
+  if (typeof encoded === "string") {
+    return { kind: "string", data: encoded };
+  }
+
+  const entries: EncodedEntry[] = [];
+  for (const [key, value] of encoded.entries()) {
+    if (typeof value === "string") {
+      entries.push([key, value]);
+    } else {
+      const bytes = new Uint8Array(await value.arrayBuffer());
+      entries.push([
+        key,
+        { kind: "blob", bytes: Buffer.from(bytes).toString("base64"), type: value.type },
+      ]);
+    }
+  }
+  return { kind: "formdata", entries };
 }
 
 // ---------------------------------------------------------------------------
@@ -443,26 +475,19 @@ export function registerCachedFunction<T extends (...args: any[]) => Promise<any
       if (!probeModules) {
         probeModules = await getProbeModules();
       }
-      const {
-        UseCacheTimeoutError,
-        UseCacheDeadlockError,
-        getUseCacheProbe,
-        isInsideUseCacheProbe,
-      } = probeModules;
+      const { UseCacheTimeoutError, UseCacheDeadlockError, getUseCacheProbe } = probeModules;
 
       let probeTimer: ReturnType<typeof setTimeout> | undefined;
       let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
       let probePromise: Promise<never> | null = null;
       const probe = getUseCacheProbe();
 
-      if (probe && !isInsideUseCacheProbe()) {
-        // Capture the current request store snapshot for the probe.
-        // getRequestContext() never returns null — it creates a default
-        // context when called outside a request scope. For deadlock detection,
-        // the exact headers/pathname matter less than the function body
-        // executing with a fresh module scope, so the default "/" pathname
-        // and empty headers are acceptable.
-        const requestCtx = getRequestContext();
+      // Request-scoped guard: only schedule a probe from the outer
+      // request (_probeDepth === 0), not from inside a probe re-execution
+      // itself. This replaces the deprecated process-global counter which
+      // caused cross-request interference.
+      const requestCtx = getRequestContext();
+      if (probe && (requestCtx._probeDepth ?? 0) === 0) {
         const headers = requestCtx.headersContext?.headers;
         const navCtx = requestCtx.serverContext;
         const requestSnapshot = {
@@ -477,39 +502,59 @@ export function registerCachedFunction<T extends (...args: any[]) => Promise<any
           ) as Record<string, string | string[] | undefined>,
         };
 
-        probePromise = new Promise<never>((_, reject) => {
-          probeTimer = setTimeout(() => {
-            const probeInternalTimeoutMs = fillDeadlineAt - performance.now() - 1_000;
-            if (probeInternalTimeoutMs <= 0) return;
+        // Encode probe args via the same RSC encodeReply used for cache-key
+        // generation so Promise-thenable params/searchParams survive the round
+        // trip (avoids false-positive deadlocks from empty `{}` JSON.stringify).
+        let encodedArgsForProbe: EncodedArgsForProbe | null = null;
+        try {
+          if (rsc) {
+            const tempRefs = rsc.createClientTemporaryReferenceSet();
+            const processedArgs = args.length > 0 ? (unwrapThenableObjects(args) as unknown[]) : [];
+            const encoded = await rsc.encodeReply(processedArgs, {
+              temporaryReferences: tempRefs,
+            });
+            encodedArgsForProbe = await encodedArgumentsToProbe(encoded);
+          } else {
+            // RSC not available in test environments — JSON fallback
+            encodedArgsForProbe = {
+              kind: "string",
+              data: JSON.stringify(args.length > 0 ? args : []),
+            };
+          }
+        } catch {
+          // Failed to encode probe args — skip probe scheduling rather than
+          // send empty/wrong args and risk false-positive deadlock.
+        }
 
-            probe({
-              id,
-              encodedArguments: (() => {
-                try {
-                  return JSON.stringify(args);
-                } catch {
-                  return "[]";
-                }
-              })(),
-              request: requestSnapshot,
-              timeoutMs: probeInternalTimeoutMs,
-            }).then(
-              (completed) => {
-                if (completed) {
-                  reject(new UseCacheDeadlockError());
-                } else if (typeof console !== "undefined") {
-                  console.warn(
-                    `[vinext] "use cache" fill for ${id} has been idle for 10s. ` +
-                      `Probe was also inconclusive — will hard-timeout at 54s.`,
-                  );
-                }
-              },
-              () => {},
-            );
-          }, 10_000);
-        });
-        // Swallow rejection when execution wins the race.
-        probePromise.catch(() => {});
+        if (encodedArgsForProbe) {
+          probePromise = new Promise<never>((_, reject) => {
+            probeTimer = setTimeout(() => {
+              const probeInternalTimeoutMs = fillDeadlineAt - performance.now() - 1_000;
+              if (probeInternalTimeoutMs <= 0) return;
+
+              probe({
+                id,
+                encodedArguments: encodedArgsForProbe!,
+                request: requestSnapshot,
+                timeoutMs: probeInternalTimeoutMs,
+              }).then(
+                (completed) => {
+                  if (completed) {
+                    reject(new UseCacheDeadlockError());
+                  } else if (typeof console !== "undefined") {
+                    console.warn(
+                      `[vinext] "use cache" fill for ${id} has been idle for 10s. ` +
+                        `Probe was also inconclusive — will hard-timeout at 54s.`,
+                    );
+                  }
+                },
+                () => {},
+              );
+            }, 10_000);
+          });
+          // Swallow rejection when execution wins the race.
+          probePromise.catch(() => {});
+        }
       }
 
       const timeoutPromise = new Promise<never>((_, reject) => {
