@@ -11,11 +11,6 @@
 
 const SYMBOL = Symbol.for("vinext.dev.useCacheProbe");
 
-// DEPRECATED: use UnifiedRequestContext._probeDepth instead.
-// Kept for backwards compat so existing tests still compile.
-// oxlint-disable-next-line no-unused-vars
-const _INSIDE_PROBE_SYMBOL = Symbol.for("vinext.dev.useCacheProbe.inside");
-
 export type UseCacheProbeRequestSnapshot = {
   headers: [string, string][];
   urlPathname: string;
@@ -44,24 +39,4 @@ export function setUseCacheProbe(fn: UseCacheProbe | undefined): void {
 
 export function getUseCacheProbe(): UseCacheProbe | undefined {
   return (globalThis as Record<symbol, unknown>)[SYMBOL] as UseCacheProbe | undefined;
-}
-
-/**
- * @deprecated Use `getRequestContext()._probeDepth` instead.
- * Kept for backwards compatibility — now a no-op.
- */
-export function setInsideUseCacheProbe(_value: boolean): void {
-  // globalThis-based counter is deprecated because concurrent requests
-  // share globalThis, causing cross-request interference.  The real guard
-  // is UnifiedRequestContext._probeDepth.
-}
-
-/**
- * @deprecated Use `(getRequestContext()._probeDepth ?? 0) > 0` instead.
- * Kept for backwards compatibility — always returns false.
- */
-export function isInsideUseCacheProbe(): boolean {
-  // globalThis-based counter is deprecated because concurrent requests
-  // share globalThis, causing cross-request interference.
-  return false;
 }

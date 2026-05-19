@@ -487,7 +487,13 @@ export function registerCachedFunction<T extends (...args: any[]) => Promise<any
       // itself. This replaces the deprecated process-global counter which
       // caused cross-request interference.
       const requestCtx = getRequestContext();
-      if (probe && (requestCtx._probeDepth ?? 0) === 0) {
+      if ((requestCtx._probeDepth ?? 0) > 0) {
+        // Inside a probe re-execution — skip the dev timeout/probe machinery.
+        // The probe pool already has its own internal timeout via Promise.race.
+        return executeWithContext(fn, args, cacheVariant);
+      }
+
+      if (probe) {
         const headers = requestCtx.headersContext?.headers;
         const navCtx = requestCtx.serverContext;
         const requestSnapshot = {
@@ -528,6 +534,12 @@ export function registerCachedFunction<T extends (...args: any[]) => Promise<any
 
         if (encodedArgsForProbe) {
           probePromise = new Promise<never>((_, reject) => {
+            // TODO: Next.js tracks RSC stream chunk timestamps and only fires
+            // the probe after 10s of stream *idleness*. vinext uses a flat
+            // 10s timeout that fires regardless of progress, which can produce
+            // false-positive UseCacheDeadlockError for slow-but-streaming
+            // cache functions. Switch to idle-stream monitoring for parity.
+            // https://github.com/vercel/next.js/blob/canary/packages/next/src/server/use-cache/use-cache-probe.ts
             probeTimer = setTimeout(() => {
               const probeInternalTimeoutMs = fillDeadlineAt - performance.now() - 1_000;
               if (probeInternalTimeoutMs <= 0) return;
