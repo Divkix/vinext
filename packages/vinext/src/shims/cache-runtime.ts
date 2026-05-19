@@ -593,6 +593,15 @@ export function registerCachedFunction<TArgs extends unknown[], TResult>(
       const USE_CACHE_TIMEOUT_MS = 54_000;
       const fillDeadlineAt = performance.now() + USE_CACHE_TIMEOUT_MS;
 
+      // Request-scoped guard: only schedule a probe from the outer
+      // request (_probeDepth === 0), not from inside a probe re-execution
+      // itself. This mirrors Next.js useCacheProbeMode and skips all dev
+      // timeout/probe machinery inside the isolated probe runner.
+      const requestCtx = getRequestContext();
+      if ((requestCtx._probeDepth ?? 0) > 0) {
+        return executeWithContext(fn, args, cacheVariant);
+      }
+
       let probeModules = _probeModules;
       if (!probeModules) {
         probeModules = await getProbeModules();
@@ -603,17 +612,6 @@ export function registerCachedFunction<TArgs extends unknown[], TResult>(
       let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
       let probePromise: Promise<never> | null = null;
       const probe = getUseCacheProbe();
-
-      // Request-scoped guard: only schedule a probe from the outer
-      // request (_probeDepth === 0), not from inside a probe re-execution
-      // itself. This replaces the deprecated process-global counter which
-      // caused cross-request interference.
-      const requestCtx = getRequestContext();
-      if ((requestCtx._probeDepth ?? 0) > 0) {
-        // Inside a probe re-execution — skip the dev timeout/probe machinery.
-        // The probe pool already has its own internal timeout via Promise.race.
-        return executeWithContext(fn, args, cacheVariant);
-      }
 
       if (probe) {
         const headers = requestCtx.headersContext?.headers;
