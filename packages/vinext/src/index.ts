@@ -152,7 +152,10 @@ const __dirname = import.meta.dirname;
 let _probePoolModulePromise: Promise<typeof import("./server/use-cache-probe-pool.js")> | null =
   null;
 function getProbePoolModule(): Promise<typeof import("./server/use-cache-probe-pool.js")> {
-  _probePoolModulePromise ??= import("./server/use-cache-probe-pool.js");
+  _probePoolModulePromise ??= import("./server/use-cache-probe-pool.js").catch((error) => {
+    _probePoolModulePromise = null;
+    throw error;
+  });
   return _probePoolModulePromise;
 }
 
