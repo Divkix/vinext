@@ -1,12 +1,19 @@
 import type { AppRouteSemanticIds } from "../routing/app-route-graph.js";
 import { fnv1a64 } from "../utils/hash.js";
 import { findSortedStringPosition } from "../utils/sorted-array.js";
+import {
+  evaluateArtifactCompatibility,
+  type ArtifactCompatibilityEnvelope,
+  type ArtifactCompatibilityEvaluationOptions,
+} from "./artifact-compatibility.js";
 
 export const CACHE_PROOF_MODEL_SCHEMA_VERSION = 1;
 export type CacheProofModelSchemaVersion = 1;
 
 export type CacheProofRejectionCode =
   | "CP_MODEL_DISABLED"
+  | "CP_ARTIFACT_COMPATIBILITY_INCOMPATIBLE"
+  | "CP_ARTIFACT_COMPATIBILITY_UNKNOWN"
   | "CP_DIMENSION_COUNT_EXCEEDED"
   | "CP_DIMENSION_NAME_MISSING"
   | "CP_DIMENSION_NAME_TOO_LONG"
@@ -27,11 +34,11 @@ export type CacheProofRejectionCode =
   | "CP_STATIC_LAYOUT_OBSERVATION_OUTPUT_KIND"
   | "CP_STATIC_LAYOUT_OBSERVATION_OUTPUT_MISMATCH"
   | "CP_STATIC_LAYOUT_PRIVATE_DYNAMIC_DOWNGRADE"
-  | "CP_STATIC_LAYOUT_PRIVATE_VARIANT_DIMENSION"
   | "CP_STATIC_LAYOUT_REQUEST_API_OBSERVED"
   | "CP_STATIC_LAYOUT_REQUEST_API_UNKNOWN"
   | "CP_STATIC_LAYOUT_ROOT_BOUNDARY_MISMATCH"
-  | "CP_STATIC_LAYOUT_ROOT_BOUNDARY_UNKNOWN";
+  | "CP_STATIC_LAYOUT_ROOT_BOUNDARY_UNKNOWN"
+  | "CP_STATIC_LAYOUT_VARIANT_DIMENSION_UNPROVEN";
 
 export type CacheProofAcceptanceCode = "CP_STATIC_LAYOUT_REUSE_PROVEN";
 
@@ -347,7 +354,7 @@ export type RenderObservation = Readonly<{
 }>;
 
 export type StaticLayoutReuseProof = Readonly<{
-  authorizesRuntimeReuse: false;
+  authorizesRuntimeReuse: true;
   candidateOutput: StaticLayoutCacheProofOutputScope;
   code: "CP_STATIC_LAYOUT_REUSE_PROVEN";
   currentOutput: StaticLayoutCacheProofOutputScope;
@@ -367,6 +374,36 @@ export type BuildStaticLayoutReuseProofInput = Readonly<{
 export type BuildStaticLayoutReuseProofResult =
   | Readonly<{ kind: "proof"; proof: StaticLayoutReuseProof }>
   | Readonly<{ kind: "rejected"; fallback: CacheProofBreakerFallback }>;
+
+export type CacheProofHotPathMetric = Readonly<{
+  code: CacheProofTraceCode;
+  fields: CacheProofTraceFields;
+  name: "vinext.cache.static_layout_artifact_reuse";
+  outcome: "fallback" | "reuse";
+}>;
+
+export type StaticLayoutArtifactReuseDecision =
+  | Readonly<{
+      canReuse: true;
+      kind: "reuse";
+      metric: CacheProofHotPathMetric;
+      proof: StaticLayoutReuseProof;
+    }>
+  | Readonly<{
+      canReuse: false;
+      fallback: CacheProofBreakerFallback;
+      kind: "fallback";
+      metric: CacheProofHotPathMetric;
+    }>;
+
+export type CreateStaticLayoutArtifactReuseDecisionInput = Readonly<{
+  candidateArtifactCompatibility: ArtifactCompatibilityEnvelope;
+  candidateObservation: RenderObservation;
+  candidateVariant: BuildCacheVariantWithRouteBudgetResult;
+  currentArtifactCompatibility: ArtifactCompatibilityEnvelope;
+  currentOutput: CacheProofOutputScope;
+}> &
+  ArtifactCompatibilityEvaluationOptions;
 
 export type BuildRenderObservationInput = Readonly<{
   boundaryOutcome: BoundaryOutcome;
@@ -1284,30 +1321,6 @@ function createStaticLayoutDowngradeFallback(
   );
 }
 
-function createPrivateVariantDimensionFallback(
-  dimension: CacheVariantDimension,
-): CacheProofBreakerFallback | null {
-  const downgrade = classifyCacheVariantDimensionDowngrade({ source: dimension.source });
-  if (!downgrade && dimension.privacy !== "private") {
-    return null;
-  }
-
-  const target = downgrade?.target ?? "private";
-  const mode: CacheProofBreakerFallbackMode =
-    target === "privateUncacheable" ? "privateUncacheable" : "renderFresh";
-  return buildBreakerFallback(
-    "CP_STATIC_LAYOUT_PRIVATE_VARIANT_DIMENSION",
-    {
-      dimension: dimension.name,
-      privacy: dimension.privacy,
-      reasonCode: downgrade?.code ?? null,
-      source: dimension.source,
-      target,
-    },
-    mode,
-  );
-}
-
 function outputFieldMismatch(
   candidate: StaticLayoutCacheProofOutputScope,
   observation: StaticLayoutCacheProofOutputScope,
@@ -1398,14 +1411,11 @@ export function buildStaticLayoutReuseProof(
     };
   }
 
-  for (const dimension of input.candidateVariant.dimensions) {
-    const fallback = createPrivateVariantDimensionFallback(dimension);
-    if (fallback) {
-      return {
-        kind: "rejected",
-        fallback,
-      };
-    }
+  if (input.candidateVariant.dimensions.length > 0) {
+    return rejectStaticLayoutReuseProof("CP_STATIC_LAYOUT_VARIANT_DIMENSION_UNPROVEN", {
+      dimensionCount: input.candidateVariant.dimensions.length,
+      sources: sortedUnique(input.candidateVariant.dimensions.map((dimension) => dimension.source)),
+    });
   }
 
   if (!candidateObservation.downgrade.isPublicCacheCandidate) {
@@ -1435,7 +1445,7 @@ export function buildStaticLayoutReuseProof(
   return {
     kind: "proof",
     proof: {
-      authorizesRuntimeReuse: false,
+      authorizesRuntimeReuse: true,
       candidateOutput,
       code: "CP_STATIC_LAYOUT_REUSE_PROVEN",
       currentOutput,
@@ -1450,6 +1460,76 @@ export function buildStaticLayoutReuseProof(
       reuseClass: "static-layout",
       variant: input.candidateVariant,
     },
+  };
+}
+
+function createCacheProofHotPathMetric(
+  outcome: CacheProofHotPathMetric["outcome"],
+  code: CacheProofTraceCode,
+  fields: CacheProofTraceFields,
+): CacheProofHotPathMetric {
+  return {
+    name: "vinext.cache.static_layout_artifact_reuse",
+    outcome,
+    code,
+    fields,
+  };
+}
+
+function createStaticLayoutArtifactReuseFallback(
+  fallback: CacheProofBreakerFallback,
+): StaticLayoutArtifactReuseDecision {
+  return {
+    kind: "fallback",
+    canReuse: false,
+    fallback,
+    metric: createCacheProofHotPathMetric("fallback", fallback.code, fallback.fields),
+  };
+}
+
+export function createStaticLayoutArtifactReuseDecision(
+  input: CreateStaticLayoutArtifactReuseDecisionInput,
+): StaticLayoutArtifactReuseDecision {
+  if (input.candidateVariant.kind === "breakerFallback") {
+    return createStaticLayoutArtifactReuseFallback(input.candidateVariant.fallback);
+  }
+
+  const artifactCompatibility = evaluateArtifactCompatibility(
+    input.currentArtifactCompatibility,
+    input.candidateArtifactCompatibility,
+    { compatibilityMap: input.compatibilityMap },
+  );
+  if (artifactCompatibility.kind === "unknown") {
+    return createStaticLayoutArtifactReuseFallback(
+      buildBreakerFallback("CP_ARTIFACT_COMPATIBILITY_UNKNOWN", {
+        compatibilityFallback: artifactCompatibility.fallback,
+        reason: artifactCompatibility.reason,
+      }),
+    );
+  }
+  if (artifactCompatibility.kind === "incompatible") {
+    return createStaticLayoutArtifactReuseFallback(
+      buildBreakerFallback("CP_ARTIFACT_COMPATIBILITY_INCOMPATIBLE", {
+        compatibilityFallback: artifactCompatibility.fallback,
+        reason: artifactCompatibility.reason,
+      }),
+    );
+  }
+
+  const proof = buildStaticLayoutReuseProof({
+    candidateObservation: input.candidateObservation,
+    candidateVariant: input.candidateVariant.variant,
+    currentOutput: input.currentOutput,
+  });
+  if (proof.kind === "rejected") {
+    return createStaticLayoutArtifactReuseFallback(proof.fallback);
+  }
+
+  return {
+    kind: "reuse",
+    canReuse: true,
+    proof: proof.proof,
+    metric: createCacheProofHotPathMetric("reuse", proof.proof.code, proof.proof.fields),
   };
 }
 
