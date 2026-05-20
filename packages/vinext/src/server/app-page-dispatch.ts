@@ -6,6 +6,7 @@ import {
   _peekRequestScopedCacheLife,
   type CachedAppPageValue,
 } from "vinext/shims/cache";
+import type { RootParams } from "vinext/shims/root-params";
 import {
   consumeDynamicUsage,
   consumeInvalidDynamicUsageError,
@@ -106,6 +107,7 @@ type AppPageDispatchIntercept<TPage = unknown> = {
   interceptLayouts?: readonly AppPageModule[] | null;
   matchedParams: AppPageParams;
   page: TPage;
+  slotId?: string | null;
   slotKey: string;
   sourceRouteIndex: number;
 };
@@ -115,7 +117,9 @@ type AppPageDispatchInterceptOptions<TPage = unknown> = {
   interceptLayouts?: readonly AppPageModule[] | null;
   interceptPage: TPage;
   interceptParams: AppPageParams;
+  interceptSlotId?: string | null;
   interceptSlotKey: string;
+  interceptSourceMatchedUrl?: string | null;
 };
 
 type AppPageModule = {
@@ -186,6 +190,7 @@ type DispatchAppPageOptions<TRoute extends AppPageDispatchRoute> = {
   middlewareContext: AppPageMiddlewareContext;
   mountedSlotsHeader?: string | null;
   params: AppPageParams;
+  rootParams?: RootParams;
   probeLayoutAt: (layoutIndex: number) => unknown;
   probePage: () => unknown;
   expireSeconds?: number;
@@ -312,7 +317,9 @@ function toInterceptOptions(
     interceptLayouts: intercept.interceptLayouts,
     interceptPage: intercept.page,
     interceptParams: intercept.matchedParams,
+    interceptSlotId: intercept.slotId ?? null,
     interceptSlotKey: intercept.slotKey,
+    interceptSourceMatchedUrl: interceptionContext,
   };
 }
 
@@ -439,6 +446,7 @@ async function dispatchAppPageInner<TRoute extends AppPageDispatchRoute>(
               },
               {
                 basePath: options.basePath,
+                rootParams: options.rootParams,
                 ...(revalidatedRscCapture.sideStream
                   ? {
                       sideStream: revalidatedRscCapture.sideStream,
@@ -664,6 +672,7 @@ async function dispatchAppPageInner<TRoute extends AppPageDispatchRoute>(
     loadSsrHandler: options.loadSsrHandler,
     middlewareContext: options.middlewareContext,
     params: options.params,
+    rootParams: options.rootParams,
     peekRenderObservationState() {
       return {
         dynamicFetches: peekDynamicFetchObservations(),

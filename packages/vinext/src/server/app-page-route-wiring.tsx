@@ -3,6 +3,7 @@ import {
   AppElementsWire,
   normalizeAppElementsSlotBindings,
   type AppElements,
+  type AppElementsInterception,
   type AppElementsSlotBinding,
 } from "./app-elements.js";
 import {
@@ -143,6 +144,7 @@ type BuildAppPageRouteElementOptions<
   makeThenableParams: (params: AppPageParams) => unknown;
   matchedParams: AppPageParams;
   resolvedMetadata: Metadata | null;
+  resolvedMetadataPathname?: string;
   resolvedViewport: Viewport;
   rootForbiddenModule?: TModule | null;
   rootNotFoundModule?: TModule | null;
@@ -155,6 +157,7 @@ type BuildAppPageElementsOptions<
   TModule extends AppPageModule = AppPageModule,
   TErrorModule extends AppPageErrorModule = AppPageErrorModule,
 > = BuildAppPageRouteElementOptions<TModule, TErrorModule> & {
+  interception?: AppElementsInterception | null;
   interceptionContext?: string | null;
   isRscRequest?: boolean;
   mountedSlotIds?: ReadonlySet<string> | null;
@@ -345,11 +348,15 @@ function createAppPageSlotBindings<
   });
 }
 
-function createAppPageRouteHead(metadata: Metadata | null, viewport: Viewport): ReactNode {
+function createAppPageRouteHead(
+  metadata: Metadata | null,
+  viewport: Viewport,
+  pathname: string,
+): ReactNode {
   return (
     <>
       <meta charSet="utf-8" />
-      {metadata ? <MetadataHead metadata={metadata} /> : null}
+      {metadata ? <MetadataHead metadata={metadata} pathname={pathname} /> : null}
       <ViewportHead viewport={viewport} />
     </>
   );
@@ -416,8 +423,12 @@ export function buildAppPageElements<
 
     return undefined;
   };
-  const elements: Record<string, ReactNode | string | null | readonly AppElementsSlotBinding[]> = {
+  const elements: Record<
+    string,
+    ReactNode | string | null | AppElementsInterception | readonly AppElementsSlotBinding[]
+  > = {
     ...AppElementsWire.createMetadataEntries({
+      interception: options.interception ?? null,
       interceptionContext,
       layoutIds: options.route.ids?.layouts ?? layoutEntries.map((entry) => entry.id),
       rootLayoutTreePath,
@@ -831,7 +842,11 @@ export function buildAppPageElements<
 
   elements[routeId] = (
     <>
-      {createAppPageRouteHead(options.resolvedMetadata, options.resolvedViewport)}
+      {createAppPageRouteHead(
+        options.resolvedMetadata,
+        options.resolvedViewport,
+        options.resolvedMetadataPathname ?? options.routePath,
+      )}
       {routeChildren}
     </>
   );

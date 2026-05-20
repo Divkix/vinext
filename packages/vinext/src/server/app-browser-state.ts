@@ -1,9 +1,11 @@
 import { stripBasePath } from "../utils/base-path.js";
+import type { RouteManifest } from "../routing/app-route-graph.js";
 import {
   AppElementsWire,
   getMountedSlotIds,
   getMountedSlotIdsHeader,
   type AppElements,
+  type AppElementsInterception,
   type AppElementsSlotBinding,
   type LayoutFlags,
 } from "./app-elements.js";
@@ -20,6 +22,7 @@ import {
   type NavigationTrace,
   type NavigationTraceFields,
 } from "./navigation-trace.js";
+import { createCacheEntryReuseProof, type CacheEntryReuseProof } from "./cache-proof.js";
 import {
   navigationPlanner,
   type MountedParallelSlotSnapshotV0,
@@ -29,9 +32,15 @@ import {
   type RouteSnapshotV0,
 } from "./navigation-planner.js";
 import type { ClientNavigationRenderSnapshot } from "vinext/shims/navigation";
+import { normalizePathnameForRouteMatch } from "../routing/utils.js";
+import { normalizePath } from "./normalize-path.js";
 export {
+  createHistoryStateWithNavigationMetadata,
   createHistoryStateWithPreviousNextUrl,
   readHistoryStatePreviousNextUrl,
+  readHistoryStateTraversalIndex,
+  resolveHistoryTraversalIntent,
+  type HistoryTraversalIntent,
 } from "./app-history-state.js";
 
 export type { OperationLane } from "./navigation-planner.js";
@@ -56,6 +65,7 @@ export type OperationRecord = PendingOperationRecord | CommittedOperationRecord;
 export type AppRouterState = {
   activeOperation: OperationRecord | null;
   elements: AppElements;
+  interception: AppElementsInterception | null;
   interceptionContext: string | null;
   layoutFlags: LayoutFlags;
   layoutIds: readonly string[];
@@ -69,7 +79,9 @@ export type AppRouterState = {
 };
 
 export type AppRouterAction = {
+  cacheEntryReuseProof?: CacheEntryReuseProof;
   elements: AppElements;
+  interception: AppElementsInterception | null;
   interceptionContext: string | null;
   layoutFlags: LayoutFlags;
   layoutIds: readonly string[];
@@ -85,13 +97,29 @@ export type AppRouterAction = {
 
 export type PendingNavigationCommit = {
   action: AppRouterAction;
+  cacheEntryReuseProof?: CacheEntryReuseProof;
+  interception: AppElementsInterception | null;
   interceptionContext: string | null;
   previousNextUrl: string | null;
   rootLayoutTreePath: string | null;
   routeId: string;
 };
 
+export type AppNavigationPayloadOrigin = Readonly<
+  { origin: "fresh" } | { origin: "visited-cache" }
+>;
+
+export const FRESH_APP_NAVIGATION_PAYLOAD_ORIGIN: AppNavigationPayloadOrigin = {
+  origin: "fresh",
+};
+export const VISITED_CACHE_APP_NAVIGATION_PAYLOAD_ORIGIN: AppNavigationPayloadOrigin = {
+  origin: "visited-cache",
+};
+
 type PendingNavigationCommitDisposition = "dispatch" | "hard-navigate" | "skip";
+type CacheRestorableAppPayloadMetadata = Readonly<{
+  cacheEntryReuseProof?: CacheEntryReuseProof;
+}>;
 type DispatchPendingNavigationCommitDispositionDecision = {
   disposition: "dispatch";
   preserveAbsentSlots: boolean;
@@ -107,7 +135,6 @@ type NonDispatchPendingNavigationCommitDispositionDecision = {
 type PendingNavigationCommitDispositionDecision =
   | DispatchPendingNavigationCommitDispositionDecision
   | NonDispatchPendingNavigationCommitDispositionDecision;
-
 function createOperationRecord(options: {
   id: number;
   lane: OperationLane;
@@ -119,6 +146,45 @@ function createOperationRecord(options: {
     startedVisibleCommitVersion: options.startedVisibleCommitVersion,
     state: "pending",
   };
+}
+
+export function isCacheRestorableAppPayloadMetadata(
+  metadata: CacheRestorableAppPayloadMetadata,
+): metadata is CacheRestorableAppPayloadMetadata & { cacheEntryReuseProof: CacheEntryReuseProof } {
+  return metadata.cacheEntryReuseProof !== undefined;
+}
+
+function requiresCacheEntryReuseProof(origin: AppNavigationPayloadOrigin): boolean {
+  switch (origin.origin) {
+    case "fresh":
+      return false;
+    case "visited-cache":
+      return true;
+    default: {
+      const _exhaustive: never = origin;
+      throw new Error("[vinext] Unknown App Router payload origin: " + String(_exhaustive));
+    }
+  }
+}
+
+function normalizeNavigationSnapshotMatchedUrl(pathname: string): string {
+  return normalizePath(normalizePathnameForRouteMatch(pathname));
+}
+
+function createRouteSnapshotRouteId(options: {
+  interception: AppElementsInterception | null;
+  routeId: string;
+}): string {
+  if (options.interception !== null) return options.routeId;
+
+  const parsed = AppElementsWire.parseElementKey(options.routeId);
+  if (parsed?.kind !== "route" || parsed.interceptionContext === null) {
+    return options.routeId;
+  }
+
+  // A context suffix keeps AppElements render keys partitioned, but without
+  // explicit interception proof it is not semantic route authority.
+  return AppElementsWire.encodeRouteId(parsed.path, null);
 }
 
 export function resolveInterceptionContextFromPreviousNextUrl(
@@ -181,6 +247,7 @@ export function resolvePendingNavigationCommitDispositionDecision(options: {
   activeNavigationId: number;
   currentState: AppRouterState;
   pending: PendingNavigationCommit;
+  routeManifest?: RouteManifest | null;
   startedNavigationId: number;
   targetHref?: string;
 }): PendingNavigationCommitDispositionDecision {
@@ -202,6 +269,7 @@ export function resolvePendingNavigationCommitDispositionDecision(options: {
     planPendingRootBoundaryFlightResponse({
       currentState: options.currentState,
       pending: options.pending,
+      routeManifest: options.routeManifest ?? null,
       targetHref: options.targetHref,
       traceFields,
     }),
@@ -250,43 +318,59 @@ function createMountedParallelSlotSnapshots(
 
 function createVisibleRouteSnapshot(state: AppRouterState): RouteSnapshotV0 {
   const displayUrl = createNavigationSnapshotUrl(state.navigationSnapshot);
+  const matchedUrl = normalizeNavigationSnapshotMatchedUrl(state.navigationSnapshot.pathname);
   return {
     displayUrl,
+    interception: state.interception,
+    interceptionContext: state.interceptionContext,
     layoutIds: state.layoutIds,
-    // `displayUrl` preserves the browser-visible query string for decisions and
-    // traces. `matchedUrl` stays path-only because route matching has already
-    // consumed query params before AppElements metadata reaches this boundary.
-    matchedUrl: state.navigationSnapshot.pathname,
+    // `displayUrl` preserves the browser-visible URL for decisions and traces.
+    // `matchedUrl` uses the route-state canonical pathname, matching the
+    // server's segment-decoded representation without changing user-facing
+    // navigation state such as usePathname().
+    matchedUrl,
     mountedParallelSlots: createMountedParallelSlotSnapshots(state.elements),
     rootBoundaryId: state.rootLayoutTreePath,
-    routeId: state.routeId,
+    routeId: createRouteSnapshotRouteId({
+      interception: state.interception,
+      routeId: state.routeId,
+    }),
     slotBindings: state.slotBindings,
   };
 }
 
 function createPendingRouteSnapshot(pending: PendingNavigationCommit): RouteSnapshotV0 {
   const displayUrl = createNavigationSnapshotUrl(pending.action.navigationSnapshot);
+  const matchedUrl = normalizeNavigationSnapshotMatchedUrl(
+    pending.action.navigationSnapshot.pathname,
+  );
   return {
     displayUrl,
+    interception: pending.action.interception,
+    interceptionContext: pending.action.interceptionContext,
     layoutIds: pending.action.layoutIds,
     // See createVisibleRouteSnapshot: matchedUrl intentionally models the route
     // identity, not the address bar URL.
-    matchedUrl: pending.action.navigationSnapshot.pathname,
+    matchedUrl,
     mountedParallelSlots: createMountedParallelSlotSnapshots(pending.action.elements),
     rootBoundaryId: pending.rootLayoutTreePath,
-    routeId: pending.routeId,
+    routeId: createRouteSnapshotRouteId({
+      interception: pending.action.interception,
+      routeId: pending.routeId,
+    }),
     slotBindings: pending.action.slotBindings,
   };
 }
 
 function createPendingNavigationOperationToken(options: {
   pending: PendingNavigationCommit;
+  routeManifest: RouteManifest | null;
   targetSnapshot: RouteSnapshotV0;
 }): OperationToken {
   return {
     baseVisibleCommitVersion: options.pending.action.operation.startedVisibleCommitVersion,
     deploymentVersion: null,
-    graphVersion: null,
+    graphVersion: options.routeManifest?.graphVersion ?? null,
     lane: options.pending.action.operation.lane,
     operationId: options.pending.action.operation.id,
     targetSnapshotFingerprint: createRootBoundarySnapshotFingerprint(options.targetSnapshot),
@@ -300,22 +384,24 @@ function createRootBoundarySnapshotFingerprint(snapshot: RouteSnapshotV0): strin
 function planPendingRootBoundaryFlightResponse(options: {
   currentState: AppRouterState;
   pending: PendingNavigationCommit;
+  routeManifest: RouteManifest | null;
   targetHref?: string;
   traceFields: NavigationTraceFields;
 }): NavigationDecisionV0 {
   const targetSnapshot = createPendingRouteSnapshot(options.pending);
   const token = createPendingNavigationOperationToken({
     pending: options.pending,
+    routeManifest: options.routeManifest,
     targetSnapshot,
   });
+  const cacheEntryReuseProof = options.pending.cacheEntryReuseProof;
 
   // #726-CORE-07/08 keeps the browser state layer as the lifecycle gate and
   // only translates committed AppElements metadata into planner snapshots.
-  // The planner owns the root-boundary decision; later #726 route-graph work
-  // should replace these client-visible snapshots with the read model called
-  // out in routing/app-router.ts instead of adding more local topology checks.
+  // RouteManifest now supplies graph-owned route topology while snapshots
+  // continue to carry runtime state such as visible slot content.
   return navigationPlanner.plan({
-    routeManifest: null,
+    routeManifest: options.routeManifest,
     state: {
       nextOperationToken: token,
       traceFields: options.traceFields,
@@ -325,6 +411,7 @@ function planPendingRootBoundaryFlightResponse(options: {
     event: {
       kind: "flightResponseArrived",
       result: {
+        ...(cacheEntryReuseProof ? { cacheEntryReuseProof } : {}),
         // Approval call sites must pass the executor's targetHref so the
         // planner trace and future hard-nav executor agree with the browser
         // URL. The fallback remains for lower-level tests and direct disposition
@@ -369,20 +456,31 @@ export async function createPendingNavigationCommit(options: {
   nextElements: Promise<AppElements>;
   navigationSnapshot: ClientNavigationRenderSnapshot;
   operationLane: OperationLane;
+  payloadOrigin: AppNavigationPayloadOrigin;
+  // Advisory: non-intercepted responses clear this even when callers pass the
+  // current visible previousNextUrl.
   previousNextUrl?: string | null;
   renderId: number;
   type: "navigate" | "replace" | "traverse";
 }): Promise<PendingNavigationCommit> {
   const elements = await options.nextElements;
   const metadata = AppElementsWire.readMetadata(elements);
-  const previousNextUrl =
+  const cacheEntryReuseProof =
+    metadata.cacheEntryReuseProof ??
+    (requiresCacheEntryReuseProof(options.payloadOrigin)
+      ? createCacheEntryReuseProof(null)
+      : undefined);
+  const requestedPreviousNextUrl =
     options.previousNextUrl !== undefined
       ? options.previousNextUrl
       : options.currentState.previousNextUrl;
+  const previousNextUrl = metadata.interception === null ? null : requestedPreviousNextUrl;
 
   return {
     action: {
+      ...(cacheEntryReuseProof ? { cacheEntryReuseProof } : {}),
       elements,
+      interception: metadata.interception,
       interceptionContext: metadata.interceptionContext,
       layoutIds: metadata.layoutIds,
       layoutFlags: metadata.layoutFlags,
@@ -399,7 +497,9 @@ export async function createPendingNavigationCommit(options: {
       routeId: metadata.routeId,
       type: options.type,
     },
-    // Convenience aliases — always equal action.interceptionContext / action.rootLayoutTreePath / action.routeId.
+    // Convenience aliases — always equal their action.* counterparts.
+    ...(cacheEntryReuseProof ? { cacheEntryReuseProof } : {}),
+    interception: metadata.interception,
     interceptionContext: metadata.interceptionContext,
     previousNextUrl,
     rootLayoutTreePath: metadata.rootLayoutTreePath,

@@ -743,8 +743,17 @@ describe("App Router integration", () => {
     // RSC request simulates client-side navigation from /team/[teamId]/members
     // to /team/[teamId]/settings. The source route has a dynamic :teamId segment.
     // The intercepting route handler must extract "42" from the URL, not ":teamId".
+    //
+    // The X-Vinext-Interception-Context header carries the source pathname
+    // (the equivalent of Next.js' Next-URL header). Without it the matcher
+    // must NOT fire the interception, matching Next.js' rewrite semantics —
+    // see app-rsc-route-matching.ts and the source-pathname filtering tests
+    // in app-rsc-route-matching.test.ts.
     const res = await fetch(`${baseUrl}/team/42/settings.rsc`, {
-      headers: { Accept: "text/x-component" },
+      headers: {
+        Accept: "text/x-component",
+        "X-Vinext-Interception-Context": "/team/42/members",
+      },
     });
     expect(res.status).toBe(200);
     expect(res.headers.get("content-type")).toContain("text/x-component");
@@ -758,6 +767,41 @@ describe("App Router integration", () => {
     expect(rscPayload).toContain("members-page");
     // The literal pattern string ":teamId" must NOT appear as a param value anywhere
     expect(rscPayload).not.toContain('":teamId"');
+  });
+
+  it("does NOT fire intercept on direct RSC request without interception context", async () => {
+    // Mirrors Next.js: interception rewrites only fire when the Next-URL
+    // header matches the intercepting-route regex. A direct `.rsc` fetch
+    // with no source pathname must render the underlying page.
+    // https://github.com/vercel/next.js/blob/canary/packages/next/src/lib/generate-interception-routes-rewrites.ts
+    const res = await fetch(`${baseUrl}/team/42/settings.rsc`, {
+      headers: { Accept: "text/x-component" },
+    });
+    expect(res.status).toBe(200);
+
+    const rscPayload = await res.text();
+    expect(rscPayload).not.toContain("Settings Modal");
+    expect(rscPayload).not.toContain("settings-modal");
+    expect(rscPayload).toContain("settings-page");
+  });
+
+  it("does NOT fire intercept when interception context is from an unrelated route", async () => {
+    // The intercept lives at app/team/[teamId]/members/@modal/(..)settings,
+    // so its sourceMatchPattern is /team/:teamId/members. A source pathname
+    // outside that prefix (e.g. `/feed`) must not satisfy the rewrite header
+    // and the underlying settings page should render.
+    const res = await fetch(`${baseUrl}/team/42/settings.rsc`, {
+      headers: {
+        Accept: "text/x-component",
+        "X-Vinext-Interception-Context": "/feed",
+      },
+    });
+    expect(res.status).toBe(200);
+
+    const rscPayload = await res.text();
+    expect(rscPayload).not.toContain("Settings Modal");
+    expect(rscPayload).not.toContain("settings-modal");
+    expect(rscPayload).toContain("settings-page");
   });
 
   it("returns Method Not Allowed for unsupported HTTP methods on route handlers", async () => {
@@ -2075,8 +2119,9 @@ describe("App Router Production build", () => {
       const homeHtml = await homeRes.text();
       expect(homeHtml).toContain("Welcome to App Router");
       expect(homeHtml).toContain("<script");
-      // Production bootstrap should reference hashed assets
-      expect(homeHtml).toMatch(/import\("\/assets\/[^"]+\.js"\)/);
+      // Production bootstrap is emitted as a real <script type="module" src=…>
+      // tag (via React's bootstrapModules option) referencing hashed assets.
+      expect(homeHtml).toMatch(/<script[^>]+type="module"[^>]+src="\/assets\/[^"]+\.js"/);
 
       // Dynamic route works
       const blogRes = await fetch(`${previewUrl}/blog/test-post`);
@@ -2159,7 +2204,9 @@ describe("App Router Production server (startProdServer)", () => {
       "script-src 'nonce-first' 'strict-dynamic';",
     );
     const firstHtml = await firstRes.text();
-    expect(firstHtml).toContain('<script nonce="first">self.__VINEXT_RSC_PARAMS__={}</script>');
+    expect(firstHtml).toContain(
+      '<script nonce="first">Object.assign(((self[Symbol.for("vinext.navigationRuntime")]',
+    );
 
     const secondRes = await fetch(`${baseUrl}/revalidate-test?csp-nonce=second`);
     expect(secondRes.status).toBe(200);
@@ -2168,7 +2215,9 @@ describe("App Router Production server (startProdServer)", () => {
       "script-src 'nonce-second' 'strict-dynamic';",
     );
     const secondHtml = await secondRes.text();
-    expect(secondHtml).toContain('<script nonce="second">self.__VINEXT_RSC_PARAMS__={}</script>');
+    expect(secondHtml).toContain(
+      '<script nonce="second">Object.assign(((self[Symbol.for("vinext.navigationRuntime")]',
+    );
     expect(secondHtml).not.toContain('nonce="first"');
   });
 
@@ -3253,6 +3302,14 @@ describe("metadata routes integration (App Router)", () => {
     expect(data.display).toBe("standalone");
   });
 
+  it("serves sitemap routes that import but do not render client references", async () => {
+    // Ported from Next.js: test/e2e/app-dir/metadata-dynamic-routes/index.test.ts
+    // https://github.com/vercel/next.js/blob/canary/test/e2e/app-dir/metadata-dynamic-routes/index.test.ts
+    const res = await fetch(`${baseUrl}/client-ref-dependency/sitemap.xml`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toContain("application/xml");
+  });
+
   // Note: serving /icon from dynamic icon.tsx requires the RSC environment
   // to have access to Satori + Resvg Node APIs. This works when the RSC env
   // has proper Node externals configured. The discovery/routing is tested below.
@@ -3886,6 +3943,8 @@ describe("App Router next.config.js features (generateRscEntry)", () => {
     expect(code).toContain("export default __createAppRscHandler({");
     expect(code).toContain("configRedirects: __configRedirects");
     expect(code).toContain("dispatchMatchedPage({");
+    expect(code).toContain("    rootParams,\n    request,");
+    expect(code).toContain("      rootParams,\n      probeLayoutAt");
     expect(code).toContain("dispatchMatchedRouteHandler({");
     expect(code).toContain("matchRoute,");
   });
@@ -4317,13 +4376,19 @@ describe("App Router middleware with NextRequest", () => {
     // which must merge _mwCtx.headers into the Response — same as the normal
     // page path through buildAppPageRscResponse().
     const res = await fetch(`${baseUrl}/photos/42.rsc`, {
-      headers: { Accept: "text/x-component" },
+      headers: {
+        Accept: "text/x-component",
+        "X-Vinext-Interception-Context": "/feed",
+      },
     });
     expect(res.status).toBe(200);
     expect(res.headers.get("content-type")).toContain("text/x-component");
     // Middleware sets x-mw-ran and x-mw-pathname on all matched paths
     expect(res.headers.get("x-mw-ran")).toBe("true");
     expect(res.headers.get("x-mw-pathname")).toBe("/photos/42");
+    const payload = await res.text();
+    expect(payload).toContain("Photo Modal");
+    expect(payload).toContain("Photo Feed");
   });
 });
 
@@ -4846,6 +4911,7 @@ describe("generateRscEntry ISR code generation", () => {
               pagePath: "/tmp/test/app/@modal/(.)explicit-layout/deeper/page.tsx",
               params: [],
               targetPattern: "/explicit-layout/deeper",
+              sourceMatchPattern: "/",
             },
           ],
           key: "modal@@modal",

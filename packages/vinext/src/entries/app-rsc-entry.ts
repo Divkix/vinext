@@ -75,10 +75,15 @@ const appRscErrorHandlerPath = resolveEntryPath(
   import.meta.url,
 );
 const appRequestContextPath = resolveEntryPath("../server/app-request-context.js", import.meta.url);
+const appPrerenderStaticParamsPath = resolveEntryPath(
+  "../server/app-prerender-static-params.js",
+  import.meta.url,
+);
 const appHookWarningSuppressionPath = resolveEntryPath(
   "../server/app-hook-warning-suppression.js",
   import.meta.url,
 );
+const serverGlobalsPath = resolveEntryPath("../server/server-globals.js", import.meta.url);
 
 /**
  * Resolved config options relevant to App Router request handling.
@@ -98,10 +103,28 @@ type AppRouterConfig = {
   allowedDevOrigins?: string[];
   /** Body size limit for server actions in bytes (from experimental.serverActions.bodySizeLimit). */
   bodySizeLimit?: number;
+  /**
+   * Resolved `assetPrefix` from next.config. Empty string when unset.
+   * Embedded in the generated entry so the App Router prod-server reads
+   * it from the imported module instead of a sidecar JSON file —
+   * matches how the Pages Router entry exposes `vinextConfig.assetPrefix`.
+   *
+   * @see https://nextjs.org/docs/app/api-reference/config/next-config-js/assetPrefix
+   */
+  assetPrefix?: string;
   /** Route-level expire fallback in seconds for ISR entries with numeric revalidate. */
   expireTime?: number;
   /** Internationalization routing config for middleware matcher locale handling. */
   i18n?: NextI18nConfig | null;
+  /**
+   * Absolute path to `app/global-not-found.{tsx,ts,js,jsx}` when present.
+   * When provided, route-miss 404s render this module standalone (it owns its
+   * own `<html>` and `<body>`) instead of wrapping the regular `not-found.tsx`
+   * boundary inside the root layout. Mirrors Next.js 16's
+   * `experimental.globalNotFound` behavior.
+   * @see https://github.com/vercel/next.js/blob/canary/test/e2e/app-dir/global-not-found
+   */
+  globalNotFoundPath?: string | null;
   /**
    * When true, the project has a `pages/` directory alongside the App Router.
    * The generated RSC entry exposes `/__vinext/prerender/pages-static-paths`
@@ -140,21 +163,29 @@ export function generateRscEntry(
   const headers = config?.headers ?? [];
   const allowedOrigins = config?.allowedOrigins ?? [];
   const bodySizeLimit = config?.bodySizeLimit ?? 1 * 1024 * 1024;
+  const assetPrefix = config?.assetPrefix ?? "";
   const expireTime = config?.expireTime ?? DEFAULT_EXPIRE_TIME;
   const i18nConfig = config?.i18n ?? null;
   const hasPagesDir = config?.hasPagesDir ?? false;
   const publicFiles = config?.publicFiles ?? [];
-  const manifestCode = buildAppRscManifestCode({ routes, metadataRoutes, globalErrorPath });
+  const manifestCode = buildAppRscManifestCode({
+    routes,
+    metadataRoutes,
+    globalErrorPath,
+    globalNotFoundPath: config?.globalNotFoundPath ?? null,
+  });
   const {
     imports,
     routeEntries,
     metaRouteEntries,
     generateStaticParamsEntries,
+    rootParamNameEntries,
     rootNotFoundVar,
     rootForbiddenVar,
     rootUnauthorizedVar,
     rootLayoutVars,
     globalErrorVar,
+    globalNotFoundVar,
   } = manifestCode;
   const loadPrerenderPagesRoutesCode = hasPagesDir
     ? `
@@ -166,6 +197,7 @@ async function __loadPrerenderPagesRoutes() {
     : "";
 
   return `
+import ${JSON.stringify(serverGlobalsPath)};
 import {
   renderToReadableStream as _renderToReadableStream,
   decodeAction,
@@ -259,6 +291,7 @@ ${hasPagesDir ? `// Pages Router routes are loaded lazily from the SSR environme
 // so per-route dispatch can opt into suppression via .run(true, ...).
 import { suppressHookWarningAls } from ${JSON.stringify(appHookWarningSuppressionPath)};
 import { clearAppRequestContext as __clearRequestContext, setAppNavigationContext as setNavigationContext } from ${JSON.stringify(appRequestContextPath)};
+import { createAppPrerenderStaticParamsResolver as __createAppPrerenderStaticParamsResolver } from ${JSON.stringify(appPrerenderStaticParamsPath)};
 
 // Note: cache entries are written with \`headers: undefined\`. Next.js stores
 // response headers (e.g. set-cookie from cookies().set() during render) in the
@@ -332,15 +365,26 @@ const metadataRoutes = [
 ${metaRouteEntries.join(",\n")}
 ];
 
+// Hoisted ahead of __fallbackRenderer / buildPageElements so both can thread
+// the configured basePath through file-based metadata href emission.
+const __basePath = ${JSON.stringify(bp)};
+
 const rootNotFoundModule = ${rootNotFoundVar ? rootNotFoundVar : "null"};
 const rootForbiddenModule = ${rootForbiddenVar ? rootForbiddenVar : "null"};
 const rootUnauthorizedModule = ${rootUnauthorizedVar ? rootUnauthorizedVar : "null"};
 const rootLayouts = [${rootLayoutVars.join(", ")}];
+// Root-level app/global-not-found module. When present, route-miss 404s render
+// this module standalone (it provides its own html/body) instead of wrapping
+// the not-found.tsx boundary inside the root layout. Page-triggered notFound()
+// calls still use the regular not-found.tsx boundary inside the layouts.
+// See https://github.com/vercel/next.js/blob/canary/packages/next/src/server/app-render/app-render.tsx#L495-L520
+const globalNotFoundModule = ${globalNotFoundVar ? globalNotFoundVar : "null"};
 
 const createRscOnErrorHandler = (request, pathname, routePath) =>
   createAppRscOnErrorHandler(_reportRequestError, request, pathname, routePath);
 
 const __fallbackRenderer = __createAppFallbackRenderer({
+  basePath: __basePath,
   rootBoundaries: {
     rootForbiddenModule,
     rootLayouts,
@@ -348,6 +392,7 @@ const __fallbackRenderer = __createAppFallbackRenderer({
     rootUnauthorizedModule,
   },
   globalErrorModule: ${globalErrorVar ? globalErrorVar : "null"},
+  globalNotFoundModule,
   metadataRoutes,
   ssrLoader() {
     return import.meta.viteRsc.loadModule("ssr", "index");
@@ -394,10 +439,10 @@ async function buildPageElements(route, params, routePath, pageRequest) {
     rootForbiddenModule: ${rootForbiddenVar ? rootForbiddenVar : "null"},
     rootUnauthorizedModule: ${rootUnauthorizedVar ? rootUnauthorizedVar : "null"},
     metadataRoutes,
+    basePath: __basePath,
   });
 }
 
-const __basePath = ${JSON.stringify(bp)};
 const __trailingSlash = ${JSON.stringify(ts)};
 const __i18nConfig = ${JSON.stringify(i18nConfig)};
 const __configRedirects = ${JSON.stringify(redirects)};
@@ -406,6 +451,10 @@ const __configHeaders = ${JSON.stringify(headers)};
 const __publicFiles = new Set(${JSON.stringify(publicFiles)});
 const __allowedOrigins = ${JSON.stringify(allowedOrigins)};
 const __expireTime = ${JSON.stringify(expireTime)};
+// Re-exported for the App Router prod-server to consume at startup —
+// mirrors the embedded \`__basePath\` pattern (and Pages Router's
+// \`vinextConfig\` export). Empty string when unset.
+export const __assetPrefix = ${JSON.stringify(assetPrefix)};
 
 ${generateDevOriginCheckCode(config?.allowedDevOrigins)}
 
@@ -422,18 +471,10 @@ var __MAX_ACTION_BODY_SIZE = ${JSON.stringify(bodySizeLimit)};
 // Used by the prerender phase to enumerate dynamic route URLs without
 // loading route modules via the dev server.
 export const generateStaticParamsMap = {
-// TODO: layout-level generateStaticParams — this map only includes routes that
-// have a pagePath (leaf pages). Layout segments can also export generateStaticParams
-// to provide parent params for nested dynamic routes, but they don't have a pagePath
-// so they are excluded here. Supporting layout-level generateStaticParams requires
-// scanning layout.tsx files separately and including them in this map.
 ${generateStaticParamsEntries.join("\n")}
 };${loadPrerenderPagesRoutesCode}
 const rootParamNamesMap = {
-${routes
-  .filter((r) => r.isDynamic && r.pagePath && r.rootParamNames && r.rootParamNames.length > 0)
-  .map((r) => `  ${JSON.stringify(r.pattern)}: ${JSON.stringify(r.rootParamNames)},`)
-  .join("\n")}
+${rootParamNameEntries.join("\n")}
 };
 
 export default __createAppRscHandler({
@@ -456,6 +497,7 @@ export default __createAppRscHandler({
     middlewareContext,
     mountedSlotsHeader,
     params,
+    rootParams,
     request,
     route,
     scriptNonce,
@@ -531,6 +573,7 @@ export default __createAppRscHandler({
       middlewareContext,
       mountedSlotsHeader,
       params,
+      rootParams,
       probeLayoutAt(li) {
         const LayoutComp = route.layouts[li]?.default;
         if (!LayoutComp) return null;
@@ -627,6 +670,7 @@ export default __createAppRscHandler({
     return __handleProgressiveServerActionRequest({
       actionId,
       allowedOrigins: __allowedOrigins,
+      basePath: __basePath,
       cleanPathname,
       clearRequestContext() {
         __clearRequestContext();
@@ -658,6 +702,7 @@ export default __createAppRscHandler({
     return __handleServerActionRscRequest({
       actionId,
       allowedOrigins: __allowedOrigins,
+      basePath: __basePath,
       buildPageElement({
         route: actionRoute,
         params: actionParams,
@@ -736,7 +781,9 @@ export default __createAppRscHandler({
         return {
           interceptionContext,
           interceptLayouts: intercept.interceptLayouts,
+          interceptSlotId: intercept.slotId,
           interceptSlotKey: intercept.slotKey,
+          interceptSourceMatchedUrl: interceptionContext,
           interceptPage: intercept.page,
           interceptParams: intercept.matchedParams,
         };

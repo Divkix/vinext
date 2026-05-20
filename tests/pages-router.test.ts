@@ -374,6 +374,32 @@ describe("Pages Router integration", () => {
     expect(html).toContain("/compat-router-test");
   });
 
+  // Ported from Next.js: test/e2e/app-dir/params-hooks-compat/index.test.ts
+  // https://github.com/vercel/next.js/blob/canary/test/e2e/app-dir/params-hooks-compat/index.test.ts
+  // Under Pages Router, hooks from `next/navigation` must work as compat shims
+  // populated from the Pages Router (next/router) state — useParams returns
+  // ONLY dynamic route params (no query keys), useSearchParams returns ONLY
+  // the URL search string (no route params).
+  it("next/navigation useParams returns only dynamic route params under Pages Router", async () => {
+    const res = await fetch(`${baseUrl}/nav-compat/foobar?a=pages`);
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    const paramsMatch = html.match(/<pre id="use-params">([^<]*)<\/pre>/);
+    expect(paramsMatch).not.toBeNull();
+    const params = JSON.parse(paramsMatch![1].replaceAll("&quot;", '"'));
+    expect(params).toEqual({ slug: "foobar" });
+  });
+
+  it("next/navigation useSearchParams returns only query string under Pages Router", async () => {
+    const res = await fetch(`${baseUrl}/nav-compat/foobar?q=pages`);
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    const searchMatch = html.match(/<pre id="use-search-params">([^<]*)<\/pre>/);
+    expect(searchMatch).not.toBeNull();
+    const search = JSON.parse(searchMatch![1].replaceAll("&quot;", '"'));
+    expect(search).toEqual({ q: "pages" });
+  });
+
   it("does not collapse encoded slashes onto nested routes in dev", async () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "vinext-pages-encoded-dev-"));
     writeEncodedSlashPagesFixture(tmpDir);
@@ -2129,6 +2155,18 @@ export default function CounterPage() {
         ([key]) => key.endsWith("/pages/counter.tsx") || key === "pages/counter.tsx",
       );
       expect(counterManifestEntry).toBeDefined();
+      // Next.js parity: when `basePath` is set and `assetPrefix` is unset,
+      // `assetPrefix` falls back to `basePath`. The on-disk layout therefore
+      // mirrors `<basePath>/_next/static/...` rather than the legacy
+      // `<basePath>/assets/...` Vite default.
+      // See packages/next/src/server/config.ts:528-531.
+      //
+      // Every entry should be anchored under basePath. With the parity
+      // fallback in effect, entries land under `<basePath>/_next/static/`
+      // (Vite's raw SSR manifest may produce duplicate-prefixed entries
+      // alongside the backfilled ones — both forms start with `docs/` so
+      // the prod-server's URL→file lookup is unaffected. The
+      // user-visible HTML asserts below are the source of truth).
       expect(counterManifestEntry?.[1].every((file: string) => file.startsWith("docs/"))).toBe(
         true,
       );
@@ -2144,11 +2182,34 @@ export default function CounterPage() {
 
       try {
         const addr = prodServer.address() as { port: number };
-        const res = await fetch(`http://127.0.0.1:${addr.port}/docs/counter`);
+        const baseUrl = `http://127.0.0.1:${addr.port}`;
+        const res = await fetch(`${baseUrl}/docs/counter`);
         expect(res.status).toBe(200);
         const html = await res.text();
-        expect(html).toContain('href="/docs/assets/');
-        expect(html).toContain('src="/docs/assets/');
+        // Asset URLs land under `<basePath>/_next/static/` per Next.js
+        // parity (basePath→assetPrefix fallback). Stylesheets and scripts
+        // both share the same prefix.
+        expect(html).toContain('href="/docs/_next/static/');
+        expect(html).toContain('src="/docs/_next/static/');
+
+        // Every emitted asset URL must actually resolve to 200 from the
+        // prod server. The previous version of this test only asserted
+        // the URLs APPEAR in HTML, not that they were served correctly.
+        // The Pages Router asset lookup was stripping basePath BEFORE
+        // matching against the assetPrefix, so requests for
+        // `/docs/_next/static/...` were 404ing when assetPrefix fell
+        // back to basePath (round-5 review feedback on #1311).
+        const assetUrls = new Set<string>();
+        for (const m of html.matchAll(
+          /<(?:script|link)[^>]+(?:src|href)="(\/docs\/_next\/[^"]+)"/g,
+        )) {
+          assetUrls.add(m[1]);
+        }
+        expect(assetUrls.size).toBeGreaterThan(0);
+        for (const url of assetUrls) {
+          const assetRes = await fetch(`${baseUrl}${url}`);
+          expect(assetRes.status, `expected 200 for ${url}`).toBe(200);
+        }
       } finally {
         await new Promise<void>((resolve) => prodServer.close(() => resolve()));
       }
@@ -3885,6 +3946,76 @@ describe("router __NEXT_DATA__ correctness (Pages Router)", () => {
     const nextData = JSON.parse(match![1]);
     expect(nextData.page).toBe("/shallow-test");
     expect(nextData.props.pageProps.gsspCallId).toBeGreaterThan(0);
+  });
+
+  // Ported from Next.js: test/e2e/middleware-dynamic-basepath-matcher-rewrites
+  // https://github.com/vercel/next.js/blob/canary/test/e2e/middleware-dynamic-basepath-matcher-rewrites
+  // Regression test for GitHub issue #1196 — catch-all + basePath + rewrites + middleware.
+  it("catch-all route params are preserved with basePath + rewrites + middleware", async () => {
+    const tmpRoot = await fsp.mkdtemp(path.join(os.tmpdir(), "vinext-pages-catchall-basepath-"));
+    const rootNodeModules = path.resolve(import.meta.dirname, "../node_modules");
+
+    try {
+      await fsp.symlink(rootNodeModules, path.join(tmpRoot, "node_modules"), "junction");
+      await fsp.mkdir(path.join(tmpRoot, "pages"), { recursive: true });
+
+      await fsp.writeFile(path.join(tmpRoot, "package.json"), JSON.stringify({ type: "module" }));
+      await fsp.writeFile(
+        path.join(tmpRoot, "next.config.mjs"),
+        `export default {
+          basePath: "/docs",
+          async rewrites() {
+            return {
+              beforeFiles: [
+                { source: "/before-rewrite", destination: "/about" },
+              ],
+            };
+          },
+        };\n`,
+      );
+      await fsp.writeFile(
+        path.join(tmpRoot, "middleware.ts"),
+        `import { NextResponse } from "next/server";
+export const config = { matcher: "/:path*" };
+export default function middleware() {
+  return NextResponse.next();
+}
+`,
+      );
+      await fsp.writeFile(
+        path.join(tmpRoot, "pages", "[...path].tsx"),
+        `export default function CatchAllPage({ path }: { path: string[] }) {
+          return (
+            <div>
+              <h1 data-testid="page-title">CatchAll</h1>
+              <p data-testid="query-path">{JSON.stringify(path)}</p>
+            </div>
+          );
+        }
+
+        export async function getServerSideProps({ params }: { params: { path: string[] } }) {
+          return { props: { path: params.path } };
+        }
+`,
+      );
+
+      const { server, baseUrl } = await startFixtureServer(tmpRoot);
+      try {
+        const res = await fetch(`${baseUrl}/docs/first`);
+        expect(res.status).toBe(200);
+        const html = await res.text();
+        const match = html.match(/<script>window\.__NEXT_DATA__\s*=\s*({.*?})<\/script>/);
+        expect(match).toBeTruthy();
+        const nextData = JSON.parse(match![1]);
+        expect(nextData.page).toBe("/[...path]");
+        expect(nextData.query).toEqual({ path: ["first"] });
+        expect(html).toContain("CatchAll");
+      } finally {
+        await server.close();
+      }
+    } finally {
+      await fsp.rm(tmpRoot, { recursive: true, force: true });
+    }
   });
 });
 

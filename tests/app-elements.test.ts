@@ -5,7 +5,9 @@ import { describe, expect, it } from "vite-plus/test";
 import { UNMATCHED_SLOT } from "../packages/vinext/src/shims/slot.js";
 import {
   APP_ARTIFACT_COMPATIBILITY_KEY,
+  APP_CACHE_ENTRY_REUSE_PROOF_KEY,
   AppElementsWire,
+  APP_INTERCEPTION_KEY,
   APP_INTERCEPTION_CONTEXT_KEY,
   APP_LAYOUT_IDS_KEY,
   APP_LAYOUT_FLAGS_KEY,
@@ -28,7 +30,10 @@ import {
   evaluateArtifactCompatibility,
   RSC_PAYLOAD_SCHEMA_VERSION,
 } from "../packages/vinext/src/server/artifact-compatibility.js";
-import { buildRenderObservation } from "../packages/vinext/src/server/cache-proof.js";
+import {
+  buildRenderObservation,
+  createCacheEntryReuseProof,
+} from "../packages/vinext/src/server/cache-proof.js";
 
 describe("AppElementsWire", () => {
   it("encodes outgoing record payloads without mutating caller-owned records", () => {
@@ -69,6 +74,7 @@ describe("AppElementsWire", () => {
     expect(decoded["slot:modal:/"]).toBe(UNMATCHED_SLOT);
     expect(AppElementsWire.readMetadata(decoded)).toEqual({
       artifactCompatibility: createArtifactCompatibilityEnvelope(),
+      interception: null,
       interceptionContext: "/feed",
       layoutIds: [],
       layoutFlags: {},
@@ -92,6 +98,56 @@ describe("AppElementsWire", () => {
       [APP_ROOT_LAYOUT_KEY]: "/(dashboard)",
       [APP_ROUTE_KEY]: "route:/dashboard",
     });
+  });
+
+  it("round-trips explicit interception proof metadata through the codec", () => {
+    const interception = {
+      sourceMatchedUrl: "/feed",
+      sourceRouteId: AppElementsWire.encodeRouteId("/feed", null),
+      slotId: AppElementsWire.encodeSlotId("modal", "/feed"),
+      targetMatchedUrl: "/photos/42",
+      targetRouteId: AppElementsWire.encodeRouteId("/photos/42", null),
+    };
+    const metadata = AppElementsWire.createMetadataEntries({
+      interception,
+      interceptionContext: "/feed",
+      rootLayoutTreePath: "/",
+      routeId: AppElementsWire.encodeRouteId("/photos/42", "/feed"),
+    });
+
+    expect(metadata[APP_INTERCEPTION_KEY]).toEqual(interception);
+    expect(AppElementsWire.readMetadata(metadata).interception).toEqual(interception);
+  });
+
+  it("rejects malformed path URLs in explicit interception proof metadata", () => {
+    const validInterception = {
+      sourceMatchedUrl: "/feed",
+      sourceRouteId: AppElementsWire.encodeRouteId("/feed", null),
+      slotId: AppElementsWire.encodeSlotId("modal", "/feed"),
+      targetMatchedUrl: "/photos/42",
+      targetRouteId: AppElementsWire.encodeRouteId("/photos/42", null),
+    };
+    const malformedMatchedUrls = [
+      "//example.test/feed",
+      "/feed?tab=latest",
+      "/feed#modal",
+      "/fe\0ed",
+    ];
+
+    for (const sourceMatchedUrl of malformedMatchedUrls) {
+      expect(() =>
+        readAppElementsMetadata(
+          normalizeAppElements({
+            [APP_INTERCEPTION_KEY]: {
+              ...validInterception,
+              sourceMatchedUrl,
+            },
+            [APP_ROOT_LAYOUT_KEY]: "/",
+            [APP_ROUTE_KEY]: AppElementsWire.encodeRouteId("/photos/42", "/feed"),
+          }),
+        ),
+      ).toThrow("[vinext] Invalid __interception in App Router payload: expected path URLs");
+    }
   });
 
   it("normalizes slot binding metadata at the wire boundary", () => {
@@ -235,6 +291,7 @@ describe("AppElementsWire", () => {
 
     expect(AppElementsWire.readMetadata(payload)).toEqual({
       artifactCompatibility: createArtifactCompatibilityEnvelope(),
+      interception: null,
       interceptionContext: null,
       layoutIds: [],
       layoutFlags: { [AppElementsWire.encodeLayoutId("/")]: "s" },
@@ -785,6 +842,27 @@ describe("buildOutgoingAppPayload", () => {
         rootBoundaryId: "root-a",
         renderEpoch: null,
       });
+    }
+  });
+
+  it("carries planner-visible cache entry reuse proof as metadata only", () => {
+    const cacheEntryReuseProof = createCacheEntryReuseProof(null);
+    const result = buildOutgoingAppPayload({
+      element: {
+        [APP_ROUTE_KEY]: "route:/dashboard",
+        [APP_ROOT_LAYOUT_KEY]: "/",
+        "page:/dashboard": "dashboard-page",
+      },
+      cacheEntryReuseProof,
+      layoutFlags: { "layout:/": "s" },
+    });
+
+    expect(isAppElementsRecord(result)).toBe(true);
+    if (isAppElementsRecord(result)) {
+      expect(result[APP_CACHE_ENTRY_REUSE_PROOF_KEY]).toEqual(cacheEntryReuseProof);
+      expect(AppElementsWire.readMetadata(result).cacheEntryReuseProof).toEqual(
+        cacheEntryReuseProof,
+      );
     }
   });
 

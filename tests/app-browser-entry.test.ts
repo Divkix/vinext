@@ -34,20 +34,28 @@ import {
   getMountedSlotIdsHeader,
   normalizeAppElements,
   type AppElements,
+  type AppElementsInterception,
   type AppElementsSlotBinding,
 } from "../packages/vinext/src/server/app-elements.js";
 import { createClientNavigationRenderSnapshot } from "../packages/vinext/src/shims/navigation.js";
 import * as navigationShim from "../packages/vinext/src/shims/navigation.js";
 import {
+  createHistoryStateWithNavigationMetadata,
   createHistoryStateWithPreviousNextUrl,
+  FRESH_APP_NAVIGATION_PAYLOAD_ORIGIN,
+  VISITED_CACHE_APP_NAVIGATION_PAYLOAD_ORIGIN,
   createPendingNavigationCommit,
+  isCacheRestorableAppPayloadMetadata,
   readHistoryStatePreviousNextUrl,
+  readHistoryStateTraversalIndex,
   resolveInterceptionContextFromPreviousNextUrl,
+  resolveHistoryTraversalIntent,
   resolveServerActionRequestState,
   resolvePendingNavigationCommitDispositionDecision,
   type AppRouterState,
   type OperationLane,
 } from "../packages/vinext/src/server/app-browser-state.js";
+import { resolveRscRedirectLifecycleHop } from "../packages/vinext/src/server/app-browser-rsc-redirect.js";
 import {
   applyApprovedVisibleCommit,
   approveHmrVisibleCommit,
@@ -65,6 +73,32 @@ import {
   VINEXT_MOUNTED_SLOTS_HEADER,
   VINEXT_PARAMS_HEADER,
 } from "../packages/vinext/src/server/headers.js";
+import type {
+  GraphVersion,
+  RootBoundaryId,
+  RouteManifest,
+  RouteManifestInterception,
+  RouteManifestRootBoundary,
+  RouteManifestRoute,
+  RouteManifestSlotBinding,
+  StaticSegmentGraph,
+} from "../packages/vinext/src/routing/app-route-graph.js";
+
+type TestRouteManifestRoute = {
+  id?: string;
+  interceptions?: readonly TestRouteManifestInterception[];
+  layoutIds: readonly string[];
+  pattern: string;
+  rootBoundaryId: string | null;
+  slotBindings?: readonly AppElementsSlotBinding[];
+};
+
+type TestRouteManifestInterception = {
+  ownerLayoutId: string | null;
+  slotId: string;
+  sourcePattern: string;
+  targetPattern: string;
+};
 
 function createResolvedElements(
   routeId: string,
@@ -75,9 +109,11 @@ function createResolvedElements(
     ? []
     : [AppElementsWire.encodeLayoutId(rootLayoutTreePath)],
   slotBindings: readonly AppElementsSlotBinding[] = [],
+  interception: AppElementsInterception | null = null,
 ) {
   return normalizeAppElements({
     ...AppElementsWire.createMetadataEntries({
+      interception,
       interceptionContext,
       layoutIds,
       rootLayoutTreePath,
@@ -91,6 +127,7 @@ function createResolvedElements(
 function createState(overrides: Partial<AppRouterState> = {}): AppRouterState {
   return {
     elements: createResolvedElements("route:/initial", "/"),
+    interception: null,
     layoutIds: [AppElementsWire.encodeLayoutId("/")],
     layoutFlags: {},
     navigationSnapshot: createClientNavigationRenderSnapshot("https://example.com/initial", {}),
@@ -104,6 +141,236 @@ function createState(overrides: Partial<AppRouterState> = {}): AppRouterState {
     visibleCommitVersion: 0,
     ...overrides,
   };
+}
+
+function createInterceptionProof(
+  sourceMatchedUrl: string,
+  targetMatchedUrl: string,
+  slotId: string = AppElementsWire.encodeSlotId("modal", sourceMatchedUrl),
+): AppElementsInterception {
+  return {
+    sourceMatchedUrl,
+    sourceRouteId: AppElementsWire.encodeRouteId(sourceMatchedUrl, null),
+    slotId,
+    targetMatchedUrl,
+    targetRouteId: AppElementsWire.encodeRouteId(targetMatchedUrl, null),
+  };
+}
+
+function createTestRouteManifest(routes: readonly TestRouteManifestRoute[]): RouteManifest {
+  const manifestRoutes = new Map<string, RouteManifestRoute>();
+  const slotBindings = new Map<string, RouteManifestSlotBinding>();
+  const interceptions = new Map<string, RouteManifestInterception>();
+  const interceptionsBySlotId = new Map<string, RouteManifestInterception[]>();
+  const rootBoundaries = new Map<RootBoundaryId, RouteManifestRootBoundary>();
+  const routeIdByPattern = new Map(
+    routes.map((route) => [route.pattern, route.id ?? `route:${route.pattern}`]),
+  );
+
+  for (const route of routes) {
+    const routeId = route.id ?? `route:${route.pattern}`;
+    const rootBoundaryId =
+      route.rootBoundaryId === null ? null : (route.rootBoundaryId as RootBoundaryId);
+    const routeSlotBindings = route.slotBindings ?? [];
+    const slotIds = routeSlotBindings.map((binding) => binding.slotId).sort();
+    const patternParts = route.pattern.split("/").filter((segment) => segment.length > 0);
+    manifestRoutes.set(routeId, {
+      id: routeId,
+      isDynamic: patternParts.some((part) => part.startsWith(":")),
+      layoutIds: route.layoutIds,
+      pageId: null,
+      paramNames: patternParts
+        .filter((part) => part.startsWith(":"))
+        .map((part) => part.replace(/^:/, "").replace(/[+*]$/, "")),
+      pattern: route.pattern,
+      patternParts,
+      rootBoundaryId,
+      rootParamNames: [],
+      routeHandlerId: null,
+      slotIds,
+      templateIds: [],
+    });
+
+    for (const binding of routeSlotBindings) {
+      slotBindings.set(`${routeId}::${binding.slotId}`, {
+        defaultId: binding.state === "default" ? `default:${binding.slotId}` : null,
+        id: `${routeId}::${binding.slotId}`,
+        ownerLayoutId: binding.ownerLayoutId,
+        routeId,
+        routeSegments: null,
+        slotId: binding.slotId,
+        state: binding.state,
+      });
+    }
+
+    for (const interception of route.interceptions ?? []) {
+      const targetPatternParts = interception.targetPattern
+        .split("/")
+        .filter((segment) => segment.length > 0);
+      const id = `interception:${interception.slotId}:${interception.sourcePattern}->${interception.targetPattern}`;
+      const manifestInterception = {
+        id,
+        interceptingRouteId: routeIdByPattern.get(interception.sourcePattern) ?? null,
+        ownerLayoutId: interception.ownerLayoutId,
+        slotId: interception.slotId,
+        sourcePattern: interception.sourcePattern,
+        sourcePatternParts: interception.sourcePattern
+          .split("/")
+          .filter((segment) => segment.length > 0),
+        targetPattern: interception.targetPattern,
+        targetPatternParts,
+        targetRouteId: routeIdByPattern.get(interception.targetPattern) ?? null,
+      };
+      interceptions.set(id, manifestInterception);
+      const slotInterceptions = interceptionsBySlotId.get(interception.slotId);
+      if (slotInterceptions) {
+        slotInterceptions.push(manifestInterception);
+      } else {
+        interceptionsBySlotId.set(interception.slotId, [manifestInterception]);
+      }
+    }
+
+    const rootLayoutId = route.layoutIds[0];
+    if (rootBoundaryId !== null && rootLayoutId !== undefined) {
+      rootBoundaries.set(rootBoundaryId, {
+        id: rootBoundaryId,
+        layoutId: rootLayoutId,
+        treePath: route.rootBoundaryId?.replace(/^root-boundary:/, "") ?? "/",
+      });
+    }
+  }
+
+  const segmentGraph: StaticSegmentGraph = {
+    boundaries: new Map(),
+    defaults: new Map(),
+    interceptions,
+    interceptionsBySlotId,
+    layouts: new Map(),
+    pages: new Map(),
+    rootBoundaries,
+    routeHandlers: new Map(),
+    routes: manifestRoutes,
+    slotBindings,
+    slots: new Map(),
+    templates: new Map(),
+  };
+
+  return {
+    graphVersion: "graph:test" as GraphVersion,
+    segmentGraph,
+  };
+}
+
+function rootBoundaryIdFromTreePath(rootLayoutTreePath: string | null): string | null {
+  return rootLayoutTreePath === null ? null : `root-boundary:${rootLayoutTreePath}`;
+}
+
+function normalizeTestRoutePattern(pathname: string): string {
+  try {
+    return decodeURI(pathname);
+  } catch {
+    return pathname;
+  }
+}
+
+function routeIdWithoutInterceptionContext(routeId: string): string {
+  const parsed = AppElementsWire.parseElementKey(routeId);
+  if (parsed?.kind !== "route") return routeId;
+  return AppElementsWire.encodeRouteId(parsed.path, null);
+}
+
+function createRouteManifestForPendingCommit(
+  currentState: AppRouterState,
+  pending: Awaited<ReturnType<typeof createPendingNavigationCommit>>,
+): RouteManifest {
+  const currentPattern =
+    currentState.interception?.sourceMatchedUrl ??
+    normalizeTestRoutePattern(currentState.navigationSnapshot.pathname);
+  const currentRouteId =
+    currentState.interception?.sourceRouteId ??
+    routeIdWithoutInterceptionContext(currentState.routeId);
+  const currentRoute = {
+    id: currentRouteId,
+    layoutIds: currentState.layoutIds,
+    pattern: currentPattern,
+    rootBoundaryId: rootBoundaryIdFromTreePath(currentState.rootLayoutTreePath),
+    slotBindings: currentState.slotBindings,
+  };
+  const pendingInterception = pending.action.interception;
+
+  if (pendingInterception !== null) {
+    const currentMatchesSource =
+      currentRouteId === pendingInterception.sourceRouteId &&
+      currentPattern === pendingInterception.sourceMatchedUrl;
+    const sourceLayoutIds = currentMatchesSource
+      ? currentState.layoutIds
+      : pending.action.layoutIds;
+    const sourceRootLayoutTreePath = currentMatchesSource
+      ? currentState.rootLayoutTreePath
+      : pending.rootLayoutTreePath;
+    return createTestRouteManifest([
+      currentRoute,
+      {
+        id: pendingInterception.sourceRouteId,
+        interceptions: [
+          {
+            ownerLayoutId:
+              pending.action.slotBindings.find(
+                (binding) => binding.slotId === pendingInterception.slotId,
+              )?.ownerLayoutId ?? null,
+            slotId: pendingInterception.slotId,
+            sourcePattern: pendingInterception.sourceMatchedUrl,
+            targetPattern: pendingInterception.targetMatchedUrl,
+          },
+        ],
+        layoutIds: sourceLayoutIds,
+        pattern: pendingInterception.sourceMatchedUrl,
+        rootBoundaryId: rootBoundaryIdFromTreePath(sourceRootLayoutTreePath),
+        slotBindings: pending.action.slotBindings,
+      },
+      {
+        id: pendingInterception.targetRouteId,
+        layoutIds: pending.action.layoutIds,
+        pattern: pendingInterception.targetMatchedUrl,
+        rootBoundaryId: rootBoundaryIdFromTreePath(pending.rootLayoutTreePath),
+      },
+    ]);
+  }
+
+  return createTestRouteManifest([
+    currentRoute,
+    {
+      id: routeIdWithoutInterceptionContext(pending.routeId),
+      layoutIds: pending.action.layoutIds,
+      pattern: normalizeTestRoutePattern(pending.action.navigationSnapshot.pathname),
+      rootBoundaryId: rootBoundaryIdFromTreePath(pending.rootLayoutTreePath),
+      slotBindings: pending.action.slotBindings,
+    },
+  ]);
+}
+
+function createRootChangeRouteManifest(
+  options: {
+    currentPattern?: string;
+    currentRouteId?: string;
+    targetPattern?: string;
+    targetRouteId?: string;
+  } = {},
+): RouteManifest {
+  return createTestRouteManifest([
+    {
+      id: options.currentRouteId ?? "route:/initial",
+      layoutIds: [AppElementsWire.encodeLayoutId("/(marketing)")],
+      pattern: options.currentPattern ?? "/initial",
+      rootBoundaryId: "root-boundary:/(marketing)",
+    },
+    {
+      id: options.targetRouteId ?? "route:/dashboard",
+      layoutIds: [AppElementsWire.encodeLayoutId("/(dashboard)")],
+      pattern: options.targetPattern ?? "/dashboard",
+      rootBoundaryId: "root-boundary:/(dashboard)",
+    },
+  ]);
 }
 
 type TestPendingDispositionOptions = {
@@ -128,6 +395,7 @@ async function resolveTestPendingNavigationCommitDispositionDecision(
     visibleCommitVersion: options.currentVisibleCommitVersion,
   });
   const pending = await createPendingNavigationCommit({
+    payloadOrigin: FRESH_APP_NAVIGATION_PAYLOAD_ORIGIN,
     currentState: startState,
     nextElements: Promise.resolve(
       createResolvedElements("route:/dashboard", options.nextRootLayoutTreePath),
@@ -142,12 +410,16 @@ async function resolveTestPendingNavigationCommitDispositionDecision(
     activeNavigationId: options.activeNavigationId,
     currentState,
     pending,
+    routeManifest: createRouteManifestForPendingCommit(currentState, pending),
     startedNavigationId: options.startedNavigationId,
   });
 }
 
-function createControllerHarness(initialState: AppRouterState = createState()) {
-  const controller = createAppBrowserNavigationController();
+function createControllerHarness(
+  initialState: AppRouterState = createState(),
+  deps?: Parameters<typeof createAppBrowserNavigationController>[0],
+) {
+  const controller = createAppBrowserNavigationController(deps);
   const stateRef: { current: AppRouterState } = { current: initialState };
   const setBrowserRouterState = vi.fn((value: AppRouterState | Promise<AppRouterState>) => {
     if (!(value instanceof Promise)) {
@@ -167,6 +439,7 @@ function createControllerHarness(initialState: AppRouterState = createState()) {
 type ApprovedTestCommitOptions = {
   activeNavigationId?: number;
   extraEntries?: Record<string, unknown>;
+  interception?: AppElementsInterception | null;
   interceptionContext?: string | null;
   layoutIds?: readonly string[];
   layoutFlags?: AppRouterState["layoutFlags"];
@@ -187,6 +460,7 @@ async function applyApprovedTestCommit(
   options: ApprovedTestCommitOptions,
 ): Promise<AppRouterState> {
   const pending = await createPendingNavigationCommit({
+    payloadOrigin: FRESH_APP_NAVIGATION_PAYLOAD_ORIGIN,
     currentState: state,
     nextElements: Promise.resolve(
       createResolvedElements(
@@ -199,6 +473,7 @@ async function applyApprovedTestCommit(
         },
         options.layoutIds,
         options.slotBindings,
+        options.interception ?? null,
       ),
     ),
     navigationSnapshot: options.navigationSnapshot ?? state.navigationSnapshot,
@@ -212,6 +487,7 @@ async function applyApprovedTestCommit(
     activeNavigationId,
     currentState: state,
     pending,
+    routeManifest: createRouteManifestForPendingCommit(state, pending),
     startedNavigationId: options.startedNavigationId ?? activeNavigationId,
     targetHref: options.targetHref ?? "https://example.com/initial",
   });
@@ -464,6 +740,7 @@ describe("app browser entry navigation scheduling", () => {
         navigationSnapshot: createClientNavigationRenderSnapshot("https://example.com/initial", {}),
         nextElements: Promise.resolve(createResolvedElements("route:/dashboard", "/")),
         operationLane: "navigation",
+        payloadOrigin: FRESH_APP_NAVIGATION_PAYLOAD_ORIGIN,
         params: {},
         pendingRouterState: null,
         previousNextUrl: null,
@@ -482,6 +759,7 @@ describe("app browser entry state helpers", () => {
   it("requires renderId when creating pending commits", () => {
     // @ts-expect-error renderId is required to avoid duplicate commit ids.
     void createPendingNavigationCommit({
+      payloadOrigin: FRESH_APP_NAVIGATION_PAYLOAD_ORIGIN,
       currentState: createState(),
       nextElements: Promise.resolve(createResolvedElements("route:/dashboard", "/")),
       navigationSnapshot: createState().navigationSnapshot,
@@ -531,6 +809,7 @@ describe("app browser entry state helpers", () => {
 
     const state = createState();
     const pending = await createPendingNavigationCommit({
+      payloadOrigin: FRESH_APP_NAVIGATION_PAYLOAD_ORIGIN,
       currentState: state,
       nextElements: Promise.resolve(nextElements),
       navigationSnapshot: state.navigationSnapshot,
@@ -542,6 +821,7 @@ describe("app browser entry state helpers", () => {
       activeNavigationId: 1,
       currentState: state,
       pending,
+      routeManifest: createRouteManifestForPendingCommit(state, pending),
       startedNavigationId: 1,
       targetHref: "https://example.com/next",
     });
@@ -590,11 +870,20 @@ describe("app browser entry state helpers", () => {
 
   it("carries interception context through pending navigation commits", async () => {
     const pending = await createPendingNavigationCommit({
+      payloadOrigin: FRESH_APP_NAVIGATION_PAYLOAD_ORIGIN,
       currentState: createState(),
       nextElements: Promise.resolve(
-        createResolvedElements("route:/photos/42\0/feed", "/", "/feed", {
-          "page:/photos/42": React.createElement("main", null, "photo"),
-        }),
+        createResolvedElements(
+          "route:/photos/42\0/feed",
+          "/",
+          "/feed",
+          {
+            "page:/photos/42": React.createElement("main", null, "photo"),
+          },
+          [AppElementsWire.encodeLayoutId("/")],
+          [],
+          createInterceptionProof("/feed", "/photos/42"),
+        ),
       ),
       navigationSnapshot: createState().navigationSnapshot,
       operationLane: "navigation",
@@ -604,8 +893,10 @@ describe("app browser entry state helpers", () => {
     });
 
     expect(pending.routeId).toBe("route:/photos/42\0/feed");
+    expect(pending.interception).toEqual(createInterceptionProof("/feed", "/photos/42"));
     expect(pending.interceptionContext).toBe("/feed");
     expect(pending.previousNextUrl).toBe("/feed");
+    expect(pending.action.interception).toEqual(createInterceptionProof("/feed", "/photos/42"));
     expect(pending.action.interceptionContext).toBe("/feed");
     expect(pending.action.previousNextUrl).toBe("/feed");
   });
@@ -622,6 +913,7 @@ describe("app browser entry state helpers", () => {
     });
 
     const pending = await createPendingNavigationCommit({
+      payloadOrigin: FRESH_APP_NAVIGATION_PAYLOAD_ORIGIN,
       currentState: interceptedState,
       nextElements: Promise.resolve(createResolvedElements("route:/feed", "/")),
       navigationSnapshot: createState().navigationSnapshot,
@@ -640,6 +932,7 @@ describe("app browser entry state helpers", () => {
       rootLayoutTreePath: "/(marketing)",
     });
     const pending = await createPendingNavigationCommit({
+      payloadOrigin: FRESH_APP_NAVIGATION_PAYLOAD_ORIGIN,
       currentState,
       nextElements: Promise.resolve(createResolvedElements("route:/dashboard", "/(dashboard)")),
       navigationSnapshot: currentState.navigationSnapshot,
@@ -653,6 +946,7 @@ describe("app browser entry state helpers", () => {
         activeNavigationId: 3,
         currentState,
         pending,
+        routeManifest: createRouteManifestForPendingCommit(currentState, pending),
         startedNavigationId: 3,
       }).disposition,
     ).toBe("hard-navigate");
@@ -665,6 +959,7 @@ describe("app browser entry state helpers", () => {
     });
     let resolved = false;
     const pending = createPendingNavigationCommit({
+      payloadOrigin: FRESH_APP_NAVIGATION_PAYLOAD_ORIGIN,
       currentState: createState(),
       nextElements,
       navigationSnapshot: createState().navigationSnapshot,
@@ -702,6 +997,7 @@ describe("app browser entry state helpers", () => {
     });
 
     const pending = await createPendingNavigationCommit({
+      payloadOrigin: FRESH_APP_NAVIGATION_PAYLOAD_ORIGIN,
       currentState,
       nextElements: Promise.resolve(createResolvedElements("route:/dashboard", "/")),
       navigationSnapshot: currentState.navigationSnapshot,
@@ -721,6 +1017,7 @@ describe("app browser entry state helpers", () => {
       activeNavigationId: 1,
       currentState,
       pending,
+      routeManifest: createRouteManifestForPendingCommit(currentState, pending),
       startedNavigationId: 1,
       targetHref: "https://example.com/dashboard",
     });
@@ -742,6 +1039,7 @@ describe("app browser entry state helpers", () => {
   it("skips a pending commit when a newer navigation has become active", async () => {
     const currentState = createState();
     const pending = await createPendingNavigationCommit({
+      payloadOrigin: FRESH_APP_NAVIGATION_PAYLOAD_ORIGIN,
       currentState,
       nextElements: Promise.resolve(createResolvedElements("route:/dashboard", "/")),
       navigationSnapshot: currentState.navigationSnapshot,
@@ -755,6 +1053,7 @@ describe("app browser entry state helpers", () => {
         activeNavigationId: 5,
         currentState,
         pending,
+        routeManifest: createRouteManifestForPendingCommit(currentState, pending),
         startedNavigationId: 4,
       }).disposition,
     ).toBe("skip");
@@ -767,6 +1066,7 @@ describe("app browser entry state helpers", () => {
       visibleCommitVersion: 5,
     });
     const pending = await createPendingNavigationCommit({
+      payloadOrigin: FRESH_APP_NAVIGATION_PAYLOAD_ORIGIN,
       currentState: refreshStartState,
       nextElements: Promise.resolve(createResolvedElements("route:/dashboard", "/")),
       navigationSnapshot: refreshStartState.navigationSnapshot,
@@ -779,6 +1079,7 @@ describe("app browser entry state helpers", () => {
       activeNavigationId: 7,
       currentState: latestState,
       pending,
+      routeManifest: createRouteManifestForPendingCommit(latestState, pending),
       startedNavigationId: 7,
       targetHref: "https://example.com/dashboard",
     });
@@ -816,6 +1117,7 @@ describe("app browser entry state helpers", () => {
       visibleCommitVersion: 3,
     });
     const pending = await createPendingNavigationCommit({
+      payloadOrigin: FRESH_APP_NAVIGATION_PAYLOAD_ORIGIN,
       currentState: traverseStartState,
       nextElements: Promise.resolve(createResolvedElements("route:/previous", "/")),
       navigationSnapshot: traverseStartState.navigationSnapshot,
@@ -829,6 +1131,7 @@ describe("app browser entry state helpers", () => {
       activeNavigationId: 8,
       currentState: latestState,
       pending,
+      routeManifest: createRouteManifestForPendingCommit(latestState, pending),
       startedNavigationId: 8,
       targetHref: "https://example.com/previous",
     });
@@ -960,7 +1263,73 @@ describe("app browser entry state helpers", () => {
     ]);
   });
 
-  it("traces unknown root-layout identity as a legacy soft-commit fallback", async () => {
+  it("rejects cache-restored pending commits when cache-entry proof metadata is absent", async () => {
+    const currentState = createState({
+      navigationSnapshot: createClientNavigationRenderSnapshot(
+        "https://example.com/dashboard/profile",
+        {},
+      ),
+      routeId: "route:/dashboard/profile",
+    });
+    const pending = await createPendingNavigationCommit({
+      currentState,
+      nextElements: Promise.resolve(
+        createResolvedElements(
+          "route:/dashboard/settings",
+          "/",
+          null,
+          {
+            "page:/dashboard/settings": React.createElement("main", null, "settings"),
+          },
+          ["layout:/"],
+        ),
+      ),
+      navigationSnapshot: createClientNavigationRenderSnapshot(
+        "https://example.com/dashboard/settings",
+        {},
+      ),
+      operationLane: "navigation",
+      renderId: 2,
+      payloadOrigin: VISITED_CACHE_APP_NAVIGATION_PAYLOAD_ORIGIN,
+      type: "navigate",
+    });
+
+    const decision = resolvePendingNavigationCommitDispositionDecision({
+      activeNavigationId: 2,
+      currentState,
+      pending,
+      routeManifest: createRouteManifestForPendingCommit(currentState, pending),
+      startedNavigationId: 2,
+      targetHref: "https://example.com/dashboard/settings",
+    });
+
+    expect(decision.disposition).toBe("hard-navigate");
+    expect(decision.trace.entries).toEqual([
+      {
+        code: NavigationTraceReasonCodes.cacheProofRejected,
+        fields: {
+          activeNavigationId: 2,
+          cacheProofCode: "CP_CACHE_ENTRY_PROOF_MISSING",
+          currentRootLayoutTreePath: "/",
+          currentVisibleCommitVersion: 0,
+          nextRootLayoutTreePath: "/",
+          startedNavigationId: 2,
+          startedVisibleCommitVersion: 0,
+          targetHref: "https://example.com/dashboard/settings",
+        },
+      },
+    ]);
+  });
+
+  it("does not classify unproofed payload metadata as cache-restorable", () => {
+    const elements = createResolvedElements("route:/dashboard/settings", "/", null, {
+      "page:/dashboard/settings": React.createElement("main", null, "settings"),
+    });
+
+    expect(isCacheRestorableAppPayloadMetadata(AppElementsWire.readMetadata(elements))).toBe(false);
+  });
+
+  it("traces unknown root-layout identity without preserving absent slots", async () => {
     const decision = await resolveTestPendingNavigationCommitDispositionDecision({
       activeNavigationId: 2,
       currentVisibleCommitVersion: 0,
@@ -1000,8 +1369,77 @@ describe("app browser entry state helpers", () => {
     ]);
   });
 
+  it("normalizes encoded route-state paths before validating interception proof", async () => {
+    const slotId = AppElementsWire.encodeSlotId("modal", "/café");
+    const currentState = createState({
+      layoutIds: [AppElementsWire.encodeLayoutId("/"), AppElementsWire.encodeLayoutId("/café")],
+      navigationSnapshot: createClientNavigationRenderSnapshot("https://example.com/caf%C3%A9", {}),
+      rootLayoutTreePath: "/",
+      routeId: AppElementsWire.encodeRouteId("/café", null),
+      slotBindings: [
+        {
+          ownerLayoutId: AppElementsWire.encodeLayoutId("/café"),
+          slotId,
+          state: "default",
+        },
+      ],
+    });
+    const pending = await createPendingNavigationCommit({
+      payloadOrigin: FRESH_APP_NAVIGATION_PAYLOAD_ORIGIN,
+      currentState,
+      nextElements: Promise.resolve(
+        createResolvedElements(
+          AppElementsWire.encodeRouteId("/photos/café", "/caf%C3%A9"),
+          "/",
+          "/caf%C3%A9",
+          {
+            "page:/photos/café": React.createElement("main", null, "photo"),
+          },
+          [AppElementsWire.encodeLayoutId("/"), AppElementsWire.encodeLayoutId("/café")],
+          [
+            {
+              ownerLayoutId: AppElementsWire.encodeLayoutId("/café"),
+              slotId,
+              state: "active",
+            },
+          ],
+          createInterceptionProof("/café", "/photos/café", slotId),
+        ),
+      ),
+      navigationSnapshot: createClientNavigationRenderSnapshot(
+        "https://example.com/photos/caf%C3%A9",
+        {},
+      ),
+      operationLane: "navigation",
+      previousNextUrl: "/caf%C3%A9",
+      renderId: 1,
+      type: "navigate",
+    });
+
+    const decision = resolvePendingNavigationCommitDispositionDecision({
+      activeNavigationId: 1,
+      currentState,
+      pending,
+      routeManifest: createRouteManifestForPendingCommit(currentState, pending),
+      startedNavigationId: 1,
+    });
+
+    expect(decision.disposition).toBe("dispatch");
+    if (decision.disposition !== "dispatch") {
+      throw new Error("Expected dispatch decision");
+    }
+    expect(decision.preserveElementIds).toEqual([
+      AppElementsWire.encodeLayoutId("/"),
+      AppElementsWire.encodeLayoutId("/café"),
+    ]);
+    expect(decision.trace.entries[0]?.code).toBe(
+      NavigationTraceReasonCodes.interceptedCommitCurrent,
+    );
+  });
+
   it("builds a merge commit for refresh and server-action payloads", async () => {
     const refreshCommit = await createPendingNavigationCommit({
+      payloadOrigin: FRESH_APP_NAVIGATION_PAYLOAD_ORIGIN,
       currentState: createState(),
       nextElements: Promise.resolve(createResolvedElements("route:/dashboard", "/")),
       navigationSnapshot: createState().navigationSnapshot,
@@ -1014,12 +1452,132 @@ describe("app browser entry state helpers", () => {
     expect(refreshCommit.action.type).toBe("navigate");
     expect(refreshCommit.routeId).toBe("route:/dashboard");
     expect(refreshCommit.rootLayoutTreePath).toBe("/");
-    expect(refreshCommit.previousNextUrl).toBe("/feed");
+    expect(refreshCommit.previousNextUrl).toBeNull();
+  });
+
+  it("commits non-intercepted context-only payloads without preserving stale interception state", async () => {
+    const currentState = createState({
+      interception: createInterceptionProof("/feed", "/photos/42"),
+      interceptionContext: "/feed",
+      layoutIds: [AppElementsWire.encodeLayoutId("/"), AppElementsWire.encodeLayoutId("/feed")],
+      navigationSnapshot: createClientNavigationRenderSnapshot("https://example.com/photos/42", {}),
+      previousNextUrl: "/feed",
+      rootLayoutTreePath: "/",
+      routeId: AppElementsWire.encodeRouteId("/photos/42", "/feed"),
+    });
+
+    const pending = await createPendingNavigationCommit({
+      payloadOrigin: FRESH_APP_NAVIGATION_PAYLOAD_ORIGIN,
+      currentState,
+      nextElements: Promise.resolve(
+        createResolvedElements(
+          AppElementsWire.encodeRouteId("/feed", "/feed"),
+          "/",
+          "/feed",
+          {
+            [AppElementsWire.encodePageId("/feed", "/feed")]: React.createElement(
+              "main",
+              null,
+              "feed",
+            ),
+          },
+          [AppElementsWire.encodeLayoutId("/"), AppElementsWire.encodeLayoutId("/feed")],
+        ),
+      ),
+      navigationSnapshot: createClientNavigationRenderSnapshot("https://example.com/feed", {}),
+      operationLane: "refresh",
+      previousNextUrl: "/feed",
+      renderId: 1,
+      type: "navigate",
+    });
+
+    const decision = resolvePendingNavigationCommitDispositionDecision({
+      activeNavigationId: 1,
+      currentState,
+      pending,
+      routeManifest: createRouteManifestForPendingCommit(currentState, pending),
+      startedNavigationId: 1,
+    });
+
+    expect(pending.interception).toBeNull();
+    expect(pending.interceptionContext).toBe("/feed");
+    expect(pending.previousNextUrl).toBeNull();
+    expect(decision.disposition).toBe("dispatch");
+    expect(decision.trace.entries[0]?.code).toBe(NavigationTraceReasonCodes.commitCurrent);
+
+    const approval = approvePendingNavigationCommit({
+      activeNavigationId: 1,
+      currentState,
+      pending,
+      routeManifest: createRouteManifestForPendingCommit(currentState, pending),
+      startedNavigationId: 1,
+      targetHref: "https://example.com/feed",
+    });
+    if (approval.approvedCommit === null) {
+      throw new Error("Expected context-only payload to commit");
+    }
+    const contextOnlyState = applyApprovedVisibleCommit(currentState, approval.approvedCommit);
+    expect(contextOnlyState.interception).toBeNull();
+    expect(contextOnlyState.previousNextUrl).toBeNull();
+    expect(contextOnlyState.routeId).toBe(AppElementsWire.encodeRouteId("/feed", "/feed"));
+
+    const interceptedPending = await createPendingNavigationCommit({
+      payloadOrigin: FRESH_APP_NAVIGATION_PAYLOAD_ORIGIN,
+      currentState: contextOnlyState,
+      nextElements: Promise.resolve(
+        createResolvedElements(
+          AppElementsWire.encodeRouteId("/photos/42", "/feed"),
+          "/",
+          "/feed",
+          {
+            [AppElementsWire.encodeRouteId("/photos/42", "/feed")]: React.createElement(
+              "main",
+              null,
+              "photo",
+            ),
+            [AppElementsWire.encodeSlotId("modal", "/feed")]: React.createElement(
+              "div",
+              null,
+              "modal",
+            ),
+          },
+          [AppElementsWire.encodeLayoutId("/"), AppElementsWire.encodeLayoutId("/feed")],
+          [
+            {
+              ownerLayoutId: AppElementsWire.encodeLayoutId("/feed"),
+              slotId: AppElementsWire.encodeSlotId("modal", "/feed"),
+              state: "active",
+            },
+          ],
+          createInterceptionProof("/feed", "/photos/42"),
+        ),
+      ),
+      navigationSnapshot: createClientNavigationRenderSnapshot("https://example.com/photos/42", {}),
+      operationLane: "navigation",
+      previousNextUrl: "/feed",
+      renderId: 2,
+      type: "navigate",
+    });
+
+    const interceptedApproval = approvePendingNavigationCommit({
+      activeNavigationId: 2,
+      currentState: contextOnlyState,
+      pending: interceptedPending,
+      routeManifest: createRouteManifestForPendingCommit(contextOnlyState, interceptedPending),
+      startedNavigationId: 2,
+      targetHref: "https://example.com/photos/42",
+    });
+
+    expect(interceptedApproval.decision.disposition).toBe("commit");
+    expect(interceptedApproval.decision.trace.entries[1]?.code).toBe(
+      NavigationTraceReasonCodes.interceptedCommitCurrent,
+    );
   });
 
   it("creates an approved visible commit only after the current operation decision allows mutation", async () => {
     const currentState = createState();
     const pending = await createPendingNavigationCommit({
+      payloadOrigin: FRESH_APP_NAVIGATION_PAYLOAD_ORIGIN,
       currentState,
       nextElements: Promise.resolve(
         createResolvedElements("route:/dashboard", "/", null, {
@@ -1036,6 +1594,7 @@ describe("app browser entry state helpers", () => {
       activeNavigationId: 4,
       currentState,
       pending,
+      routeManifest: createRouteManifestForPendingCommit(currentState, pending),
       startedNavigationId: 4,
       targetHref: "https://example.com/dashboard",
     });
@@ -1083,9 +1642,10 @@ describe("app browser entry state helpers", () => {
     });
   });
 
-  it("traces unknown root-layout approval as a visible commit with an uncertainty reason", async () => {
+  it("traces unknown root-layout approval as an unproven payload commit", async () => {
     const currentState = createState();
     const pending = await createPendingNavigationCommit({
+      payloadOrigin: FRESH_APP_NAVIGATION_PAYLOAD_ORIGIN,
       currentState,
       nextElements: Promise.resolve(createResolvedElements("route:/legacy-payload", null)),
       navigationSnapshot: currentState.navigationSnapshot,
@@ -1098,6 +1658,7 @@ describe("app browser entry state helpers", () => {
       activeNavigationId: 6,
       currentState,
       pending,
+      routeManifest: createRouteManifestForPendingCommit(currentState, pending),
       startedNavigationId: 6,
       targetHref: "https://example.com/legacy-payload",
     });
@@ -1106,7 +1667,7 @@ describe("app browser entry state helpers", () => {
     if (approval.decision.disposition !== "commit") {
       throw new Error("Expected visible commit approval");
     }
-    expect(approval.decision.preserveAbsentSlots).toBe(true);
+    expect(approval.decision.preserveAbsentSlots).toBe(false);
     expect(approval.decision.trace.entries[0]?.code).toBe(
       NavigationTraceTransactionCodes.visibleCommit,
     );
@@ -1119,6 +1680,7 @@ describe("app browser entry state helpers", () => {
   it("approves HMR visible commits through a named trusted recovery path", async () => {
     const currentState = createState();
     const pending = await createPendingNavigationCommit({
+      payloadOrigin: FRESH_APP_NAVIGATION_PAYLOAD_ORIGIN,
       currentState,
       nextElements: Promise.resolve(
         createResolvedElements("route:/hmr", "/", null, {
@@ -1153,6 +1715,7 @@ describe("app browser entry state helpers", () => {
   it("rejects non-HMR commits on the HMR approval path", async () => {
     const currentState = createState();
     const pending = await createPendingNavigationCommit({
+      payloadOrigin: FRESH_APP_NAVIGATION_PAYLOAD_ORIGIN,
       currentState,
       nextElements: Promise.resolve(createResolvedElements("route:/dashboard", "/")),
       navigationSnapshot: currentState.navigationSnapshot,
@@ -1176,6 +1739,7 @@ describe("app browser entry state helpers", () => {
       "page:/next": React.createElement("main", null, "next"),
     });
     const pending = await createPendingNavigationCommit({
+      payloadOrigin: FRESH_APP_NAVIGATION_PAYLOAD_ORIGIN,
       currentState,
       nextElements: Promise.resolve(nextElements),
       navigationSnapshot: currentState.navigationSnapshot,
@@ -1188,6 +1752,7 @@ describe("app browser entry state helpers", () => {
       activeNavigationId: 4,
       currentState,
       pending,
+      routeManifest: createRouteManifestForPendingCommit(currentState, pending),
       startedNavigationId: 4,
       targetHref: "https://example.com/next",
     });
@@ -1213,6 +1778,7 @@ describe("app browser entry state helpers", () => {
       }),
     });
     const pending = await createPendingNavigationCommit({
+      payloadOrigin: FRESH_APP_NAVIGATION_PAYLOAD_ORIGIN,
       currentState,
       nextElements: Promise.resolve(createResolvedElements("route:/feed", "/")),
       navigationSnapshot: currentState.navigationSnapshot,
@@ -1226,6 +1792,7 @@ describe("app browser entry state helpers", () => {
       activeNavigationId: 4,
       currentState,
       pending,
+      routeManifest: createRouteManifestForPendingCommit(currentState, pending),
       startedNavigationId: 4,
       targetHref: "https://example.com/feed",
     });
@@ -1249,6 +1816,7 @@ describe("app browser entry state helpers", () => {
       rootLayoutTreePath: "/(marketing)",
     });
     const pending = await createPendingNavigationCommit({
+      payloadOrigin: FRESH_APP_NAVIGATION_PAYLOAD_ORIGIN,
       currentState,
       nextElements: Promise.resolve(createResolvedElements("route:/dashboard", "/(dashboard)")),
       navigationSnapshot: currentState.navigationSnapshot,
@@ -1261,6 +1829,7 @@ describe("app browser entry state helpers", () => {
       activeNavigationId: 8,
       currentState,
       pending,
+      routeManifest: createRouteManifestForPendingCommit(currentState, pending),
       startedNavigationId: 7,
       targetHref: "https://example.com/dashboard",
     });
@@ -1277,6 +1846,7 @@ describe("app browser entry state helpers", () => {
       activeNavigationId: 8,
       currentState,
       pending,
+      routeManifest: createRouteManifestForPendingCommit(currentState, pending),
       startedNavigationId: 8,
       targetHref: "https://example.com/dashboard?from=planner",
     });
@@ -1322,14 +1892,37 @@ describe("app browser entry state helpers", () => {
   });
 
   it("stores previousNextUrl on approved navigate commits", async () => {
-    const state = createState();
+    const state = createState({
+      layoutIds: [AppElementsWire.encodeLayoutId("/"), AppElementsWire.encodeLayoutId("/feed")],
+      navigationSnapshot: createClientNavigationRenderSnapshot("https://example.com/feed", {}),
+      routeId: "route:/feed",
+      slotBindings: [
+        {
+          ownerLayoutId: AppElementsWire.encodeLayoutId("/feed"),
+          slotId: AppElementsWire.encodeSlotId("modal", "/feed"),
+          state: "default",
+        },
+      ],
+    });
+    const interception = createInterceptionProof("/feed", "/photos/42");
     const nextState = await applyApprovedTestCommit(state, {
+      interception,
       interceptionContext: "/feed",
+      layoutIds: [AppElementsWire.encodeLayoutId("/"), AppElementsWire.encodeLayoutId("/feed")],
+      navigationSnapshot: createClientNavigationRenderSnapshot("https://example.com/photos/42", {}),
       previousNextUrl: "/feed",
       rootLayoutTreePath: "/",
       routeId: "route:/photos/42\0/feed",
+      slotBindings: [
+        {
+          ownerLayoutId: AppElementsWire.encodeLayoutId("/feed"),
+          slotId: AppElementsWire.encodeSlotId("modal", "/feed"),
+          state: "active",
+        },
+      ],
     });
 
+    expect(nextState.interception).toEqual(interception);
     expect(nextState.interceptionContext).toBe("/feed");
     expect(nextState.previousNextUrl).toBe("/feed");
   });
@@ -1375,6 +1968,7 @@ describe("app browser navigation controller", () => {
       );
 
       void controller.renderNavigationPayload({
+        payloadOrigin: FRESH_APP_NAVIGATION_PAYLOAD_ORIGIN,
         actionType: "navigate",
         createNavigationCommitEffect: () => vi.fn(),
         historyUpdateMode: "push",
@@ -1398,6 +1992,71 @@ describe("app browser navigation controller", () => {
       expect(stateRef.current.routeId).toBe("route:/dashboard");
     } finally {
       clearSpy.mockRestore();
+      detach();
+    }
+  });
+
+  it("reads RouteManifest lazily after generated browser globals are assigned", async () => {
+    let routeManifest: RouteManifest | null = null;
+    const performHardNavigation = vi.fn(() => true);
+    const { controller, detach, stateRef } = createControllerHarness(
+      createState({
+        layoutIds: ["layout:/stale"],
+        navigationSnapshot: createClientNavigationRenderSnapshot("https://example.com/app", {}),
+        rootLayoutTreePath: "/",
+        routeId: "route:/app",
+      }),
+      {
+        getRouteManifest: () => routeManifest,
+        performHardNavigation,
+      },
+    );
+
+    try {
+      const pendingRouterState = controller.beginPendingBrowserRouterState();
+      const navId = controller.beginNavigation();
+      let resolvePayload!: (elements: AppElements) => void;
+      const nextElements = new Promise<AppElements>((resolve) => {
+        resolvePayload = resolve;
+      });
+
+      const result = controller.renderNavigationPayload({
+        payloadOrigin: FRESH_APP_NAVIGATION_PAYLOAD_ORIGIN,
+        actionType: "navigate",
+        createNavigationCommitEffect: () => vi.fn(),
+        historyUpdateMode: "push",
+        navigationSnapshot: createClientNavigationRenderSnapshot(
+          "https://example.com/marketing",
+          {},
+        ),
+        nextElements,
+        operationLane: "navigation",
+        params: {},
+        pendingRouterState,
+        previousNextUrl: null,
+        targetHref: "https://example.com/marketing",
+        navId,
+      });
+
+      routeManifest = createTestRouteManifest([
+        {
+          layoutIds: ["layout:/app"],
+          pattern: "/app",
+          rootBoundaryId: "root-boundary:/app",
+        },
+        {
+          layoutIds: ["layout:/marketing"],
+          pattern: "/marketing",
+          rootBoundaryId: "root-boundary:/marketing",
+        },
+      ]);
+      resolvePayload(createResolvedElements("route:/marketing", "/", null, {}, ["layout:/stale"]));
+
+      await expect(result).resolves.toBe("hard-navigate");
+      await expect(pendingRouterState.promise).resolves.toBe(stateRef.current);
+      expect(performHardNavigation).toHaveBeenCalledWith("https://example.com/marketing");
+      expect(stateRef.current.routeId).toBe("route:/app");
+    } finally {
       detach();
     }
   });
@@ -1437,6 +2096,7 @@ describe("app browser navigation controller", () => {
 
     try {
       void controller.renderNavigationPayload({
+        payloadOrigin: FRESH_APP_NAVIGATION_PAYLOAD_ORIGIN,
         actionType: "navigate",
         createNavigationCommitEffect,
         historyUpdateMode: "push",
@@ -1462,6 +2122,67 @@ describe("app browser navigation controller", () => {
     }
   });
 
+  it("hard-navigates cache-restored payloads missing cache-entry proof metadata", async () => {
+    const performHardNavigation = vi.fn(() => true);
+    const createNavigationCommitEffect = vi.fn(() => vi.fn());
+    const currentState = createState({
+      navigationSnapshot: createClientNavigationRenderSnapshot(
+        "https://example.com/dashboard/profile",
+        {},
+      ),
+      routeId: "route:/dashboard/profile",
+    });
+    const routeManifest = createTestRouteManifest([
+      {
+        id: "route:/dashboard/profile",
+        layoutIds: currentState.layoutIds,
+        pattern: "/dashboard/profile",
+        rootBoundaryId: "root-boundary:/",
+      },
+      {
+        id: "route:/dashboard/settings",
+        layoutIds: [AppElementsWire.encodeLayoutId("/")],
+        pattern: "/dashboard/settings",
+        rootBoundaryId: "root-boundary:/",
+      },
+    ]);
+    const { controller, detach, stateRef } = createControllerHarness(currentState, {
+      getRouteManifest: () => routeManifest,
+      performHardNavigation,
+    });
+
+    try {
+      const result = await controller.renderNavigationPayload({
+        actionType: "navigate",
+        createNavigationCommitEffect,
+        historyUpdateMode: "push",
+        navigationSnapshot: createClientNavigationRenderSnapshot(
+          "https://example.com/dashboard/settings",
+          {},
+        ),
+        nextElements: Promise.resolve(
+          createResolvedElements("route:/dashboard/settings", "/", null, {
+            "page:/dashboard/settings": React.createElement("main", null, "settings"),
+          }),
+        ),
+        operationLane: "navigation",
+        payloadOrigin: VISITED_CACHE_APP_NAVIGATION_PAYLOAD_ORIGIN,
+        params: {},
+        pendingRouterState: null,
+        previousNextUrl: null,
+        targetHref: "https://example.com/dashboard/settings",
+        navId: controller.beginNavigation(),
+      });
+
+      expect(result).toBe("hard-navigate");
+      expect(performHardNavigation).toHaveBeenCalledWith("https://example.com/dashboard/settings");
+      expect(createNavigationCommitEffect).not.toHaveBeenCalled();
+      expect(stateRef.current.routeId).toBe("route:/dashboard/profile");
+    } finally {
+      detach();
+    }
+  });
+
   it("skips stale browser navigations before committing their payload", async () => {
     const { controller, detach } = createControllerHarness();
     const { assign } = stubWindow("https://example.com/initial");
@@ -1474,6 +2195,7 @@ describe("app browser navigation controller", () => {
     try {
       const navId = controller.beginNavigation();
       const renderPromise = controller.renderNavigationPayload({
+        payloadOrigin: FRESH_APP_NAVIGATION_PAYLOAD_ORIGIN,
         actionType: "navigate",
         createNavigationCommitEffect,
         historyUpdateMode: "push",
@@ -1518,6 +2240,7 @@ describe("app browser navigation controller", () => {
     try {
       const navId = controller.beginNavigation();
       const renderPromise = controller.renderNavigationPayload({
+        payloadOrigin: FRESH_APP_NAVIGATION_PAYLOAD_ORIGIN,
         actionType: "navigate",
         createNavigationCommitEffect: () => commitEffect,
         historyUpdateMode: "push",
@@ -1590,6 +2313,46 @@ describe("app browser navigation controller", () => {
         state: "committed",
         visibleCommitVersion: 1,
       });
+    } finally {
+      detach();
+    }
+  });
+
+  it("syncs cleared previousNextUrl after same-URL server action commits", async () => {
+    const interception = createInterceptionProof("/feed", "/photos/42");
+    const initialState = createState({
+      interception,
+      interceptionContext: "/feed",
+      previousNextUrl: "/feed",
+      rootLayoutTreePath: "/",
+      routeId: "route:/photos/42\0/feed",
+      navigationSnapshot: createClientNavigationRenderSnapshot("https://example.com/photos/42", {}),
+    });
+    const syncHistoryStatePreviousNextUrl = vi.fn();
+    const { controller, detach, stateRef } = createControllerHarness(initialState, {
+      syncHistoryStatePreviousNextUrl,
+    });
+    const { assign } = stubWindow("https://example.com/photos/42");
+    const nextElements = Promise.resolve(
+      createResolvedElements("route:/photos/42", "/", null, {
+        "page:/photos/42": React.createElement("main", null, "photo page"),
+      }),
+    );
+
+    try {
+      await controller.commitSameUrlNavigatePayload(
+        nextElements,
+        stateRef.current.navigationSnapshot,
+        undefined,
+        stateRef.current,
+        { targetHref: "https://example.com/photos/42" },
+      );
+
+      expect(assign).not.toHaveBeenCalled();
+      expect(stateRef.current.routeId).toBe("route:/photos/42");
+      expect(stateRef.current.previousNextUrl).toBeNull();
+      expect(syncHistoryStatePreviousNextUrl).toHaveBeenCalledTimes(1);
+      expect(syncHistoryStatePreviousNextUrl).toHaveBeenCalledWith(null);
     } finally {
       detach();
     }
@@ -1889,7 +2652,7 @@ describe("app browser navigation controller", () => {
     }
   });
 
-  it("hard-navigates same-URL server action payloads when the root layout changes", async () => {
+  it("does not hard-navigate same-URL server action payloads from snapshot root topology alone", async () => {
     const actionTargetHref = "https://example.com/marketing?from=action";
     const initialState = createState({
       rootLayoutTreePath: "/(marketing)",
@@ -1916,9 +2679,8 @@ describe("app browser navigation controller", () => {
       );
 
       expect(result).toBeUndefined();
-      expect(assign).toHaveBeenCalledTimes(1);
-      expect(assign).toHaveBeenCalledWith(actionTargetHref);
-      expect(stateRef.current.routeId).toBe("route:/marketing");
+      expect(assign).not.toHaveBeenCalled();
+      expect(stateRef.current.routeId).toBe("route:/dashboard");
     } finally {
       detach();
     }
@@ -1949,6 +2711,7 @@ describe("app browser navigation lifecycle settlement", () => {
       // Start three navigations. Only C is the current (winning) one.
       const navA = controller.beginNavigation();
       void controller.renderNavigationPayload({
+        payloadOrigin: FRESH_APP_NAVIGATION_PAYLOAD_ORIGIN,
         actionType: "navigate",
         createNavigationCommitEffect: () => {
           effectsRun.push("A");
@@ -1967,6 +2730,7 @@ describe("app browser navigation lifecycle settlement", () => {
 
       const navB = controller.beginNavigation();
       void controller.renderNavigationPayload({
+        payloadOrigin: FRESH_APP_NAVIGATION_PAYLOAD_ORIGIN,
         actionType: "navigate",
         createNavigationCommitEffect: () => {
           effectsRun.push("B");
@@ -1985,6 +2749,7 @@ describe("app browser navigation lifecycle settlement", () => {
 
       const navC = controller.beginNavigation();
       void controller.renderNavigationPayload({
+        payloadOrigin: FRESH_APP_NAVIGATION_PAYLOAD_ORIGIN,
         actionType: "navigate",
         createNavigationCommitEffect: () => {
           effectsRun.push("C");
@@ -2059,6 +2824,7 @@ describe("app browser navigation lifecycle settlement", () => {
       // Start cross-root navigation A (deferred, /(marketing) → /(dashboard)).
       const navA = controller.beginNavigation();
       void controller.renderNavigationPayload({
+        payloadOrigin: FRESH_APP_NAVIGATION_PAYLOAD_ORIGIN,
         actionType: "navigate",
         createNavigationCommitEffect: () => () => {},
         historyUpdateMode: "push",
@@ -2075,6 +2841,7 @@ describe("app browser navigation lifecycle settlement", () => {
       // Start new navigation B (same root). B advances activeNavigationId past A.
       const navB = controller.beginNavigation();
       void controller.renderNavigationPayload({
+        payloadOrigin: FRESH_APP_NAVIGATION_PAYLOAD_ORIGIN,
         actionType: "navigate",
         createNavigationCommitEffect: () => () => {},
         historyUpdateMode: "push",
@@ -2128,6 +2895,7 @@ describe("app browser navigation lifecycle settlement", () => {
     try {
       const refreshNav = controller.beginNavigation();
       void controller.renderNavigationPayload({
+        payloadOrigin: FRESH_APP_NAVIGATION_PAYLOAD_ORIGIN,
         actionType: "navigate",
         createNavigationCommitEffect: () => () => {},
         historyUpdateMode: undefined,
@@ -2181,6 +2949,7 @@ describe("app browser navigation lifecycle settlement", () => {
       const traversePendingState = controller.beginPendingBrowserRouterState();
       const traverseNav = controller.beginNavigation();
       void controller.renderNavigationPayload({
+        payloadOrigin: FRESH_APP_NAVIGATION_PAYLOAD_ORIGIN,
         actionType: "traverse",
         createNavigationCommitEffect: () => () => {},
         historyUpdateMode: undefined,
@@ -2226,6 +2995,7 @@ describe("app browser navigation lifecycle settlement", () => {
 
   it("resolveAndClassifyNavigationCommit classifies skip when IDs have diverged", async () => {
     const result = await resolveAndClassifyNavigationCommit({
+      payloadOrigin: FRESH_APP_NAVIGATION_PAYLOAD_ORIGIN,
       activeNavigationId: 9,
       currentState: createState(),
       navigationSnapshot: createState().navigationSnapshot,
@@ -2250,6 +3020,7 @@ describe("app browser navigation lifecycle settlement", () => {
     });
 
     const resultPromise = resolveAndClassifyNavigationCommit({
+      payloadOrigin: FRESH_APP_NAVIGATION_PAYLOAD_ORIGIN,
       activeNavigationId,
       currentState,
       getActiveNavigationId: () => activeNavigationId,
@@ -2301,6 +3072,7 @@ describe("app browser navigation lifecycle settlement", () => {
     });
 
     const resultPromise = resolveAndClassifyNavigationCommit({
+      payloadOrigin: FRESH_APP_NAVIGATION_PAYLOAD_ORIGIN,
       activeNavigationId: 8,
       currentState: startedState,
       getCurrentStateForApproval: () => approvalState,
@@ -2354,6 +3126,7 @@ describe("app browser navigation lifecycle settlement", () => {
     try {
       const navId = controller.beginNavigation();
       const renderPromise = controller.renderNavigationPayload({
+        payloadOrigin: FRESH_APP_NAVIGATION_PAYLOAD_ORIGIN,
         actionType: "navigate",
         createNavigationCommitEffect: () => () => {},
         historyUpdateMode: "push",
@@ -2383,6 +3156,7 @@ describe("app browser root-layout hard navigation", () => {
   it("renderNavigationPayload calls window.location.assign when root layout changes", async () => {
     const { controller, detach } = createControllerHarness(
       createState({ rootLayoutTreePath: "/(marketing)" }),
+      { getRouteManifest: () => createRootChangeRouteManifest() },
     );
     const { assign } = stubWindow("https://example.com/marketing");
     const createNavigationCommitEffect = vi.fn();
@@ -2390,11 +3164,12 @@ describe("app browser root-layout hard navigation", () => {
     try {
       const navId = controller.beginNavigation();
       const renderPromise = controller.renderNavigationPayload({
+        payloadOrigin: FRESH_APP_NAVIGATION_PAYLOAD_ORIGIN,
         actionType: "navigate",
         createNavigationCommitEffect,
         historyUpdateMode: "push",
         navigationSnapshot: createClientNavigationRenderSnapshot(
-          "https://example.com/marketing",
+          "https://example.com/dashboard",
           {},
         ),
         nextElements: Promise.resolve(
@@ -2422,6 +3197,7 @@ describe("app browser root-layout hard navigation", () => {
   it("hard-navigate settles the pending router state before navigating away", async () => {
     const { controller, detach } = createControllerHarness(
       createState({ rootLayoutTreePath: "/(marketing)" }),
+      { getRouteManifest: () => createRootChangeRouteManifest() },
     );
     const { assign } = stubWindow("https://example.com/marketing");
     const pendingRouterState = controller.beginPendingBrowserRouterState();
@@ -2432,11 +3208,12 @@ describe("app browser root-layout hard navigation", () => {
     try {
       const navId = controller.beginNavigation();
       void controller.renderNavigationPayload({
+        payloadOrigin: FRESH_APP_NAVIGATION_PAYLOAD_ORIGIN,
         actionType: "navigate",
         createNavigationCommitEffect: () => () => {},
         historyUpdateMode: "push",
         navigationSnapshot: createClientNavigationRenderSnapshot(
-          "https://example.com/marketing",
+          "https://example.com/dashboard",
           {},
         ),
         nextElements: Promise.resolve(
@@ -2467,6 +3244,7 @@ describe("app browser root-layout hard navigation", () => {
   it("blocks a repeated same-target root-boundary hard navigation to prevent reload loops", async () => {
     const { controller, detach } = createControllerHarness(
       createState({ rootLayoutTreePath: "/(marketing)" }),
+      { getRouteManifest: () => createRootChangeRouteManifest() },
     );
     const { assign, storage } = stubWindow("https://example.com/marketing");
 
@@ -2474,11 +3252,12 @@ describe("app browser root-layout hard navigation", () => {
       const firstNavId = controller.beginNavigation();
       await expect(
         controller.renderNavigationPayload({
+          payloadOrigin: FRESH_APP_NAVIGATION_PAYLOAD_ORIGIN,
           actionType: "navigate",
           createNavigationCommitEffect: () => () => {},
           historyUpdateMode: "push",
           navigationSnapshot: createClientNavigationRenderSnapshot(
-            "https://example.com/marketing",
+            "https://example.com/dashboard",
             {},
           ),
           nextElements: Promise.resolve(
@@ -2502,6 +3281,7 @@ describe("app browser root-layout hard navigation", () => {
       const secondNavId = controller.beginNavigation();
       await expect(
         controller.renderNavigationPayload({
+          payloadOrigin: FRESH_APP_NAVIGATION_PAYLOAD_ORIGIN,
           actionType: "navigate",
           createNavigationCommitEffect: () => () => {},
           historyUpdateMode: "push",
@@ -2532,6 +3312,7 @@ describe("app browser root-layout hard navigation", () => {
   it("allows cross-page hard navigation when the stored guard target is not the current URL", async () => {
     const { controller, detach } = createControllerHarness(
       createState({ rootLayoutTreePath: "/(marketing)" }),
+      { getRouteManifest: () => createRootChangeRouteManifest() },
     );
     const { assign } = stubWindow("https://example.com/marketing");
 
@@ -2539,11 +3320,12 @@ describe("app browser root-layout hard navigation", () => {
       const firstNavId = controller.beginNavigation();
       await expect(
         controller.renderNavigationPayload({
+          payloadOrigin: FRESH_APP_NAVIGATION_PAYLOAD_ORIGIN,
           actionType: "navigate",
           createNavigationCommitEffect: () => () => {},
           historyUpdateMode: "push",
           navigationSnapshot: createClientNavigationRenderSnapshot(
-            "https://example.com/marketing",
+            "https://example.com/dashboard",
             {},
           ),
           nextElements: Promise.resolve(
@@ -2566,11 +3348,12 @@ describe("app browser root-layout hard navigation", () => {
       const secondNavId = controller.beginNavigation();
       await expect(
         controller.renderNavigationPayload({
+          payloadOrigin: FRESH_APP_NAVIGATION_PAYLOAD_ORIGIN,
           actionType: "navigate",
           createNavigationCommitEffect: () => () => {},
           historyUpdateMode: "push",
           navigationSnapshot: createClientNavigationRenderSnapshot(
-            "https://example.com/settings",
+            "https://example.com/dashboard",
             {},
           ),
           nextElements: Promise.resolve(
@@ -2640,12 +3423,67 @@ describe("app browser entry previousNextUrl helpers", () => {
     expect(resolveInterceptionContextFromPreviousNextUrl(null)).toBeNull();
   });
 
-  it("classifies pending commits in one step for same-url payloads", async () => {
+  it("stores traversal index alongside existing history state", () => {
+    const state = createHistoryStateWithNavigationMetadata(
+      {
+        __vinext_scrollY: 120,
+      },
+      {
+        previousNextUrl: "/feed?tab=latest",
+        traversalIndex: 4,
+      },
+    );
+
+    expect(state).toEqual({
+      __vinext_historyIndex: 4,
+      __vinext_previousNextUrl: "/feed?tab=latest",
+      __vinext_scrollY: 120,
+    });
+    expect(readHistoryStateTraversalIndex(state)).toBe(4);
+  });
+
+  it("resolves back, forward, and unknown traversal intent from history state", () => {
+    expect(
+      resolveHistoryTraversalIntent({
+        currentHistoryIndex: 5,
+        historyState: { __vinext_historyIndex: 3 },
+      }).direction,
+    ).toBe("back");
+    expect(
+      resolveHistoryTraversalIntent({
+        currentHistoryIndex: 5,
+        historyState: { __vinext_historyIndex: 7 },
+      }).direction,
+    ).toBe("forward");
+    expect(
+      resolveHistoryTraversalIntent({
+        currentHistoryIndex: 5,
+        historyState: {},
+      }),
+    ).toEqual({
+      direction: "unknown",
+      historyState: {},
+      targetHistoryIndex: null,
+    });
+    expect(
+      resolveHistoryTraversalIntent({
+        currentHistoryIndex: null,
+        historyState: { __vinext_historyIndex: 7 },
+      }),
+    ).toEqual({
+      direction: "unknown",
+      historyState: { __vinext_historyIndex: 7 },
+      targetHistoryIndex: 7,
+    });
+  });
+
+  it("classifies same-url payloads without treating snapshot root topology as authority", async () => {
     const currentState = createState({
       rootLayoutTreePath: "/(marketing)",
     });
 
     const result = await resolveAndClassifyNavigationCommit({
+      payloadOrigin: FRESH_APP_NAVIGATION_PAYLOAD_ORIGIN,
       activeNavigationId: 7,
       currentState,
       navigationSnapshot: currentState.navigationSnapshot,
@@ -2657,11 +3495,11 @@ describe("app browser entry previousNextUrl helpers", () => {
       type: "navigate",
     });
 
-    expect(result.decision.disposition).toBe("hard-navigate");
+    expect(result.decision.disposition).toBe("commit");
     expect(result.pending.routeId).toBe("route:/dashboard");
     expect(result.pending.action.renderId).toBe(3);
-    expect(result.trace.entries[0]?.code).toBe(NavigationTraceTransactionCodes.hardNavigate);
-    expect(result.trace.entries[1]?.code).toBe(NavigationTraceReasonCodes.rootBoundaryChanged);
+    expect(result.trace.entries[0]?.code).toBe(NavigationTraceTransactionCodes.visibleCommit);
+    expect(result.trace.entries[1]?.code).toBe(NavigationTraceReasonCodes.rootBoundaryUnknown);
     expect(result.trace.entries[1]?.fields.targetHref).toBe(
       "https://example.com/dashboard?action=same-url",
     );
@@ -2799,6 +3637,7 @@ describe("app browser entry previousNextUrl helpers", () => {
       slotBindings: [modalSlotBinding],
     });
     const pending = await createPendingNavigationCommit({
+      payloadOrigin: FRESH_APP_NAVIGATION_PAYLOAD_ORIGIN,
       currentState: state,
       nextElements: Promise.resolve(
         createResolvedElements(
@@ -2832,6 +3671,7 @@ describe("app browser entry previousNextUrl helpers", () => {
       activeNavigationId: 1,
       currentState: state,
       pending,
+      routeManifest: createRouteManifestForPendingCommit(state, pending),
       startedNavigationId: 1,
       targetHref: "https://example.com/feed/comments",
     });
@@ -3094,6 +3934,99 @@ describe("createPopstateRestoreHandler", () => {
 
     expect(restoreCalls).toEqual([]);
     expect(window.__VINEXT_RSC_PENDING__).toBeNull();
+  });
+});
+
+describe("app browser RSC redirect lifecycle", () => {
+  it("keeps RSC redirect hops in the initiating lifecycle and preserves push history intent", () => {
+    const decision = resolveRscRedirectLifecycleHop({
+      currentHref: "https://example.com/start",
+      historyUpdateMode: "push",
+      origin: "https://example.com",
+      redirectDepth: 0,
+      requestPreviousNextUrl: "/feed",
+      responseUrl: "https://example.com/target.rsc?tab=1&_rsc=abc",
+    });
+
+    expect(decision).toEqual({
+      href: "/target?tab=1",
+      historyUpdateMode: "push",
+      kind: "follow",
+      previousNextUrl: "/feed",
+      redirectDepth: 1,
+    });
+  });
+
+  it("treats same-path search changes as RSC redirects", () => {
+    const decision = resolveRscRedirectLifecycleHop({
+      currentHref: "https://example.com/items?sort=old",
+      historyUpdateMode: "replace",
+      origin: "https://example.com",
+      redirectDepth: 2,
+      requestPreviousNextUrl: null,
+      responseUrl: "https://example.com/items.rsc?sort=new&_rsc=abc",
+    });
+
+    expect(decision).toMatchObject({
+      href: "/items?sort=new",
+      historyUpdateMode: "replace",
+      kind: "follow",
+      redirectDepth: 3,
+    });
+  });
+
+  it("allows callers to model terminal traverse/refresh redirects as replace commits", () => {
+    const decision = resolveRscRedirectLifecycleHop({
+      currentHref: "https://example.com/old",
+      historyUpdateMode: "replace",
+      origin: "https://example.com",
+      redirectDepth: 0,
+      requestPreviousNextUrl: null,
+      responseUrl: "https://example.com/new.rsc?_rsc=abc",
+    });
+
+    expect(decision).toMatchObject({
+      href: "/new",
+      historyUpdateMode: "replace",
+      kind: "follow",
+    });
+  });
+
+  it("turns external RSC redirects into terminal hard navigations", () => {
+    const decision = resolveRscRedirectLifecycleHop({
+      currentHref: "https://example.com/account",
+      historyUpdateMode: "push",
+      origin: "https://example.com",
+      redirectDepth: 0,
+      requestPreviousNextUrl: null,
+      responseUrl: "https://idp.example/login",
+    });
+
+    expect(decision).toEqual({
+      href: "https://idp.example/login",
+      kind: "terminal-hard-navigation",
+      reason: "externalRedirect",
+      redirectDepth: 0,
+    });
+  });
+
+  it("turns an over-budget redirect chain into a terminal hard navigation", () => {
+    const decision = resolveRscRedirectLifecycleHop({
+      currentHref: "https://example.com/a",
+      historyUpdateMode: "push",
+      maxRedirectDepth: 2,
+      origin: "https://example.com",
+      redirectDepth: 2,
+      requestPreviousNextUrl: null,
+      responseUrl: "https://example.com/b.rsc?_rsc=abc",
+    });
+
+    expect(decision).toEqual({
+      href: "/b",
+      kind: "terminal-hard-navigation",
+      reason: "maxRedirectsExceeded",
+      redirectDepth: 2,
+    });
   });
 });
 
