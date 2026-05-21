@@ -354,8 +354,8 @@ describe("generateInstrumentationClientInjectModule", () => {
     const code = generateInstrumentationClientInjectModule(["./inject-a.js"], null);
     expect(code).toContain('import * as __vinj_0 from "./inject-a.js"');
     expect(code).toContain("export function onRouterTransitionStart(url, type)");
-    expect(code).toContain("typeof __vinj_0.onRouterTransitionStart === \"function\"");
-    expect(code).toContain("\n  __vinj_0.onRouterTransitionStart(url, type);\n");
+    expect(code).toContain('typeof __vinj_0.onRouterTransitionStart === "function"');
+    expect(code).toContain("\n    __vinj_0.onRouterTransitionStart(url, type);\n");
   });
 
   it("generates imports in config order with user file last", () => {
@@ -379,16 +379,19 @@ describe("generateInstrumentationClientInjectModule", () => {
       "/project/instrumentation-client.ts",
     );
     // Each module should have its own hook-check-and-call
-    expect(code).toContain("typeof __vinj_0.onRouterTransitionStart === \"function\"");
+    expect(code).toContain('typeof __vinj_0.onRouterTransitionStart === "function"');
     expect(code).toContain("__vinj_0.onRouterTransitionStart(url, type)");
-    expect(code).toContain("typeof __vinj_1.onRouterTransitionStart === \"function\"");
+    expect(code).toContain('typeof __vinj_1.onRouterTransitionStart === "function"');
     expect(code).toContain("__vinj_1.onRouterTransitionStart(url, type)");
-    expect(code).toContain("typeof __vinj_2.onRouterTransitionStart === \"function\"");
+    expect(code).toContain('typeof __vinj_2.onRouterTransitionStart === "function"');
     expect(code).toContain("__vinj_2.onRouterTransitionStart(url, type)");
   });
 
   it("exports empty object when injects is empty and user file is present", () => {
-    const code = generateInstrumentationClientInjectModule([], "/project/instrumentation-client.ts");
+    const code = generateInstrumentationClientInjectModule(
+      [],
+      "/project/instrumentation-client.ts",
+    );
     expect(code).toBe("export {};");
   });
 });
