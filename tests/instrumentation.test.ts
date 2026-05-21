@@ -6,6 +6,7 @@ import {
   findInstrumentationClientFile,
   findInstrumentationFile,
 } from "../packages/vinext/src/server/instrumentation.js";
+import { generateInstrumentationClientInjectModule } from "../packages/vinext/src/client/instrumentation-client-inject.js";
 import { createValidFileMatcher } from "../packages/vinext/src/routing/file-matcher.js";
 
 // The runInstrumentation/reportRequestError describe blocks re-import via
@@ -340,5 +341,54 @@ describe("reportRequestError", () => {
     await reportRequestError(new Error("boom"), sampleRequest, sampleContext);
 
     expect(onRequestError).toHaveBeenCalledOnce();
+  });
+});
+
+describe("generateInstrumentationClientInjectModule", () => {
+  it("returns passthrough when injects is empty", () => {
+    const code = generateInstrumentationClientInjectModule([], null);
+    expect(code).toBe("export {};");
+  });
+
+  it("generates a single import for one inject entry", () => {
+    const code = generateInstrumentationClientInjectModule(["./inject-a.js"], null);
+    expect(code).toContain('import * as __vinj_0 from "./inject-a.js"');
+    expect(code).toContain("export function onRouterTransitionStart(url, type)");
+    expect(code).toContain("typeof __vinj_0.onRouterTransitionStart === \"function\"");
+    expect(code).toContain("\n  __vinj_0.onRouterTransitionStart(url, type);\n");
+  });
+
+  it("generates imports in config order with user file last", () => {
+    const code = generateInstrumentationClientInjectModule(
+      ["./inject-a.js", "some-npm-pkg"],
+      "/project/instrumentation-client.ts",
+    );
+    expect(code).toContain('import * as __vinj_0 from "./inject-a.js"');
+    expect(code).toContain('import * as __vinj_1 from "some-npm-pkg"');
+    expect(code).toContain('import * as __vinj_2 from "/project/instrumentation-client.ts"');
+  });
+
+  it("falls back to empty-module when user file is absent", () => {
+    const code = generateInstrumentationClientInjectModule(["./inject-a.js"], null);
+    expect(code).toContain('import * as __vinj_1 from "vinext/client/empty-module"');
+  });
+
+  it("composes hook calls for every module in array order", () => {
+    const code = generateInstrumentationClientInjectModule(
+      ["./inject-a.js", "./inject-b.js"],
+      "/project/instrumentation-client.ts",
+    );
+    // Each module should have its own hook-check-and-call
+    expect(code).toContain("typeof __vinj_0.onRouterTransitionStart === \"function\"");
+    expect(code).toContain("__vinj_0.onRouterTransitionStart(url, type)");
+    expect(code).toContain("typeof __vinj_1.onRouterTransitionStart === \"function\"");
+    expect(code).toContain("__vinj_1.onRouterTransitionStart(url, type)");
+    expect(code).toContain("typeof __vinj_2.onRouterTransitionStart === \"function\"");
+    expect(code).toContain("__vinj_2.onRouterTransitionStart(url, type)");
+  });
+
+  it("exports empty object when injects is empty and user file is present", () => {
+    const code = generateInstrumentationClientInjectModule([], "/project/instrumentation-client.ts");
+    expect(code).toBe("export {};");
   });
 });
