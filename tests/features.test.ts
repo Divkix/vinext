@@ -1743,6 +1743,14 @@ describe("basePath support (Pages Router)", () => {
     expect(config.define?.[defineKey]).toBe(JSON.stringify(""));
   });
 
+  it("App Shells define is always false", async () => {
+    // Plumbing-only upstream; vinext always reports false so client gating
+    // code never trips. See issue #1405.
+    const config = server.config;
+    const defineKey = "process.env.__NEXT_APP_SHELLS";
+    expect(config.define?.[defineKey]).toBe(JSON.stringify(false));
+  });
+
   it("resolveNextConfig correctly resolves trailingSlash", async () => {
     const { resolveNextConfig } = await import("../packages/vinext/src/config/next-config.js");
 

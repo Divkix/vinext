@@ -217,6 +217,10 @@ const CONFIG_SUPPORT: Record<string, { status: Status; detail?: string }> = {
     detail:
       "not applicable; vinext uses Vite instead of SWC. A Vite-compatible polyfill solution may be explored in the future.",
   },
+  "experimental.appShells": {
+    status: "unsupported",
+    detail: "app shells not yet implemented",
+  },
   "i18n.domains": {
     status: "partial",
     detail: "supported for Pages Router; App Router unchanged",
