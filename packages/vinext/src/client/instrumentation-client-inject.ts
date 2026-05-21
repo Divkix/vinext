@@ -37,7 +37,7 @@ export function generateInstrumentationClientInjectModule(
   const hookCalls: string[] = [];
   for (let i = 0; i <= lastIndex; i++) {
     hookCalls.push(
-      `  if (typeof __vinj_${i}.onRouterTransitionStart === \"function\") {`,
+      `  if (typeof __vinj_${i}.onRouterTransitionStart === "function") {`,
       `    __vinj_${i}.onRouterTransitionStart(url, type);`,
       `  }`,
     );

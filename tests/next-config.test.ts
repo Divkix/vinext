@@ -925,6 +925,7 @@ describe("detectNextIntlConfig", () => {
       buildId: "test-build-id",
       deploymentId: undefined,
       sassOptions: null,
+      instrumentationClientInject: [],
       ...overrides,
     };
   }
