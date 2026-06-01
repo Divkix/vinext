@@ -34,7 +34,7 @@ import { stripBasePath } from "../utils/base-path.js";
 import { ReadonlyURLSearchParams } from "./readonly-url-search-params.js";
 import { assertSafeNavigationUrl } from "./url-safety.js";
 import { AppRouterContext } from "./internal/app-router-context.js";
-import { scrollToHashTarget } from "./hash-scroll.js";
+import { retryScrollTo, scrollToHashTarget } from "./hash-scroll.js";
 import {
   beginAppRouterScrollIntent,
   clearAppRouterScrollIntent,
@@ -1137,13 +1137,11 @@ export function clearPendingPathname(navId: number): void {
 
 function getClientParamsSnapshot(): Record<string, string | string[]> {
   const state = getClientNavigationState();
+  const pagesCtx = _getPagesNavigationContext();
+  if (pagesCtx) return pagesCtx.params;
   if (state && Object.keys(state.clientParams).length > 0) {
     return state.clientParams;
   }
-  // Fall back to the Pages Router compat shim if nothing has populated the
-  // App Router client params (Pages Router pages never call setClientParams).
-  const pagesCtx = _getPagesNavigationContext();
-  if (pagesCtx) return pagesCtx.params;
   return state?.clientParams ?? _EMPTY_PARAMS;
 }
 
@@ -1426,17 +1424,9 @@ function restoreScrollPosition(state: unknown): void {
       const pending: Promise<void> | null = window.__VINEXT_RSC_PENDING__ ?? null;
 
       if (pending) {
-        // Wait for the RSC navigation to finish rendering, then scroll.
-        void pending.then(() => {
-          requestAnimationFrame(() => {
-            window.scrollTo(x, y);
-          });
-        });
+        void pending.then(() => retryScrollTo(x, y));
       } else {
-        // No RSC navigation in flight (Pages Router or already settled).
-        requestAnimationFrame(() => {
-          window.scrollTo(x, y);
-        });
+        retryScrollTo(x, y);
       }
     });
   }
@@ -1456,12 +1446,20 @@ export async function navigateClientSide(
   if (isExternalUrl(href)) {
     const localPath = toSameOriginAppPath(href, __basePath);
     if (localPath == null) {
-      // Truly external: use full page navigation
+      notifyAppRouterTransitionStart(href, mode);
+
+      const externalNavigate = getNavigationRuntime()?.functions.navigateExternal;
+      if (externalNavigate) {
+        await externalNavigate(href, mode);
+        return;
+      }
+
       if (mode === "replace") {
         window.location.replace(href);
       } else {
         window.location.assign(href);
       }
+      await new Promise<void>(() => {});
       return;
     }
     normalizedHref = localPath;
@@ -2035,15 +2033,45 @@ type _RedirectErrorShape = Error & { digest: string };
  * `shims/error-boundary.tsx`.
  */
 export function isRedirectError(error: unknown): error is _RedirectErrorShape {
-  if (
-    !error ||
-    typeof error !== "object" ||
-    !("digest" in error) ||
-    typeof (error as { digest: unknown }).digest !== "string"
-  ) {
-    return false;
+  if (!error || typeof error !== "object") return false;
+  if (!("digest" in error)) return false;
+  if (typeof error.digest !== "string") return false;
+  return error.digest.startsWith("NEXT_REDIRECT;");
+}
+
+/**
+ * Parse a redirect error digest into its URL and type components.
+ *
+ * Supports two formats:
+ *   - vinext's 3-part: `NEXT_REDIRECT;{type};{encoded-url}`
+ *   - Next.js's 5-part: `NEXT_REDIRECT;{type};{url};{status};{isClient}`
+ *
+ * The URL segment is always percent-encoded on the write side
+ * (encodeURIComponent is used), so re-joining with ";" for the 5-part
+ * format is defensive — it correctly handles any unencoded ";" that
+ * might appear in an externally-sourced digest.
+ *
+ * Returns null for malformed digests that have an empty URL segment, or
+ * when the URL contains invalid percent-encoding.
+ */
+export function decodeRedirectError(
+  digest: string,
+): { url: string; type: "push" | "replace" } | null {
+  if (!digest.startsWith("NEXT_REDIRECT;")) return null;
+
+  const parts = digest.split(";");
+  const encodedTarget = parts.length >= 5 ? parts.slice(2, -2).join(";") : parts[2];
+  if (!encodedTarget) return null;
+
+  let url: string;
+  try {
+    url = decodeURIComponent(encodedTarget);
+  } catch {
+    return null;
   }
-  return (error as { digest: string }).digest.startsWith("NEXT_REDIRECT;");
+
+  const type: "push" | "replace" = parts[1] === "push" ? "push" : "replace";
+  return { url, type };
 }
 
 /**

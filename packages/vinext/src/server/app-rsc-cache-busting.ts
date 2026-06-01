@@ -16,7 +16,7 @@ import {
 } from "./headers.js";
 
 /**
- * RSC cache-busting hashes cover the headers that make a `.rsc` payload vary.
+ * RSC cache-busting hashes cover the headers that make an RSC payload vary.
  * Client-side variant headers must survive transit through CDNs and reverse
  * proxies; stripping them changes the server hash and turns stale URLs into
  * repeated canonicalization redirects.
@@ -285,12 +285,7 @@ export function createRscRequestHeaders(options: CreateRscRequestHeadersOptions 
 function toRscRequestPath(href: string): string {
   const hashIndex = href.indexOf("#");
   const beforeHash = hashIndex === -1 ? href : href.slice(0, hashIndex);
-  const queryIndex = beforeHash.indexOf("?");
-  const pathname = queryIndex === -1 ? beforeHash : beforeHash.slice(0, queryIndex);
-  const query = queryIndex === -1 ? "" : beforeHash.slice(queryIndex);
-  const normalizedPath =
-    pathname.length > 1 && pathname.endsWith("/") ? pathname.slice(0, -1) : pathname;
-  return `${normalizedPath}.rsc${query}`;
+  return beforeHash;
 }
 
 export async function createRscRequestUrl(href: string, headers: Headers): Promise<string> {

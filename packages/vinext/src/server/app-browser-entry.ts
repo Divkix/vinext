@@ -1,6 +1,14 @@
 /// <reference types="vite/client" />
 
-import { createElement, startTransition, use, useLayoutEffect, useRef, useState } from "react";
+import {
+  createElement,
+  startTransition,
+  use,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 import {
   createFromFetch,
   createFromReadableStream,
@@ -21,6 +29,8 @@ import {
   getClientNavigationRenderContext,
   getPrefetchCache,
   invalidatePrefetchCache,
+  decodeRedirectError,
+  isRedirectError,
   pushHistoryStateWithoutNotify,
   replaceClientParamsWithoutNotify,
   replaceHistoryStateWithoutNotify,
@@ -30,6 +40,7 @@ import {
   setPendingPathname,
   setMountedSlotsHeader,
   setNavigationContext,
+  useRouter,
   type CachedRscResponse,
   type ClientNavigationRenderSnapshot,
   type PrefetchCacheEntry,
@@ -41,7 +52,7 @@ import {
   type NavigationRuntimeNavigate,
   type NavigationRuntimeRscBootstrap,
 } from "../client/navigation-runtime.js";
-import { scrollToHashTargetOnNextFrame } from "vinext/shims/hash-scroll";
+import { retryScrollTo, scrollToHashTargetOnNextFrame } from "vinext/shims/hash-scroll";
 import { AppRouterScrollCommitProvider } from "vinext/shims/app-router-scroll";
 import {
   beginAppRouterScrollIntent,
@@ -61,6 +72,7 @@ import {
   type NavigationPayloadOutcome,
   type PendingBrowserRouterState,
 } from "./app-browser-navigation-controller.js";
+import { AppBrowserMpaNavigationScheduler } from "./app-browser-mpa-navigation.js";
 import { resolveManifestNavigationInterceptionContext } from "./app-browser-interception-context.js";
 import {
   createDiscardedServerActionRefreshScheduler,
@@ -155,6 +167,11 @@ type SearchParamInput = ConstructorParameters<typeof URLSearchParams>[0];
 type ServerActionResult = AppBrowserServerActionResult<AppWireElements>;
 
 type NavigationKind = "navigate" | "traverse" | "refresh";
+type MpaNavigationState = {
+  href: string;
+  historyUpdateMode: HistoryUpdateMode;
+  kind: "mpa-navigation";
+};
 
 // Maps NavigationKind to the AppRouterAction type used by the reducer.
 // "refresh" is intentionally treated as "navigate" (merge, preserve absent slots).
@@ -243,7 +260,7 @@ function parseEncodedJsonHeader<T>(value: string | null): T | null {
 }
 
 function isRouterStatePromise(
-  value: AppRouterState | Promise<AppRouterState>,
+  value: AppRouterState | Promise<AppRouterState> | MpaNavigationState,
 ): value is Promise<AppRouterState> {
   return value instanceof Promise;
 }
@@ -260,6 +277,8 @@ let browserRouterStateHasEverCommitted = false;
 // of stranding them on the previous URL with a blank page. Cleared once the
 // commit effect runs (URL update succeeded) or the navigation is superseded.
 let pendingNavigationRecoveryHref: string | null = null;
+const mpaNavigationScheduler = new AppBrowserMpaNavigationScheduler();
+const unresolvedMpaNavigation = new Promise<never>(() => {});
 let currentHistoryTraversalIndex: number | null =
   readHistoryStateTraversalIndex(window.history.state) ?? 0;
 let nextHistoryTraversalIndex: number = currentHistoryTraversalIndex;
@@ -884,6 +903,57 @@ function handleDevRecoveryBoundaryCatch(resetKey: number): void {
   browserNavigationController.drainPrePaintEffects(resetKey);
 }
 
+function isMpaNavigationState(
+  value: AppRouterState | Promise<AppRouterState> | MpaNavigationState,
+): value is MpaNavigationState {
+  return (
+    value !== null &&
+    typeof value === "object" &&
+    "kind" in value &&
+    value.kind === "mpa-navigation"
+  );
+}
+
+function performMpaNavigation(href: string, historyUpdateMode: HistoryUpdateMode): void {
+  // Match Next's MPA path by suspending forever, but delay the actual location
+  // mutation just enough for the old tree to commit the pending transition
+  // signal before unload.
+  mpaNavigationScheduler.navigate(window, href, historyUpdateMode);
+}
+
+function AppRouterRedirectBridge({ children }: { children?: React.ReactNode }) {
+  const router = useRouter();
+
+  useEffect(() => {
+    const handleUnhandledRedirect = (event: ErrorEvent | PromiseRejectionEvent): void => {
+      const error = "reason" in event ? event.reason : event.error;
+      if (!isRedirectError(error)) return;
+
+      const result = decodeRedirectError(error.digest);
+      if (!result) return;
+
+      event.preventDefault();
+      startTransition(() => {
+        if (result.type === "push") {
+          router.push(result.url);
+        } else {
+          router.replace(result.url);
+        }
+      });
+    };
+
+    window.addEventListener("error", handleUnhandledRedirect);
+    window.addEventListener("unhandledrejection", handleUnhandledRedirect);
+
+    return () => {
+      window.removeEventListener("error", handleUnhandledRedirect);
+      window.removeEventListener("unhandledrejection", handleUnhandledRedirect);
+    };
+  }, [router]);
+
+  return children ?? null;
+}
+
 function decodeAppElementsPromise(payload: Promise<AppWireElements>): Promise<AppElements> {
   // Wrap in Promise.resolve() because createFromReadableStream() returns a
   // React Flight thenable whose .then() returns undefined (not a new Promise).
@@ -900,7 +970,9 @@ function BrowserRoot({
 }) {
   const resolvedElements = use(initialElements);
   const initialMetadata = AppElementsWire.readMetadata(resolvedElements);
-  const [treeStateValue, setTreeStateValue] = useState<AppRouterState | Promise<AppRouterState>>({
+  const [treeStateValue, setTreeStateValue] = useState<
+    AppRouterState | Promise<AppRouterState> | MpaNavigationState
+  >({
     activeOperation: null,
     elements: resolvedElements,
     interception: initialMetadata.interception,
@@ -915,6 +987,10 @@ function BrowserRoot({
     slotBindings: initialMetadata.slotBindings,
     visibleCommitVersion: 0,
   });
+  if (isMpaNavigationState(treeStateValue)) {
+    performMpaNavigation(treeStateValue.href, treeStateValue.historyUpdateMode);
+    throw unresolvedMpaNavigation;
+  }
   const treeState = isRouterStatePromise(treeStateValue) ? use(treeStateValue) : treeStateValue;
 
   // Keep the latest router state in a ref so external callers (navigate(),
@@ -932,10 +1008,23 @@ function BrowserRoot({
   // after hydrateRoot() returns; by then this layout effect has already run for
   // the hydration commit, so getBrowserRouterState() never observes a null ref.
   useLayoutEffect(() => {
+    const setAppRouterStateValue = (value: AppRouterState | Promise<AppRouterState>) => {
+      setTreeStateValue(value);
+    };
     const detach = browserNavigationController.attachBrowserRouterState(
-      setTreeStateValue,
+      setAppRouterStateValue,
       stateRef,
     );
+    registerNavigationRuntimeFunctions({
+      navigateExternal: (href, historyUpdateMode) => {
+        setTreeStateValue({
+          href,
+          historyUpdateMode,
+          kind: "mpa-navigation",
+        });
+        return new Promise<void>(() => {});
+      },
+    });
     browserRouterStateHasEverCommitted = true;
     // App Router uses this timestamp as first committed tree readiness: the
     // browser router state is attached and link/router interactions can safely
@@ -947,6 +1036,7 @@ function BrowserRoot({
     window.__NEXT_HYDRATED_AT = hydratedAt;
     window.__NEXT_HYDRATED_CB?.();
     return () => {
+      registerNavigationRuntimeFunctions({ navigateExternal: undefined });
       detach();
       setMountedSlotsHeader(null);
     };
@@ -987,7 +1077,11 @@ function BrowserRoot({
     ),
   );
   const innerTree = AppRouterContext
-    ? createElement(AppRouterContext.Provider, { value: appRouterInstance }, routeTree)
+    ? createElement(
+        AppRouterContext.Provider,
+        { value: appRouterInstance },
+        createElement(AppRouterRedirectBridge, null, routeTree),
+      )
     : routeTree;
 
   // In dev, wrap the route tree in a top-level recovery boundary. A render
@@ -1046,7 +1140,15 @@ function restoreHydrationNavigationContext(
   });
 }
 
-function restorePopstateScrollPosition(state: unknown): void {
+function restorePopstateScrollPosition(
+  state: unknown,
+  options?: {
+    shouldContinue?: () => boolean;
+  },
+): void {
+  const shouldContinue = options?.shouldContinue ?? (() => true);
+  if (!shouldContinue()) return;
+
   if (!(state && typeof state === "object" && "__vinext_scrollY" in state)) {
     if (window.location.hash) {
       scrollToHashTargetOnNextFrame(window.location.hash);
@@ -1057,9 +1159,7 @@ function restorePopstateScrollPosition(state: unknown): void {
   const y = Number(state.__vinext_scrollY);
   const x = "__vinext_scrollX" in state ? Number(state.__vinext_scrollX) : 0;
 
-  requestAnimationFrame(() => {
-    window.scrollTo(x, y);
-  });
+  retryScrollTo(x, y, { shouldContinue });
 }
 
 function isSameAppRoutePopstateTarget(href: string): boolean {
@@ -1336,7 +1436,6 @@ function registerServerActionCallback(): void {
       Promise.resolve(flightResponse),
       { temporaryReferences },
     );
-    syncServerActionHttpFallbackHead(fetchResponse.status);
     if (shouldClearClientNavigationCachesForServerActionResult(result, revalidation)) {
       clearClientNavigationCaches();
     }
@@ -1381,6 +1480,9 @@ function registerServerActionCallback(): void {
       browserNavigationController.performHardNavigation(actionRedirectTarget.href);
       return undefined;
     }
+
+    const hasSameUrlRerenderPayload = isServerActionResult(result) && result.root !== undefined;
+    syncServerActionHttpFallbackHead(hasSameUrlRerenderPayload ? null : fetchResponse.status);
 
     // Server actions stay on the same URL and use commitSameUrlNavigatePayload()
     // for merge-based dispatch. This path does not call
@@ -2060,8 +2162,11 @@ if (typeof document !== "undefined") {
   // the flag stuck at true, which would silently swallow every subsequent
   // RSC navigation error for the lifetime of that tab. Matches Next.js'
   // fetch-server-response.ts handler pair.
-  window.addEventListener("pageshow", () => {
+  window.addEventListener("pageshow", (event) => {
     isPageUnloading = false;
+    if (event.persisted) {
+      mpaNavigationScheduler.reset();
+    }
   });
   void main();
 }
