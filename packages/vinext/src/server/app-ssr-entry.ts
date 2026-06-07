@@ -42,8 +42,8 @@ import { createSsrErrorMetaRenderer } from "./app-ssr-error-meta.js";
 import { createInitialDevServerErrorScript } from "./dev-initial-server-error.js";
 import { getClientTraceMetadataHTML } from "./client-trace-metadata.js";
 import { AppElementsWire, type AppWireElements } from "./app-elements.js";
-import { createInitialBfcacheIdMap } from "./app-browser-state.js";
-import { ElementsContext, Slot } from "vinext/shims/slot";
+import { createBfcacheSegmentStateKeyMap, createInitialBfcacheIdMap } from "./app-browser-state.js";
+import { BfcacheStateKeyMapContext, ElementsContext, Slot } from "vinext/shims/slot";
 import { AppRouterContext } from "vinext/shims/internal/app-router-context";
 import { createClientReferencePreloader } from "./app-client-reference-preloader.js";
 import { RSC_FORM_STATE_GLOBAL } from "./app-browser-hydration.js";
@@ -212,7 +212,7 @@ function buildModulePreloadHtml(bootstrapModuleUrl?: string, nonce?: string): st
 }
 
 function buildHeadInjectionHtml(
-  navContext: NavigationContext | null,
+  navContext: NavigationContext,
   bootstrapModuleUrl: string | undefined,
   formState: ReactFormState | null,
   insertedHTML: string,
@@ -220,11 +220,11 @@ function buildHeadInjectionHtml(
   scriptNonce?: string,
 ): string {
   const navPayload = {
-    pathname: navContext?.pathname ?? "/",
-    searchParams: navContext?.searchParams ? [...navContext.searchParams.entries()] : [],
+    pathname: navContext.pathname,
+    searchParams: [...navContext.searchParams.entries()],
   };
   const rscMetadataScript = createInlineScriptTag(
-    createNavigationRuntimeRscMetadataScript(navContext?.params ?? {}, navPayload),
+    createNavigationRuntimeRscMetadataScript(navContext.params, navPayload),
     scriptNonce,
   );
   const formStateScript =
@@ -242,6 +242,17 @@ function buildHeadInjectionHtml(
     insertedHTML +
     fontHTML
   );
+}
+
+function requireNavigationContext(navContext: NavigationContext | null): NavigationContext {
+  if (!navContext) {
+    // Guaranteed by the RSC handler (app-rsc-handler.ts) before every main
+    // render and by the ISR/revalidation path (app-page-dispatch.ts). Fallback
+    // boundary renderers synthesize one (app-page-boundary-render.ts) when
+    // request scope is gone.
+    throw new Error("App SSR requires navigation context for BFCache state keys");
+  }
+  return navContext;
 }
 
 export async function handleSsr(
@@ -274,11 +285,11 @@ export async function handleSsr(
   },
 ): Promise<AppSsrRenderResult> {
   return runWithNavigationContext(async () => {
+    const ssrNavigationContext = requireNavigationContext(navContext);
+
     await clientReferencePreloader.preload();
 
-    if (navContext) {
-      setNavigationContext(navContext);
-    }
+    setNavigationContext(ssrNavigationContext);
 
     clearServerInsertedHTML();
 
@@ -322,6 +333,18 @@ export async function handleSsr(
             { value: elements },
             createReactElement(Slot, { id: metadata.routeId }),
           );
+          const stateKeyTree = createReactElement(
+            BfcacheStateKeyMapContext.Provider,
+            {
+              value: createBfcacheSegmentStateKeyMap({
+                elements,
+                // Normalized inside the function to match the client navigation
+                // snapshot pathname (SSR/client Activity key parity).
+                pathname: ssrNavigationContext.pathname,
+              }),
+            },
+            routeTree,
+          );
           // During SSR we only provide the id *map*, seeded entirely with the
           // INITIAL_BFCACHE_ID sentinel. BfcacheSlotBoundary may still publish a
           // BfcacheSegmentIdContext value here, but every map entry is the "0"
@@ -332,9 +355,9 @@ export async function handleSsr(
             ? createReactElement(
                 BfcacheIdMapContext.Provider,
                 { value: createInitialBfcacheIdMap(elements) },
-                routeTree,
+                stateKeyTree,
               )
-            : routeTree;
+            : stateKeyTree;
         }
 
         const flightRootElement = createReactElement(VinextFlightRoot);
@@ -471,7 +494,7 @@ export async function handleSsr(
 
           didInjectHeadHTML = true;
           return buildHeadInjectionHtml(
-            navContext,
+            ssrNavigationContext,
             bootstrapModuleUrl,
             options?.formState ?? null,
             insertedHTML + errorMetaHTML + getTraceMetaHTML() + initialDevServerErrorHTML,

@@ -1374,6 +1374,16 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
         // enable functional App Shell prefetching.
         // See: https://github.com/vercel/next.js/pull/93997
         defines["process.env.__NEXT_APP_SHELLS"] = JSON.stringify(nextConfig.appShells);
+        // Cache Components — Next.js gates segment Activity BFCache retention
+        // on this build-time flag. Without the flag the active segment renders
+        // in place (unkeyed); enabling it turns on the three-entry inactive
+        // Activity tree cache.
+        // Deliberately string-shaped: `process.env` consumers compare against
+        // "true", so do not simplify this to a boolean define.
+        // See: packages/next/src/client/components/layout-router.tsx
+        defines["process.env.__NEXT_CACHE_COMPONENTS"] = JSON.stringify(
+          String(nextConfig.cacheComponents ?? false),
+        );
 
         // User-defined compile-time constants from `compiler.define` in
         // next.config. Applied to BOTH client and server bundles via Vite's
