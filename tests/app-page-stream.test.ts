@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vite-plus/test";
 import {
+  buildAppPageLinkHeader,
   createAppPageFontData,
   createAppPageRscErrorTracker,
   deferUntilStreamConsumed,
@@ -48,13 +49,17 @@ describe("app page stream helpers", () => {
       getStyles: () => [],
     });
 
-    const htmlStream = await renderAppPageHtmlStream({
+    const { htmlStream } = await renderAppPageHtmlStream({
       fontData,
-      navigationContext: { pathname: "/test" },
+      navigationContext: { pathname: "/test", searchParams: new URLSearchParams(), params: {} },
       rscStream: createStream(["flight"]),
       ssrHandler: {
         async handleSsr(_rscStream, navigationContext, receivedFontData) {
-          expect(navigationContext).toEqual({ pathname: "/test" });
+          expect(navigationContext).toEqual({
+            pathname: "/test",
+            searchParams: new URLSearchParams(),
+            params: {},
+          });
           expect(receivedFontData).toEqual(fontData);
           return createStream(["<html>ok</html>"]);
         },
@@ -67,7 +72,7 @@ describe("app page stream helpers", () => {
   it("forwards waitForAllReady to the SSR handler", async () => {
     const ssrHandler = vi.fn(async () => createStream(["<html>all-ready</html>"]));
 
-    const htmlStream = await renderAppPageHtmlStream({
+    const { htmlStream } = await renderAppPageHtmlStream({
       fontData: createAppPageFontData({
         getLinks: () => [],
         getPreloads: () => [],
@@ -93,7 +98,7 @@ describe("app page stream helpers", () => {
     const formState = ["action-result", "key-path", "reference-id", 1] as never;
     const ssrHandler = vi.fn(async () => createStream(["<html>form-state</html>"]));
 
-    const htmlStream = await renderAppPageHtmlStream({
+    const { htmlStream } = await renderAppPageHtmlStream({
       fontData: createAppPageFontData({
         getLinks: () => [],
         getPreloads: () => [],
@@ -117,7 +122,7 @@ describe("app page stream helpers", () => {
   it("forwards basePath to the SSR handler", async () => {
     const ssrHandler = vi.fn(async () => createStream(["<html>base-path</html>"]));
 
-    const htmlStream = await renderAppPageHtmlStream({
+    const { htmlStream } = await renderAppPageHtmlStream({
       basePath: "/docs",
       fontData: createAppPageFontData({
         getLinks: () => [],
@@ -380,5 +385,80 @@ describe("app page stream helpers", () => {
         hasLocalBoundary: false,
       }),
     ).toBe(false);
+  });
+
+  it("emits the `x-edge-runtime: 1` marker on HTML stream responses for edge-runtime routes", async () => {
+    const response = await renderAppPageHtmlResponse({
+      clearRequestContext: vi.fn(),
+      fontData: { links: [], preloads: [], styles: [] },
+      isEdgeRuntime: true,
+      navigationContext: null,
+      rscStream: createStream(["flight"]),
+      ssrHandler: {
+        async handleSsr() {
+          return createStream(["<html>page</html>"]);
+        },
+      },
+      status: 200,
+    });
+
+    expect(response.headers.get("x-edge-runtime")).toBe("1");
+  });
+
+  it("omits the `x-edge-runtime` marker on HTML stream responses for nodejs-runtime routes", async () => {
+    const response = await renderAppPageHtmlResponse({
+      clearRequestContext: vi.fn(),
+      fontData: { links: [], preloads: [], styles: [] },
+      navigationContext: null,
+      rscStream: createStream(["flight"]),
+      ssrHandler: {
+        async handleSsr() {
+          return createStream(["<html>page</html>"]);
+        },
+      },
+      status: 200,
+    });
+
+    expect(response.headers.get("x-edge-runtime")).toBeNull();
+  });
+});
+
+describe("buildAppPageLinkHeader", () => {
+  // Each entry is ~40 chars including the `, ` join.
+  const reactEntry = (i: number) => `</r${i}.js>; rel=preload; as=script`;
+  const fontEntry = (i: number) => `</f${i}.woff2>; rel=preload; as=font`;
+
+  it("combines React preloads first, then font preloads", () => {
+    const header = buildAppPageLinkHeader(reactEntry(1), fontEntry(1), 6000);
+    expect(header).toBe(`${reactEntry(1)}, ${fontEntry(1)}`);
+  });
+
+  it("returns an empty string when the cap is 0 (emission disabled)", () => {
+    expect(buildAppPageLinkHeader(reactEntry(1), fontEntry(1), 0)).toBe("");
+  });
+
+  it("defaults to a 6000-char cap when no limit is supplied", () => {
+    const react = [reactEntry(1), reactEntry(2)].join(", ");
+    expect(buildAppPageLinkHeader(react, undefined, undefined)).toBe(react);
+  });
+
+  it("drops whole entries once the cap is exceeded (never a partial entry)", () => {
+    const react = [reactEntry(1), reactEntry(2), reactEntry(3)].join(", ");
+    // Cap fits only the first two entries.
+    const limit = reactEntry(1).length + 2 + reactEntry(2).length + 1;
+    const header = buildAppPageLinkHeader(react, undefined, limit);
+    expect(header.length).toBeLessThanOrEqual(limit);
+    expect(header).toBe(`${reactEntry(1)}, ${reactEntry(2)}`);
+  });
+
+  it("drops trailing font preloads first under a tight cap (React preloads survive)", () => {
+    const limit = reactEntry(1).length + 2; // room for one entry only
+    const header = buildAppPageLinkHeader(reactEntry(1), fontEntry(1), limit);
+    expect(header).toBe(reactEntry(1));
+  });
+
+  it("ignores empty sources", () => {
+    expect(buildAppPageLinkHeader("", fontEntry(1), 6000)).toBe(fontEntry(1));
+    expect(buildAppPageLinkHeader(undefined, undefined, 6000)).toBe("");
   });
 });

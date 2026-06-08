@@ -7,6 +7,7 @@
  *   vinext build   Build for production
  *   vinext start   Start production server
  *   vinext deploy  Deploy to Cloudflare Workers
+ *   vinext typegen Generate App Router route helper types
  *   vinext lint    Run linter (delegates to eslint/oxlint)
  *
  * Automatically configures Vite with the vinext plugin — no vite.config.ts
@@ -14,20 +15,30 @@
  */
 
 import vinext from "./index.js";
-import { printBuildReport } from "./build/report.js";
 import { runPrerender } from "./build/run-prerender.js";
 import path from "node:path";
 import fs from "node:fs";
 import { pathToFileURL } from "node:url";
 import { createRequire } from "node:module";
 import { execFileSync } from "node:child_process";
-import { detectPackageManager, ensureViteConfigCompatibility } from "./utils/project.js";
+import {
+  detectPackageManager,
+  ensureViteConfigCompatibility,
+  hasAppDir,
+  hasViteConfig,
+} from "./utils/project.js";
 import { deploy as runDeploy, parseDeployArgs } from "./deploy.js";
 import { runCheck, formatReport } from "./check.js";
 import { init as runInit, getReactUpgradeDeps } from "./init.js";
 import { loadDotenv } from "./config/dotenv.js";
-import { loadNextConfig, resolveNextConfig, PHASE_PRODUCTION_BUILD } from "./config/next-config.js";
+import {
+  createRscCompatibilityId,
+  loadNextConfig,
+  resolveNextConfig,
+  PHASE_PRODUCTION_BUILD,
+} from "./config/next-config.js";
 import { emitStandaloneOutput } from "./build/standalone.js";
+import { cleanBuildOutput } from "./build/clean-output.js";
 import { resolveVinextPackageRoot } from "./utils/vinext-root.js";
 import { parseArgs } from "./cli-args.js";
 import {
@@ -35,6 +46,7 @@ import {
   formatAlreadyRunningError,
   tryAcquireLockfile,
 } from "./server/dev-lockfile.js";
+import { generateRouteTypes } from "./typegen.js";
 
 // ─── Resolve Vite from the project root ────────────────────────────────────────
 //
@@ -195,13 +207,6 @@ function createBuildLogger(vite: ViteModule): import("vite").Logger {
 
 // ─── Auto-configuration ───────────────────────────────────────────────────────
 
-function hasAppDir(): boolean {
-  return (
-    fs.existsSync(path.join(process.cwd(), "app")) ||
-    fs.existsSync(path.join(process.cwd(), "src", "app"))
-  );
-}
-
 function hasPagesDir(): boolean {
   return (
     fs.existsSync(path.join(process.cwd(), "pages")) ||
@@ -209,12 +214,18 @@ function hasPagesDir(): boolean {
   );
 }
 
-function hasViteConfig(): boolean {
-  return (
-    fs.existsSync(path.join(process.cwd(), "vite.config.ts")) ||
-    fs.existsSync(path.join(process.cwd(), "vite.config.js")) ||
-    fs.existsSync(path.join(process.cwd(), "vite.config.mjs"))
+async function loadBuildEmptyOutDir(vite: ViteModule, root: string): Promise<boolean | undefined> {
+  if (!hasViteConfig(root)) return undefined;
+
+  // Read the raw user config before the multi-environment build so
+  // `build.emptyOutDir: false` remains an escape hatch for vinext's upfront clean.
+  const loaded = await vite.loadConfigFromFile(
+    { command: "build", mode: "production" },
+    undefined,
+    root,
   );
+  const emptyOutDir = loaded?.config.build?.emptyOutDir;
+  return typeof emptyOutDir === "boolean" ? emptyOutDir : undefined;
 }
 
 /**
@@ -223,7 +234,7 @@ function hasViteConfig(): boolean {
  * If there's no vite.config, this provides everything needed.
  */
 function buildViteConfig(overrides: Record<string, unknown> = {}, logger?: import("vite").Logger) {
-  const hasConfig = hasViteConfig();
+  const hasConfig = hasViteConfig(process.cwd());
 
   // If a vite.config exists, let Vite load it — only set root and overrides.
   // The user's config already has vinext() + rsc() plugins configured.
@@ -432,13 +443,37 @@ async function buildApp() {
 
   console.log(`\n  vinext build  (Vite ${getViteVersion()})\n`);
 
-  const isApp = hasAppDir();
+  const root = process.cwd();
+  const isApp = hasAppDir(process.cwd());
   const resolvedNextConfig = await resolveNextConfig(
-    await loadNextConfig(process.cwd(), PHASE_PRODUCTION_BUILD),
-    process.cwd(),
+    await loadNextConfig(root, PHASE_PRODUCTION_BUILD),
+    root,
   );
+
+  // Coordinate a single build ID across every vinext() plugin instance in this
+  // build. A hybrid app+pages build runs the App Router multi-environment build
+  // (buildApp) and a separate Pages Router SSR build (vite.build) as distinct
+  // plugin instances; without this, each resolves its own (potentially random)
+  // ID and the runtime, prerender manifest, and dist/server/BUILD_ID disagree.
+  // We resolve it once here — resolveNextConfig() already ran resolveBuildId()
+  // honoring the user's generateBuildId (including the null→UUID fallback) — and
+  // share that authoritative value via env so every plugin instance adopts it.
+  //
+  // Not cleaned up intentionally: `vinext build` runs once and the process
+  // exits, so there is no in-process reuse to leak into. The var is namespaced
+  // to vinext's build flow and is never read by dev or standalone resolveBuildId.
+  process.env.__VINEXT_SHARED_BUILD_ID = resolvedNextConfig.buildId;
+
+  // Same coordination for the App Router RSC compatibility token. Without a
+  // pinned deploymentId, createRscCompatibilityId() mints a random UUID per
+  // plugin instance, so a hybrid app+pages build would bake two different
+  // compatibility tokens. Resolve it once and share it (see the plugin's
+  // adoption site). Reuses deploymentId when set (already stable across
+  // instances).
+  process.env.__VINEXT_SHARED_RSC_COMPATIBILITY_ID = createRscCompatibilityId(resolvedNextConfig);
+
   const outputMode = resolvedNextConfig.output;
-  const distDir = path.resolve(process.cwd(), "dist");
+  const distDir = path.resolve(root, "dist");
 
   // Pre-flight check: verify vinext's own dist/ exists before starting the build.
   // Without this, a missing dist/ (e.g. from a broken install) only surfaces after
@@ -475,6 +510,12 @@ async function buildApp() {
     }
   }
 
+  cleanBuildOutput({
+    root,
+    outDir: distDir,
+    emptyOutDir: await loadBuildEmptyOutDir(vite, root),
+  });
+
   // All paths (App Router, Pages Router + Cloudflare, Pages Router plain Node)
   // use createBuilder + buildApp(). vinext() defines the appropriate environments
   // in its config() hook for each case, so cloudflare() and the plain Node SSR
@@ -502,7 +543,7 @@ async function buildApp() {
       // will re-register itself, and cloudflare() which must not run here.
       const root = process.cwd();
       let userTransformPlugins: import("vite").PluginOption[] = [];
-      if (hasViteConfig()) {
+      if (hasViteConfig(process.cwd())) {
         const loaded = await vite.loadConfigFromFile(
           { command: "build", mode: "production", isSsrBuild: true },
           undefined,
@@ -591,6 +632,7 @@ async function buildApp() {
   // Opt-in via --precompress CLI flag or `precompress: true` in plugin options.
 
   process.stdout.write("\x1b[0m");
+  const { printBuildReport } = await import("./build/report.js");
   await printBuildReport({
     root: process.cwd(),
     pageExtensions: resolvedNextConfig.pageExtensions,
@@ -719,6 +761,26 @@ async function check() {
 
   const result = runCheck(root);
   console.log(formatReport(result));
+}
+
+async function typegen() {
+  const parsed = parseArgs(rawArgs);
+  if (parsed.help) return printHelp("typegen");
+
+  const root = path.resolve(parsed.positionals?.[0] ?? process.cwd());
+  loadDotenv({
+    root,
+    mode: "production",
+  });
+  const resolvedNextConfig = await resolveNextConfig(
+    await loadNextConfig(root, PHASE_PRODUCTION_BUILD),
+    root,
+  );
+  const outputPath = await generateRouteTypes({
+    root,
+    pageExtensions: resolvedNextConfig.pageExtensions,
+  });
+  console.log(`\n  Generated route types at ${path.relative(root, outputPath)}\n`);
 }
 
 async function initCommand() {
@@ -889,6 +951,22 @@ function printHelp(cmd?: string) {
     return;
   }
 
+  if (cmd === "typegen") {
+    console.log(`
+  vinext typegen - Generate App Router route helper types
+
+  Usage: vinext typegen [directory] [options]
+
+  Generates Next-compatible global route helpers for App Router projects:
+  PageProps, LayoutProps, and RouteContext. Output is written to
+  .next/types/routes.d.ts under the target directory.
+
+  Options:
+    -h, --help    Show this help
+`);
+    return;
+  }
+
   if (cmd === "lint") {
     console.log(`
   vinext lint - Run linter
@@ -914,6 +992,7 @@ function printHelp(cmd?: string) {
     build    Build for production
     start    Start production server
     deploy   Deploy to Cloudflare Workers
+    typegen  Generate App Router route helper types
     init     Migrate a Next.js project to vinext
     check    Scan Next.js app for compatibility
     lint     Run linter
@@ -926,6 +1005,7 @@ function printHelp(cmd?: string) {
     vinext dev                  Start dev server on port 3000
     vinext dev -p 4000          Start dev server on port 4000
     vinext build                Build for production
+    vinext typegen              Generate route helper types
     vinext start                Start production server
     vinext deploy               Deploy to Cloudflare Workers
     vinext init                 Migrate a Next.js project
@@ -987,6 +1067,13 @@ switch (command) {
 
   case "check":
     check().catch((e) => {
+      console.error(e);
+      process.exit(1);
+    });
+    break;
+
+  case "typegen":
+    typegen().catch((e) => {
       console.error(e);
       process.exit(1);
     });

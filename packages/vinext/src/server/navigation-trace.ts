@@ -1,16 +1,32 @@
 export const NAVIGATION_TRACE_SCHEMA_VERSION = 0;
 
-export type NavigationTraceSchemaVersion = 0;
+type NavigationTraceSchemaVersion = 0;
 
 export const NavigationTraceReasonCodes = {
+  cacheProofRejected: "NC_CACHE_REJECT",
   commitCurrent: "NC_COMMIT",
+  interceptedCommitCurrent: "NC_INTERCEPT_COMMIT",
+  interceptedRejectedIncompatibleRoot: "NC_INTERCEPT_REJECT_ROOT",
+  interceptedRejectedMissingProof: "NC_INTERCEPT_REJECT_MISSING_PROOF",
+  interceptedRejectedMissingSlotProof: "NC_INTERCEPT_REJECT_SLOT",
+  interceptedRejectedTargetMismatch: "NC_INTERCEPT_REJECT_TARGET",
+  interceptedRejectedUndeclaredTopology: "NC_INTERCEPT_REJECT_GRAPH",
+  interceptedRejectedUnknownSource: "NC_INTERCEPT_REJECT_SOURCE",
   prefetchOnly: "NC_PREFETCH_ONLY",
   requestWork: "NC_REQUEST",
   rootBoundaryChanged: "NC_ROOT",
   rootBoundaryUnknown: "NC_ROOT_UNKNOWN",
   staleOperation: "NC_STALE",
 } satisfies Readonly<{
+  cacheProofRejected: "NC_CACHE_REJECT";
   commitCurrent: "NC_COMMIT";
+  interceptedCommitCurrent: "NC_INTERCEPT_COMMIT";
+  interceptedRejectedIncompatibleRoot: "NC_INTERCEPT_REJECT_ROOT";
+  interceptedRejectedMissingProof: "NC_INTERCEPT_REJECT_MISSING_PROOF";
+  interceptedRejectedMissingSlotProof: "NC_INTERCEPT_REJECT_SLOT";
+  interceptedRejectedTargetMismatch: "NC_INTERCEPT_REJECT_TARGET";
+  interceptedRejectedUndeclaredTopology: "NC_INTERCEPT_REJECT_GRAPH";
+  interceptedRejectedUnknownSource: "NC_INTERCEPT_REJECT_SOURCE";
   prefetchOnly: "NC_PREFETCH_ONLY";
   requestWork: "NC_REQUEST";
   rootBoundaryChanged: "NC_ROOT";
@@ -34,10 +50,14 @@ export type NavigationTraceReasonCode =
 export type NavigationTraceTransactionCode =
   (typeof NavigationTraceTransactionCodes)[keyof typeof NavigationTraceTransactionCodes];
 
-export type NavigationTraceCode = NavigationTraceReasonCode | NavigationTraceTransactionCode;
+type NavigationTraceCode = NavigationTraceReasonCode | NavigationTraceTransactionCode;
 
-export type NavigationTraceFieldName =
+type NavigationTraceFieldName =
   | "activeNavigationId"
+  | "cacheProofCode"
+  | "cacheProofMode"
+  | "cacheProofReuseClass"
+  | "cacheProofScope"
   | "currentRootLayoutTreePath"
   | "currentVisibleCommitVersion"
   | "nextRootLayoutTreePath"
@@ -46,15 +66,16 @@ export type NavigationTraceFieldName =
   | "pendingOperationId"
   | "startedVisibleCommitVersion"
   | "startedNavigationId"
-  | "targetHref";
+  | "targetHref"
+  | "traverseDirection";
 
-export type NavigationTraceFieldValue = string | number | boolean | null;
+type NavigationTraceFieldValue = string | number | boolean | null;
 
 export type NavigationTraceFields = Readonly<
   Partial<Record<NavigationTraceFieldName, NavigationTraceFieldValue>>
 >;
 
-export type NavigationTraceEntry = Readonly<{
+type NavigationTraceEntry = Readonly<{
   code: NavigationTraceCode;
   fields: NavigationTraceFields;
 }>;

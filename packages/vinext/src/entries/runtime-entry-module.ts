@@ -1,17 +1,6 @@
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
-
-/**
- * Convert Windows-style backslash path separators to forward slashes.
- *
- * Generated entry modules embed absolute filesystem paths inside `import`
- * statements. On Windows the OS-native paths use `\` which is invalid in JS
- * module specifiers, so every entry generator normalizes paths through this
- * helper before stringifying them into the emitted code.
- */
-export function normalizePathSeparators(p: string): string {
-  return p.replace(/\\/g, "/");
-}
+import { normalizePathSeparators } from "../utils/path.js";
 
 /**
  * Resolve a sibling module path relative to a caller's `import.meta.url`,
@@ -37,12 +26,20 @@ export function resolveEntryPath(rel: string, base: string): string {
  * published packages.
  */
 export function resolveRuntimeEntryModule(name: string): string {
+  return resolveRuntimeModulePath("server", name);
+}
+
+export function resolveClientRuntimeModule(name: string): string {
+  return resolveRuntimeModulePath("client", name);
+}
+
+function resolveRuntimeModulePath(directory: "client" | "server", name: string): string {
   for (const ext of [".ts", ".js", ".mts", ".mjs"]) {
-    const filePath = resolveEntryPath(`../server/${name}${ext}`, import.meta.url);
+    const filePath = resolveEntryPath(`../${directory}/${name}${ext}`, import.meta.url);
     if (fs.existsSync(filePath)) {
       return filePath;
     }
   }
 
-  return resolveEntryPath(`../server/${name}.js`, import.meta.url);
+  return resolveEntryPath(`../${directory}/${name}.js`, import.meta.url);
 }

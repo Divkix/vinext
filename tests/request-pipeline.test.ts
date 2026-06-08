@@ -3,6 +3,7 @@ import {
   applyConfigHeadersToHeaderRecord,
   applyConfigHeadersToResponse,
   cloneRequestWithHeaders,
+  cloneRequestWithUrl,
   createStaticFileSignal,
   filterInternalHeaders,
   guardProtocolRelativeUrl,
@@ -16,7 +17,9 @@ import {
   validateServerActionPayload,
   validateImageUrl,
   processMiddlewareHeaders,
+  VINEXT_INTERNAL_HEADERS,
 } from "../packages/vinext/src/server/request-pipeline.js";
+import { VINEXT_PRERENDER_ROUTE_PARAMS_HEADER } from "../packages/vinext/src/server/headers.js";
 import { buildRequestHeadersFromMiddlewareResponse } from "../packages/vinext/src/server/middleware-request-headers.js";
 
 // ── guardProtocolRelativeUrl ────────────────────────────────────────────
@@ -336,6 +339,28 @@ describe("normalizeTrailingSlash", () => {
   it("preserves query string in redirect", () => {
     const res = normalizeTrailingSlash("/about", "", true, "?foo=1");
     expect(res!.headers.get("Location")).toBe("/about/?foo=1");
+  });
+
+  it("strips the trailing slash from file-looking paths when trailingSlash is true", () => {
+    const res = normalizeTrailingSlash("/catch-all/hello.world/", "", true, "");
+    expect(res).not.toBeNull();
+    expect(res!.status).toBe(308);
+    expect(res!.headers.get("Location")).toBe("/catch-all/hello.world");
+  });
+
+  it("preserves query string when stripping file-looking paths with trailingSlash true", () => {
+    const res = normalizeTrailingSlash("/catch-all/hello.world/", "", true, "?hello=world");
+    expect(res).not.toBeNull();
+    expect(res!.headers.get("Location")).toBe("/catch-all/hello.world?hello=world");
+  });
+
+  it("does not add a slash to already-canonical file-looking paths with trailingSlash true", () => {
+    expect(normalizeTrailingSlash("/catch-all/hello.world", "", true, "")).toBeNull();
+  });
+
+  it("does not redirect .well-known paths when trailingSlash is true", () => {
+    expect(normalizeTrailingSlash("/.well-known/acme-challenge", "", true, "")).toBeNull();
+    expect(normalizeTrailingSlash("/.well-known/acme-challenge/", "", true, "")).toBeNull();
   });
 
   it("prepends basePath to redirect Location", () => {
@@ -667,6 +692,7 @@ describe("INTERNAL_HEADERS", () => {
       "x-matched-path",
       "x-nextjs-data",
       "x-next-resume-state-length",
+      "x-action-forwarded",
     ];
     expect(INTERNAL_HEADERS).toEqual(expected);
   });
@@ -693,6 +719,20 @@ describe("filterInternalHeaders", () => {
     }
     expect(result.get("user-agent")).toBe("test");
     expect(result.get("cookie")).toBe("session=abc");
+  });
+
+  it("strips vinext-only internal headers without extending Next.js INTERNAL_HEADERS", () => {
+    const headers = new Headers({
+      [VINEXT_PRERENDER_ROUTE_PARAMS_HEADER]: "forged",
+      "user-agent": "test",
+    });
+
+    const result = filterInternalHeaders(headers);
+
+    expect(INTERNAL_HEADERS).not.toContain(VINEXT_PRERENDER_ROUTE_PARAMS_HEADER);
+    expect(VINEXT_INTERNAL_HEADERS).toEqual([VINEXT_PRERENDER_ROUTE_PARAMS_HEADER]);
+    expect(result.has(VINEXT_PRERENDER_ROUTE_PARAMS_HEADER)).toBe(false);
+    expect(result.get("user-agent")).toBe("test");
   });
 
   it("strips headers case-insensitively", () => {
@@ -887,5 +927,59 @@ describe("cloneRequestWithHeaders", () => {
     expect(cloned.method).toBe("GET");
     expect(cloned.body).toBeNull();
     expect(cloned.headers.get("accept")).toBe("text/html");
+  });
+});
+
+// ── cloneRequestWithUrl ──────────────────────────────────────────────────
+//
+// Used to hide the internal `_rsc` cache-busting query from userland middleware
+// without dropping Workers `cf` metadata or throwing on bodied requests (which a
+// bare `new Request(url, request)` would do on Node/undici without `duplex`).
+
+describe("cloneRequestWithUrl", () => {
+  it("overrides the URL", () => {
+    const original = new Request("http://localhost/path?_rsc=abc&keep=1");
+    const cloned = cloneRequestWithUrl(original, "http://localhost/path?keep=1");
+    expect(cloned.url).toBe("http://localhost/path?keep=1");
+  });
+
+  it("preserves method and headers", () => {
+    const original = new Request("http://localhost/path?_rsc=abc", {
+      method: "GET",
+      headers: new Headers({ "x-keep": "yes" }),
+    });
+    const cloned = cloneRequestWithUrl(original, "http://localhost/path");
+    expect(cloned.method).toBe("GET");
+    expect(cloned.headers.get("x-keep")).toBe("yes");
+  });
+
+  it("preserves cf property when defined via Object.defineProperty", () => {
+    const original = new Request("http://localhost/path?_rsc=abc");
+    Object.defineProperty(original, "cf", {
+      value: { country: "US" },
+      enumerable: true,
+      configurable: true,
+    });
+    const cloned = cloneRequestWithUrl(original, "http://localhost/path");
+    expect(Reflect.get(cloned, "cf")).toEqual({ country: "US" });
+  });
+
+  it("preserves body readability for streaming requests", async () => {
+    const bodyText = "hello world";
+    const original = new Request("http://localhost/path?_rsc=abc", {
+      method: "POST",
+      body: bodyText,
+    });
+    const cloned = cloneRequestWithUrl(original, "http://localhost/path");
+    expect(cloned.method).toBe("POST");
+    expect(cloned.url).toBe("http://localhost/path");
+    const text = await cloned.text();
+    expect(text).toBe(bodyText);
+  });
+
+  it("preserves redirect mode", () => {
+    const original = new Request("http://localhost/path?_rsc=abc", { redirect: "manual" });
+    const cloned = cloneRequestWithUrl(original, "http://localhost/path");
+    expect(cloned.redirect).toBe("manual");
   });
 });

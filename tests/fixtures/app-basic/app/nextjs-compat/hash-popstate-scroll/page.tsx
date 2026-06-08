@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { HashActions } from "./hash-actions";
 
 export default function HashPopstateScrollPage() {
   return (
@@ -17,6 +18,21 @@ export default function HashPopstateScrollPage() {
         <Link href="#top" id="top-link">
           Go to top
         </Link>
+        <Link
+          href="/nextjs-compat/hash-popstate-scroll/plain"
+          id="plain-link"
+          style={{
+            background: "white",
+            border: "1px solid black",
+            padding: 4,
+            position: "fixed",
+            right: 8,
+            top: 8,
+          }}
+        >
+          Go to plain page
+        </Link>
+        <HashActions />
       </nav>
       <div style={{ height: 1200 }} />
       <section id="content" style={{ minHeight: 400 }}>

@@ -54,7 +54,22 @@ export function addLocalePrefix(path: string, locale: string, localeDefault: str
   return `/${locale}${pathWithLeadingSlash}`;
 }
 
-function withBasePath(path: string, basePath = ""): string {
+export function getLocalePathPrefix(
+  path: string,
+  locales: readonly string[] | undefined,
+): string | undefined {
+  if (!locales?.length) return undefined;
+
+  const pathWithLeadingSlash = path.startsWith("/") ? path : `/${path}`;
+  const pathname = pathWithLeadingSlash.split(/[?#]/, 1)[0] ?? pathWithLeadingSlash;
+  const firstSegment = pathname.split("/").find(Boolean);
+  if (!firstSegment) return undefined;
+
+  const normalizedSegment = firstSegment.toLowerCase();
+  return locales.find((locale) => locale.toLowerCase() === normalizedSegment);
+}
+
+function prefixBasePath(path: string, basePath = ""): string {
   if (!basePath) return path;
   return basePath + path;
 }
@@ -91,5 +106,5 @@ export function getDomainLocaleUrl(
   }
 
   const scheme = `http${targetDomain.http ? "" : "s"}://`;
-  return `${scheme}${targetDomain.domain}${withBasePath(localizedPath, basePath)}`;
+  return `${scheme}${targetDomain.domain}${prefixBasePath(localizedPath, basePath)}`;
 }

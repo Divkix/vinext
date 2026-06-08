@@ -19,7 +19,7 @@
  *   await runWithFetchCache(async () => { ... render ... });
  */
 
-import { getCacheHandler, type CachedFetchValue } from "./cache.js";
+import { getDataCacheHandler, type CachedFetchValue } from "./cache.js";
 import { encodeCacheTags } from "../utils/encode-cache-tag.js";
 import { getOrCreateAls } from "./internal/als-registry.js";
 import { getRequestExecutionContext } from "./request-context.js";
@@ -474,6 +474,7 @@ const originalFetch: typeof globalThis.fetch = (_gFetch[_ORIG_FETCH_KEY] ??=
 // multi-environment module instances.
 // ---------------------------------------------------------------------------
 export type FetchCacheState = {
+  cacheableFetchUrls: Set<string>;
   currentRequestTags: string[];
   currentFetchSoftTags: string[];
   currentFetchCacheMode: FetchCacheMode | null;
@@ -508,6 +509,7 @@ if (globalThis.FinalizationRegistry) {
 }
 
 const _fallbackState = (_g[_FALLBACK_KEY] ??= {
+  cacheableFetchUrls: new Set<string>(),
   currentRequestTags: [],
   currentFetchSoftTags: [],
   currentFetchCacheMode: null,
@@ -528,6 +530,7 @@ function _getState(): FetchCacheState {
  * in single-threaded contexts where ALS.run() isn't used.
  */
 function _resetFallbackState(isFetchDedupeActive: boolean): void {
+  _fallbackState.cacheableFetchUrls = new Set<string>();
   _fallbackState.currentRequestTags = [];
   _fallbackState.currentFetchSoftTags = [];
   _fallbackState.currentFetchCacheMode = null;
@@ -542,6 +545,14 @@ function getFetchObservationUrl(input: string | URL | Request): string {
 
 function recordDynamicFetchObservation(input: string | URL | Request): void {
   _getState().dynamicFetchUrls.add(getFetchObservationUrl(input));
+}
+
+function recordCacheableFetchObservation(input: string | URL | Request): void {
+  _getState().cacheableFetchUrls.add(getFetchObservationUrl(input));
+}
+
+export function peekCacheableFetchObservations(): string[] {
+  return [..._getState().cacheableFetchUrls].sort();
 }
 
 export function peekDynamicFetchObservations(): string[] {
@@ -562,6 +573,28 @@ export function consumeDynamicFetchObservations(): string[] {
  */
 export function getCollectedFetchTags(): string[] {
   return [..._getState().currentRequestTags];
+}
+
+/**
+ * Append cache tags to the current request's collected tags.
+ *
+ * Mirrors Next.js's `propagateCacheLifeAndTagsToRevalidateStore`: tags declared
+ * inside a `"use cache"` function (via `cacheTag()`, persisted on the data cache
+ * entry) must also bubble up to the surrounding page / route-handler ISR entry
+ * so `revalidateTag()` / `revalidatePath()` can evict the rendered output, not
+ * just the inner data cache entry. Without this, a cached `"use cache"` result
+ * keeps being served from a stale page/route entry after its tag is revalidated
+ * (issue #1453). Tags are already encoded by the caller; deduped to match the
+ * tagged-fetch path. A no-op for empty input.
+ */
+export function addCollectedRequestTags(tags: readonly string[]): void {
+  if (tags.length === 0) return;
+  const reqTags = _getState().currentRequestTags;
+  for (const tag of tags) {
+    if (!reqTags.includes(tag)) {
+      reqTags.push(tag);
+    }
+  }
 }
 
 /**
@@ -893,7 +926,24 @@ function createPatchedFetch(): typeof globalThis.fetch {
       }
     }
 
+    // Record cacheable-fetch observation synchronously, before the first await,
+    // so that probe-based skip-eligibility checks (e.g. runLayoutProbe) can
+    // snapshot the dependency even when callers start a fetch but do not await
+    // its result before yielding to the probe harness.
+    // If key generation later fails and the fetch falls back to dynamic,
+    // recording both cacheable and dynamic is conservative — a false "unsafe"
+    // result costs performance, not correctness.
+    recordCacheableFetchObservation(input);
+    const reqTags = _getState().currentRequestTags;
     const tags = encodeCacheTags(nextOpts?.tags ?? []);
+    if (tags.length > 0) {
+      for (const tag of tags) {
+        if (!reqTags.includes(tag)) {
+          reqTags.push(tag);
+        }
+      }
+    }
+
     const softTags = _getState().currentFetchSoftTags;
     let fetchInit = stripNextFromInit(init, cacheDirective);
     let cacheKey: string;
@@ -913,17 +963,7 @@ function createPatchedFetch(): typeof globalThis.fetch {
       }
       throw err;
     }
-    const handler = getCacheHandler();
-
-    // Collect tags for this render pass
-    const reqTags = _getState().currentRequestTags;
-    if (tags.length > 0) {
-      for (const tag of tags) {
-        if (!reqTags.includes(tag)) {
-          reqTags.push(tag);
-        }
-      }
-    }
+    const handler = getDataCacheHandler();
 
     // Try cache first
     try {
@@ -1145,6 +1185,7 @@ export async function runWithFetchCache<T>(fn: () => Promise<T>): Promise<T> {
   _ensurePatchInstalled();
   if (isInsideUnifiedScope()) {
     return await runWithUnifiedStateMutation((uCtx) => {
+      uCtx.cacheableFetchUrls = new Set<string>();
       uCtx.currentRequestTags = [];
       uCtx.currentFetchSoftTags = [];
       uCtx.dynamicFetchUrls = new Set<string>();
@@ -1154,6 +1195,7 @@ export async function runWithFetchCache<T>(fn: () => Promise<T>): Promise<T> {
   }
   return _als.run(
     {
+      cacheableFetchUrls: new Set<string>(),
       currentRequestTags: [],
       currentFetchSoftTags: [],
       currentFetchCacheMode: null,

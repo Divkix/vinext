@@ -14,6 +14,15 @@ const nextConfig: NextConfig = {
   // Default is false — trailing slashes are stripped (redirects /about/ → /about)
   // trailingSlash: false,
 
+  // Used by Vitest: nextjs-compat/react-max-headers-length.test.ts — caps the
+  // total emitted preload `Link` header length. Env-driven so the test can
+  // start a fresh dev server per configured value (matching the upstream
+  // fixture's TEST_REACT_MAX_HEADERS_LENGTH switch). Undefined when unset, so
+  // the rest of the suite keeps the default behavior.
+  reactMaxHeadersLength: process.env.TEST_REACT_MAX_HEADERS_LENGTH
+    ? Number.parseInt(process.env.TEST_REACT_MAX_HEADERS_LENGTH, 10)
+    : undefined,
+
   async redirects() {
     return [
       // Used by Vitest: app-router.test.ts
@@ -103,6 +112,14 @@ const nextConfig: NextConfig = {
         { source: "/after-rewrite-about", destination: "/about" },
         // Used by E2E: config-redirect.spec.ts
         { source: "/config-rewrite", destination: "/" },
+        // Used by Vitest: nextjs-compat/hooks.test.ts — usePathname should
+        // return the CANONICAL URL after a config rewrite, not the internal
+        // rewrite target. Ported from Next.js test/e2e/app-dir/hooks/next.config.js
+        // https://github.com/vercel/next.js/blob/canary/test/e2e/app-dir/hooks/next.config.js
+        {
+          source: "/rewritten-use-pathname",
+          destination: "/nextjs-compat/hooks-search",
+        },
       ],
       fallback: [
         // Used by Vitest: app-router.test.ts — fallback rewrite gated on a

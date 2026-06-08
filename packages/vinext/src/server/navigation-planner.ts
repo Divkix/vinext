@@ -1,11 +1,27 @@
-import type { RouteManifest } from "../routing/app-route-graph.js";
+import {
+  matchRoutePattern,
+  matchRoutePatternPrefix,
+  matchRoutePatternWithOptionalDynamicSegments,
+} from "../routing/route-pattern.js";
+import { splitPathnameForRouteMatch } from "../routing/utils.js";
+import type {
+  RouteManifest,
+  RouteManifestInterception,
+  RouteManifestRoute,
+} from "../routing/app-route-graph.js";
 import { compareAppElementsSlotIds, type AppElementsSlotBinding } from "./app-elements.js";
+import type {
+  CacheEntryReuseDecision,
+  CacheEntryReuseProof,
+  CacheProofRejectionCode,
+} from "./cache-proof.js";
 import {
   NavigationTraceReasonCodes,
   createNavigationLifecycleTraceFields,
   createNavigationTrace,
   type NavigationTrace,
   type NavigationTraceFields,
+  type NavigationTraceReasonCode,
 } from "./navigation-trace.js";
 
 export type OperationLane =
@@ -27,6 +43,8 @@ export type OperationToken = {
 };
 
 export type RouteSnapshotV0 = {
+  interception: InterceptionSnapshotV0 | null;
+  interceptionContext: string | null;
   routeId: string;
   // Ordered ancestor-first, with the root layout at index 0. Same-layout
   // persistence uses prefix comparison, so callers must preserve this order.
@@ -36,6 +54,14 @@ export type RouteSnapshotV0 = {
   displayUrl: string;
   matchedUrl: string;
   slotBindings: readonly ParallelSlotBindingSnapshotV0[];
+};
+
+export type InterceptionSnapshotV0 = {
+  sourceMatchedUrl: string;
+  sourceRouteId: string;
+  slotId: string;
+  targetMatchedUrl: string;
+  targetRouteId: string;
 };
 
 export type MountedParallelSlotSnapshotV0 = {
@@ -64,33 +90,38 @@ export type NavigationPlannerStateV0 = {
 };
 
 export type RefreshScope = "visible";
+export type TraverseDirection = "back" | "forward" | "unknown";
 
 export type NavigationEvent =
   | { kind: "navigate"; href: string; mode: "push" | "replace" }
   | { kind: "refresh"; scope: RefreshScope }
-  | { kind: "traverse"; direction: "back" | "forward"; historyState: unknown }
+  | { kind: "traverse"; direction: TraverseDirection; historyState: unknown }
   | { kind: "prefetch"; href: string }
   | { kind: "flightResponseArrived"; token: OperationToken; result: FlightResultV0 };
 
-export type RequestedWork =
+type RequestedWork =
   | { kind: "flight"; href: string; mode: "push" | "replace" | "refresh" }
-  | { direction: "back" | "forward"; historyState: unknown; kind: "traverseFlight" }
+  | { direction: TraverseDirection; historyState: unknown; kind: "traverseFlight" }
   | { kind: "prefetch"; href: string };
 
-export type CommitProposal = {
+type CommitProposal = {
+  cacheEntryReuseDecision?: AcceptedCacheEntryReuseDecision;
   preserveAbsentSlots: boolean;
   preserveElementIds: readonly string[];
   preservePreviousSlotIds: readonly string[];
-  reason: "currentRootBoundary" | "rootBoundaryUnknownFallback";
+  reason: "currentRootBoundary" | "interceptedCurrentRootBoundary" | "unprovenTopologyFallback";
   targetSnapshot: RouteSnapshotV0;
 };
 
-export type NoCommitReason = "prefetchOnly";
-export type HardNavigationReason = "rootBoundaryChanged";
+type NoCommitReason = "prefetchOnly";
+type HardNavigationReason =
+  | "cacheProofRejected"
+  | "interceptionProofRejected"
+  | "rootBoundaryChanged";
 export type RootBoundaryTransition =
   | "currentRootBoundary"
   | "rootBoundaryChanged"
-  | "rootBoundaryUnknownFallback";
+  | "rootBoundaryUnknown";
 
 export type NavigationDecisionV0 =
   | {
@@ -120,24 +151,60 @@ export type NavigationDecisionV0 =
     };
 
 export type FlightResultV0 = {
+  cacheEntryReuseProof?: CacheEntryReuseProof;
   href: string;
   targetSnapshot: RouteSnapshotV0;
 };
 
 export type NavigationPlannerInput = {
-  // Reserved for #726-CORE-09 route-graph-aware planning. CORE-07/08 only
-  // routes the existing root-boundary decision through the planner, so browser
-  // callers pass null until route topology becomes part of the decision input.
+  // Graph-owned route topology is the semantic authority for root/layout/slot
+  // decisions whenever the caller can supply it. Null keeps the legacy
+  // snapshot-only path for low-level tests and unknown route shapes.
   routeManifest: RouteManifest | null;
   state: NavigationPlannerStateV0;
   event: NavigationEvent;
 };
+
+type RouteTopologySnapshot = {
+  layoutIds: readonly string[];
+  rootBoundaryId: string | null;
+  rootLayoutTreePath: string | null;
+  slotBindings: readonly ParallelSlotBindingSnapshotV0[];
+};
+
+type RouteTopologyResolution =
+  | {
+      kind: "known";
+      topology: RouteTopologySnapshot;
+    }
+  | {
+      kind: "unknown";
+    };
+
+type RouteTopologySlotBindingSource = "snapshot" | "manifestTarget";
+type AcceptedCacheEntryReuseDecision = Extract<CacheEntryReuseDecision, { canReuse: true }>;
+type RejectedCacheEntryReuseDecision = Extract<CacheEntryReuseDecision, { canReuse: false }>;
+type CacheEntryProofEvaluation =
+  | Readonly<{
+      decision: AcceptedCacheEntryReuseDecision | null;
+      kind: "accepted";
+    }>
+  | Readonly<{
+      decision: RejectedCacheEntryReuseDecision | null;
+      kind: "rejected";
+    }>;
+
+const ROUTE_INTERCEPTION_CONTEXT_SEPARATOR = "\0";
+const CACHE_ENTRY_PROOF_MISSING_CODE =
+  "CP_CACHE_ENTRY_PROOF_MISSING" satisfies CacheProofRejectionCode;
 
 function createRequestWorkDecision(options: {
   eventKind: NavigationEvent["kind"];
   state: NavigationPlannerStateV0;
   work: RequestedWork;
 }): NavigationDecisionV0 {
+  const traverseFields =
+    options.work.kind === "traverseFlight" ? { traverseDirection: options.work.direction } : {};
   return {
     kind: "requestWork",
     token: options.state.nextOperationToken,
@@ -145,6 +212,7 @@ function createRequestWorkDecision(options: {
     trace: createNavigationTrace(NavigationTraceReasonCodes.requestWork, {
       eventKind: options.eventKind,
       targetHref: getRequestedWorkTargetHref(options.work),
+      ...traverseFields,
     }),
   };
 }
@@ -163,22 +231,207 @@ function getRequestedWorkTargetHref(work: RequestedWork): string | null {
   }
 }
 
+function createSnapshotRouteTopology(snapshot: RouteSnapshotV0): RouteTopologySnapshot {
+  return {
+    layoutIds: snapshot.layoutIds,
+    rootBoundaryId: snapshot.rootBoundaryId,
+    rootLayoutTreePath: snapshot.rootBoundaryId,
+    slotBindings: snapshot.slotBindings,
+  };
+}
+
+function stripInterceptionContextFromRouteId(routeId: string): string {
+  const separatorIndex = routeId.indexOf(ROUTE_INTERCEPTION_CONTEXT_SEPARATOR);
+  return separatorIndex === -1 ? routeId : routeId.slice(0, separatorIndex);
+}
+
+function getMatchedUrlPathname(matchedUrl: string): string {
+  try {
+    return new URL(matchedUrl, "https://vinext.local").pathname;
+  } catch {
+    const [withoutHash = ""] = matchedUrl.split("#");
+    const [pathname = ""] = withoutHash.split("?");
+    return pathname === "" ? "/" : pathname;
+  }
+}
+
+function splitMatchedUrlIntoRouteParts(matchedUrl: string): string[] {
+  return splitPathnameForRouteMatch(getMatchedUrlPathname(matchedUrl));
+}
+
+function findRouteManifestRouteByMatchedUrl(
+  routeManifest: RouteManifest,
+  matchedUrl: string,
+): RouteManifestRoute | null {
+  const urlParts = splitMatchedUrlIntoRouteParts(matchedUrl);
+
+  // RouteManifest preserves buildAppRouteGraph's compareRoutes() order, so the
+  // first pattern match follows the same static/dynamic/catch-all precedence as
+  // request-time route matching instead of raw filesystem scan order.
+  for (const route of routeManifest.segmentGraph.routes.values()) {
+    if (matchRoutePattern(urlParts, route.patternParts) !== null) {
+      return route;
+    }
+  }
+
+  return null;
+}
+
+function routeManifestRouteMatchesUrl(route: RouteManifestRoute, matchedUrl: string): boolean {
+  return matchRoutePattern(splitMatchedUrlIntoRouteParts(matchedUrl), route.patternParts) !== null;
+}
+
+function findRouteManifestRouteByIdOrMatchedUrl(options: {
+  matchedUrl: string;
+  routeId: string;
+  routeManifest: RouteManifest;
+}): RouteManifestRoute | null {
+  const routeId = stripInterceptionContextFromRouteId(options.routeId);
+  const route = options.routeManifest.segmentGraph.routes.get(routeId);
+  if (route && routeManifestRouteMatchesUrl(route, options.matchedUrl)) {
+    return route;
+  }
+
+  return findRouteManifestRouteByMatchedUrl(options.routeManifest, options.matchedUrl);
+}
+
+function findRouteManifestRouteForSnapshot(
+  routeManifest: RouteManifest,
+  snapshot: RouteSnapshotV0,
+): RouteManifestRoute | null {
+  if (snapshot.interception !== null) {
+    return findRouteManifestRouteByIdOrMatchedUrl({
+      matchedUrl: snapshot.interception.sourceMatchedUrl,
+      routeId: snapshot.interception.sourceRouteId,
+      routeManifest,
+    });
+  }
+
+  return findRouteManifestRouteByIdOrMatchedUrl({
+    matchedUrl: snapshot.matchedUrl,
+    routeId: snapshot.routeId,
+    routeManifest,
+  });
+}
+
+function resolveRouteManifestSlotBindings(
+  routeManifest: RouteManifest,
+  route: RouteManifestRoute,
+): readonly ParallelSlotBindingSnapshotV0[] {
+  const bindings: ParallelSlotBindingSnapshotV0[] = [];
+  for (const slotId of route.slotIds) {
+    const binding = routeManifest.segmentGraph.slotBindings.get(`${route.id}::${slotId}`);
+    if (!binding) continue;
+    bindings.push({
+      ownerLayoutId: binding.ownerLayoutId,
+      slotId: binding.slotId,
+      state: binding.state,
+    });
+  }
+
+  return bindings.sort((left, right) => compareAppElementsSlotIds(left.slotId, right.slotId));
+}
+
+function resolveRouteManifestRootLayoutTreePath(
+  routeManifest: RouteManifest,
+  route: RouteManifestRoute,
+): string | null {
+  if (route.rootBoundaryId === null) return null;
+  return routeManifest.segmentGraph.rootBoundaries.get(route.rootBoundaryId)?.treePath ?? null;
+}
+
+function resolveRouteTopologySnapshot(options: {
+  routeManifest: RouteManifest | null;
+  slotBindingSource: RouteTopologySlotBindingSource;
+  snapshot: RouteSnapshotV0;
+}): RouteTopologyResolution {
+  const route =
+    options.routeManifest === null
+      ? null
+      : findRouteManifestRouteForSnapshot(options.routeManifest, options.snapshot);
+  if (route === null || options.routeManifest === null) {
+    return { kind: "unknown" };
+  }
+
+  // Intercepted targets carry the source route's tree topology, not the direct
+  // target route's, so direct-target manifest slot bindings do not apply.
+  const shouldUseManifestSlotBindings =
+    options.slotBindingSource === "manifestTarget" && options.snapshot.interception === null;
+
+  return {
+    kind: "known",
+    topology: {
+      layoutIds: route.layoutIds,
+      rootBoundaryId: route.rootBoundaryId,
+      rootLayoutTreePath: resolveRouteManifestRootLayoutTreePath(options.routeManifest, route),
+      slotBindings: shouldUseManifestSlotBindings
+        ? resolveRouteManifestSlotBindings(options.routeManifest, route)
+        : options.snapshot.slotBindings,
+    },
+  };
+}
+
+function findRouteManifestInterceptionForProof(
+  routeManifest: RouteManifest,
+  proof: InterceptionSnapshotV0,
+): RouteManifestInterception | null {
+  const sourceParts = splitMatchedUrlIntoRouteParts(proof.sourceMatchedUrl);
+  const targetParts = splitMatchedUrlIntoRouteParts(proof.targetMatchedUrl);
+  const targetRoute = findRouteManifestRouteByIdOrMatchedUrl({
+    matchedUrl: proof.targetMatchedUrl,
+    routeId: proof.targetRouteId,
+    routeManifest,
+  });
+  const candidateInterceptions =
+    routeManifest.segmentGraph.interceptionsBySlotId.get(proof.slotId) ?? [];
+
+  for (const interception of candidateInterceptions) {
+    if (!matchRoutePatternPrefix(sourceParts, interception.sourcePatternParts)) {
+      continue;
+    }
+    const exactTargetParams = matchRoutePattern(targetParts, interception.targetPatternParts);
+    const allowsMiddlewareRewriteTarget =
+      exactTargetParams === null &&
+      matchRoutePatternWithOptionalDynamicSegments(targetParts, interception.targetPatternParts);
+    if (exactTargetParams === null && !allowsMiddlewareRewriteTarget) {
+      continue;
+    }
+    if (
+      !allowsMiddlewareRewriteTarget &&
+      interception.targetRouteId !== null &&
+      targetRoute?.id !== interception.targetRouteId
+    ) {
+      continue;
+    }
+    return interception;
+  }
+
+  return null;
+}
+
 function createRootBoundaryTraceFields(options: {
+  currentRootLayoutTreePath: string | null;
   event: Extract<NavigationEvent, { kind: "flightResponseArrived" }>;
+  nextRootLayoutTreePath: string | null;
   state: NavigationPlannerStateV0;
 }): NavigationTraceFields {
   // Browser commit approval supplies lifecycle trace context before calling
   // the planner. This fallback exists for pure planner callers and tests; it
   // intentionally cannot invent lifecycle-only fields such as active nav id.
-  return (
-    options.state.traceFields ??
-    createNavigationLifecycleTraceFields({
-      currentRootLayoutTreePath: options.state.visibleSnapshot.rootBoundaryId,
-      currentVisibleCommitVersion: options.state.visibleCommitVersion,
-      nextRootLayoutTreePath: options.event.result.targetSnapshot.rootBoundaryId,
-      startedVisibleCommitVersion: options.event.token.baseVisibleCommitVersion,
-    })
-  );
+  if (options.state.traceFields) {
+    return {
+      ...options.state.traceFields,
+      currentRootLayoutTreePath: options.currentRootLayoutTreePath,
+      nextRootLayoutTreePath: options.nextRootLayoutTreePath,
+    };
+  }
+
+  return createNavigationLifecycleTraceFields({
+    currentRootLayoutTreePath: options.currentRootLayoutTreePath,
+    currentVisibleCommitVersion: options.state.visibleCommitVersion,
+    nextRootLayoutTreePath: options.nextRootLayoutTreePath,
+    startedVisibleCommitVersion: options.event.token.baseVisibleCommitVersion,
+  });
 }
 
 function classifyRootBoundaryTransition(
@@ -186,11 +439,7 @@ function classifyRootBoundaryTransition(
   nextRootBoundaryId: string | null,
 ): RootBoundaryTransition {
   if (currentRootBoundaryId === null || nextRootBoundaryId === null) {
-    // Both null directions intentionally share the v0 fallback because this
-    // slice only knows boundary identity from the current flight payload.
-    // #726-CORE-09 can split "unknown current" from "unknown target" once the
-    // planner consumes graph-owned root boundary facts for both sides.
-    return "rootBoundaryUnknownFallback";
+    return "rootBoundaryUnknown";
   }
 
   return currentRootBoundaryId === nextRootBoundaryId
@@ -202,20 +451,30 @@ function resolveSameLayoutAncestorPersistence(
   currentSnapshot: RouteSnapshotV0,
   targetSnapshot: RouteSnapshotV0,
 ): readonly string[] {
+  return resolveSameLayoutAncestorPersistenceForTopologies(
+    createSnapshotRouteTopology(currentSnapshot),
+    createSnapshotRouteTopology(targetSnapshot),
+  );
+}
+
+function resolveSameLayoutAncestorPersistenceForTopologies(
+  currentTopology: RouteTopologySnapshot,
+  targetTopology: RouteTopologySnapshot,
+): readonly string[] {
   if (
     classifyRootBoundaryTransition(
-      currentSnapshot.rootBoundaryId,
-      targetSnapshot.rootBoundaryId,
+      currentTopology.rootBoundaryId,
+      targetTopology.rootBoundaryId,
     ) !== "currentRootBoundary"
   ) {
     return [];
   }
 
   const commonLayoutIds: string[] = [];
-  const maxLength = Math.min(currentSnapshot.layoutIds.length, targetSnapshot.layoutIds.length);
+  const maxLength = Math.min(currentTopology.layoutIds.length, targetTopology.layoutIds.length);
   for (let index = 0; index < maxLength; index++) {
-    const layoutId = currentSnapshot.layoutIds[index];
-    if (layoutId !== targetSnapshot.layoutIds[index]) break;
+    const layoutId = currentTopology.layoutIds[index];
+    if (layoutId !== targetTopology.layoutIds[index]) break;
     commonLayoutIds.push(layoutId);
   }
   return commonLayoutIds;
@@ -264,9 +523,9 @@ function resolveCurrentRootBoundaryElementPersistence(
 }
 
 function resolveCurrentRootBoundaryCommitElementPersistence(options: {
-  currentSnapshot: RouteSnapshotV0;
+  currentTopology: RouteTopologySnapshot;
   lane: OperationLane;
-  targetSnapshot: RouteSnapshotV0;
+  targetTopology: RouteTopologySnapshot;
 }): readonly string[] {
   // Commit element persistence only keeps layout IDs. Default/unmatched slot
   // reuse is handled separately by preservePreviousSlotIds, using slot-binding
@@ -274,26 +533,29 @@ function resolveCurrentRootBoundaryCommitElementPersistence(options: {
   // resolveCurrentRootBoundaryCommitSlotPersistence recomputes this same
   // ancestor set; planner correctness relies on both calls agreeing so any
   // preserved slot's owner layout is also present in preserveElementIds.
-  return resolveSameLayoutAncestorPersistence(options.currentSnapshot, options.targetSnapshot);
+  return resolveSameLayoutAncestorPersistenceForTopologies(
+    options.currentTopology,
+    options.targetTopology,
+  );
 }
 
 function resolveCurrentRootBoundaryCommitSlotPersistence(options: {
-  currentSnapshot: RouteSnapshotV0;
+  currentTopology: RouteTopologySnapshot;
   lane: OperationLane;
-  targetSnapshot: RouteSnapshotV0;
+  targetTopology: RouteTopologySnapshot;
 }): readonly string[] {
   if (options.lane === "traverse") return [];
 
-  const preservedLayoutIds = resolveSameLayoutAncestorPersistence(
-    options.currentSnapshot,
-    options.targetSnapshot,
+  const preservedLayoutIds = resolveSameLayoutAncestorPersistenceForTopologies(
+    options.currentTopology,
+    options.targetTopology,
   );
   if (preservedLayoutIds.length === 0) return [];
 
   return resolveDefaultOrUnmatchedSlotPersistenceForLayouts({
-    currentSnapshot: options.currentSnapshot,
+    currentSlotBindings: options.currentTopology.slotBindings,
     preservedLayoutIds,
-    targetSnapshot: options.targetSnapshot,
+    targetSlotBindings: options.targetTopology.slotBindings,
   });
 }
 
@@ -307,21 +569,21 @@ function resolveCurrentRootBoundaryCommitSlotPersistence(options: {
  *
  * Wire absence and UNMATCHED_SLOT markers are not semantic proof.
  */
-function resolveDefaultOrUnmatchedSlotPersistenceForLayouts(options: {
-  currentSnapshot: RouteSnapshotV0;
+export function resolveDefaultOrUnmatchedSlotPersistenceForLayouts(options: {
+  currentSlotBindings: readonly ParallelSlotBindingSnapshotV0[];
   preservedLayoutIds: readonly string[];
-  targetSnapshot: RouteSnapshotV0;
+  targetSlotBindings: readonly ParallelSlotBindingSnapshotV0[];
 }): readonly string[] {
   const preservedLayoutIdSet = new Set(options.preservedLayoutIds);
   const slotIdsWithContent = new Set<string>();
-  for (const binding of options.currentSnapshot.slotBindings) {
+  for (const binding of options.currentSlotBindings) {
     if (binding.state === "unmatched") continue;
     slotIdsWithContent.add(binding.slotId);
   }
 
   const preservedSlotIds: string[] = [];
   const seenSlotIds = new Set<string>();
-  for (const binding of options.targetSnapshot.slotBindings) {
+  for (const binding of options.targetSlotBindings) {
     if (binding.ownerLayoutId === null) continue;
     if (!preservedLayoutIdSet.has(binding.ownerLayoutId)) continue;
     if (binding.state === "active") continue;
@@ -334,11 +596,255 @@ function resolveDefaultOrUnmatchedSlotPersistenceForLayouts(options: {
   return preservedSlotIds.sort(compareAppElementsSlotIds);
 }
 
+type VisibleInterceptionSourceIdentity = {
+  matchedUrl: string;
+  routeId: string;
+};
+
+type InterceptedPreservationValidation =
+  | {
+      kind: "approved";
+      preserveElementIds: readonly string[];
+      preservePreviousSlotIds: readonly string[];
+    }
+  | {
+      kind: "rejected";
+      reasonCode: NavigationTraceReasonCode;
+    };
+
+function getVisibleInterceptionSourceIdentity(
+  snapshot: RouteSnapshotV0,
+): VisibleInterceptionSourceIdentity {
+  if (snapshot.interception) {
+    return {
+      matchedUrl: snapshot.interception.sourceMatchedUrl,
+      routeId: snapshot.interception.sourceRouteId,
+    };
+  }
+  return {
+    matchedUrl: snapshot.matchedUrl,
+    routeId: snapshot.routeId,
+  };
+}
+
+function createInterceptionProofRejectedDecision(options: {
+  event: Extract<NavigationEvent, { kind: "flightResponseArrived" }>;
+  reasonCode: NavigationTraceReasonCode;
+  traceFields: NavigationTraceFields;
+}): NavigationDecisionV0 {
+  return {
+    kind: "hardNavigate",
+    reason: "interceptionProofRejected",
+    token: options.event.token,
+    trace: createNavigationTrace(options.reasonCode, options.traceFields),
+    url: options.event.result.href,
+  };
+}
+
+function evaluateCacheEntryReuseProof(
+  proof: CacheEntryReuseProof | undefined,
+): CacheEntryProofEvaluation {
+  if (proof === undefined) {
+    return {
+      kind: "accepted",
+      decision: null,
+    };
+  }
+
+  if (proof.decision === null) {
+    return {
+      kind: "rejected",
+      decision: null,
+    };
+  }
+
+  if (proof.decision.canReuse) {
+    return {
+      kind: "accepted",
+      decision: proof.decision,
+    };
+  }
+
+  return {
+    kind: "rejected",
+    decision: proof.decision,
+  };
+}
+
+function createCacheProofRejectedTraceFields(
+  traceFields: NavigationTraceFields,
+  decision: RejectedCacheEntryReuseDecision | null,
+): NavigationTraceFields {
+  if (decision === null) {
+    return {
+      ...traceFields,
+      cacheProofCode: CACHE_ENTRY_PROOF_MISSING_CODE,
+    };
+  }
+
+  return {
+    ...traceFields,
+    cacheProofCode: decision.code,
+    cacheProofMode: decision.mode,
+    cacheProofScope: decision.scope,
+  };
+}
+
+function createCacheProofRejectedDecision(options: {
+  event: Extract<NavigationEvent, { kind: "flightResponseArrived" }>;
+  rejection: Extract<CacheEntryProofEvaluation, { kind: "rejected" }>;
+  traceFields: NavigationTraceFields;
+}): NavigationDecisionV0 {
+  return {
+    kind: "hardNavigate",
+    reason: "cacheProofRejected",
+    token: options.event.token,
+    trace: createNavigationTrace(
+      NavigationTraceReasonCodes.cacheProofRejected,
+      createCacheProofRejectedTraceFields(options.traceFields, options.rejection.decision),
+    ),
+    url: options.event.result.href,
+  };
+}
+
+function createAcceptedCacheProofTraceFields(
+  traceFields: NavigationTraceFields,
+  decision: AcceptedCacheEntryReuseDecision | null,
+): NavigationTraceFields {
+  if (decision === null) return traceFields;
+  return {
+    ...traceFields,
+    cacheProofCode: decision.code,
+    cacheProofReuseClass: decision.reuseClass,
+  };
+}
+
+function createCacheEntryProposalFields(
+  decision: AcceptedCacheEntryReuseDecision | null,
+): Pick<CommitProposal, "cacheEntryReuseDecision"> {
+  if (decision === null) return {};
+  return {
+    cacheEntryReuseDecision: decision,
+  };
+}
+
+function validateInterceptedPreservation(options: {
+  currentSnapshot: RouteSnapshotV0;
+  currentTopology: RouteTopologySnapshot;
+  routeManifest: RouteManifest | null;
+  targetSnapshot: RouteSnapshotV0;
+  targetTopology: RouteTopologySnapshot;
+}): InterceptedPreservationValidation {
+  const proof = options.targetSnapshot.interception;
+  if (!proof) {
+    return {
+      kind: "rejected",
+      reasonCode: NavigationTraceReasonCodes.interceptedRejectedMissingProof,
+    };
+  }
+
+  if (proof.targetMatchedUrl !== options.targetSnapshot.matchedUrl) {
+    return {
+      kind: "rejected",
+      reasonCode: NavigationTraceReasonCodes.interceptedRejectedTargetMismatch,
+    };
+  }
+
+  const sourceIdentity = getVisibleInterceptionSourceIdentity(options.currentSnapshot);
+  if (
+    proof.sourceMatchedUrl !== sourceIdentity.matchedUrl ||
+    proof.sourceRouteId !== sourceIdentity.routeId
+  ) {
+    return {
+      kind: "rejected",
+      reasonCode: NavigationTraceReasonCodes.interceptedRejectedUnknownSource,
+    };
+  }
+
+  const declaredInterception =
+    options.routeManifest === null
+      ? null
+      : findRouteManifestInterceptionForProof(options.routeManifest, proof);
+  if (options.routeManifest !== null && declaredInterception === null) {
+    return {
+      kind: "rejected",
+      reasonCode: NavigationTraceReasonCodes.interceptedRejectedUndeclaredTopology,
+    };
+  }
+
+  const preservedLayoutIds = resolveSameLayoutAncestorPersistenceForTopologies(
+    options.currentTopology,
+    options.targetTopology,
+  );
+  if (preservedLayoutIds.length === 0) {
+    return {
+      kind: "rejected",
+      reasonCode: NavigationTraceReasonCodes.interceptedRejectedIncompatibleRoot,
+    };
+  }
+
+  const preservedLayoutIdSet = new Set(preservedLayoutIds);
+  const targetSlotBinding = options.targetTopology.slotBindings.find(
+    (binding) => binding.slotId === proof.slotId,
+  );
+  if (
+    !targetSlotBinding ||
+    targetSlotBinding.state !== "active" ||
+    targetSlotBinding.ownerLayoutId === null ||
+    !preservedLayoutIdSet.has(targetSlotBinding.ownerLayoutId)
+  ) {
+    return {
+      kind: "rejected",
+      reasonCode: NavigationTraceReasonCodes.interceptedRejectedMissingSlotProof,
+    };
+  }
+  if (
+    declaredInterception !== null &&
+    targetSlotBinding.ownerLayoutId !== declaredInterception.ownerLayoutId
+  ) {
+    return {
+      kind: "rejected",
+      reasonCode: NavigationTraceReasonCodes.interceptedRejectedUndeclaredTopology,
+    };
+  }
+
+  const preservePreviousSlotIds = resolveDefaultOrUnmatchedSlotPersistenceForLayouts({
+    currentSlotBindings: options.currentTopology.slotBindings,
+    preservedLayoutIds,
+    targetSlotBindings: options.targetTopology.slotBindings,
+  }).filter((slotId) => slotId !== proof.slotId);
+
+  return {
+    kind: "approved",
+    preserveElementIds: preservedLayoutIds,
+    preservePreviousSlotIds,
+  };
+}
+
 function planFlightResponseArrived(options: {
   event: Extract<NavigationEvent, { kind: "flightResponseArrived" }>;
+  routeManifest: RouteManifest | null;
   state: NavigationPlannerStateV0;
 }): NavigationDecisionV0 {
-  const traceFields = createRootBoundaryTraceFields(options);
+  const targetSnapshot = options.event.result.targetSnapshot;
+  const currentTopology = resolveRouteTopologySnapshot({
+    routeManifest: options.routeManifest,
+    slotBindingSource: "snapshot",
+    snapshot: options.state.visibleSnapshot,
+  });
+  const targetTopology = resolveRouteTopologySnapshot({
+    routeManifest: options.routeManifest,
+    slotBindingSource: "manifestTarget",
+    snapshot: targetSnapshot,
+  });
+  const traceFields = createRootBoundaryTraceFields({
+    currentRootLayoutTreePath:
+      currentTopology.kind === "known" ? currentTopology.topology.rootLayoutTreePath : null,
+    event: options.event,
+    nextRootLayoutTreePath:
+      targetTopology.kind === "known" ? targetTopology.topology.rootLayoutTreePath : null,
+    state: options.state,
+  });
 
   if (options.event.token.lane === "prefetch") {
     return {
@@ -349,59 +855,136 @@ function planFlightResponseArrived(options: {
     };
   }
 
-  const transition = classifyRootBoundaryTransition(
-    options.state.visibleSnapshot.rootBoundaryId,
-    options.event.result.targetSnapshot.rootBoundaryId,
+  const cacheEntryProofEvaluation = evaluateCacheEntryReuseProof(
+    options.event.result.cacheEntryReuseProof,
   );
+  if (cacheEntryProofEvaluation.kind === "rejected") {
+    return createCacheProofRejectedDecision({
+      event: options.event,
+      rejection: cacheEntryProofEvaluation,
+      traceFields,
+    });
+  }
+  const acceptedCacheEntryDecision = cacheEntryProofEvaluation.decision;
+  const commitTraceFields = createAcceptedCacheProofTraceFields(
+    traceFields,
+    acceptedCacheEntryDecision,
+  );
+  const cacheEntryProposalFields = createCacheEntryProposalFields(acceptedCacheEntryDecision);
+
+  // interceptionContext is transport evidence, not authority. Normal payloads
+  // can carry it when a request was sent from an intercepted visible world, so
+  // only explicit __interception proof enters the preservation branch.
+  const hasInterceptedPayload = targetSnapshot.interception !== null;
+  if (hasInterceptedPayload) {
+    if (currentTopology.kind === "unknown" || targetTopology.kind === "unknown") {
+      return createInterceptionProofRejectedDecision({
+        event: options.event,
+        reasonCode: NavigationTraceReasonCodes.interceptedRejectedUndeclaredTopology,
+        traceFields: commitTraceFields,
+      });
+    }
+
+    const validation = validateInterceptedPreservation({
+      currentSnapshot: options.state.visibleSnapshot,
+      currentTopology: currentTopology.topology,
+      routeManifest: options.routeManifest,
+      targetSnapshot,
+      targetTopology: targetTopology.topology,
+    });
+    if (validation.kind === "rejected") {
+      return createInterceptionProofRejectedDecision({
+        event: options.event,
+        reasonCode: validation.reasonCode,
+        traceFields: commitTraceFields,
+      });
+    }
+
+    return {
+      kind: "proposeCommit",
+      proposal: {
+        ...cacheEntryProposalFields,
+        preserveAbsentSlots: false,
+        preserveElementIds: validation.preserveElementIds,
+        preservePreviousSlotIds: validation.preservePreviousSlotIds,
+        reason: "interceptedCurrentRootBoundary",
+        targetSnapshot,
+      },
+      token: options.event.token,
+      trace: createNavigationTrace(
+        NavigationTraceReasonCodes.interceptedCommitCurrent,
+        commitTraceFields,
+      ),
+    };
+  }
+
+  const transition =
+    currentTopology.kind === "unknown" || targetTopology.kind === "unknown"
+      ? "rootBoundaryUnknown"
+      : classifyRootBoundaryTransition(
+          currentTopology.topology.rootBoundaryId,
+          targetTopology.topology.rootBoundaryId,
+        );
 
   if (transition === "rootBoundaryChanged") {
     return {
       kind: "hardNavigate",
       reason: "rootBoundaryChanged",
       token: options.event.token,
-      trace: createNavigationTrace(NavigationTraceReasonCodes.rootBoundaryChanged, traceFields),
+      trace: createNavigationTrace(
+        NavigationTraceReasonCodes.rootBoundaryChanged,
+        commitTraceFields,
+      ),
       url: options.event.result.href,
     };
   }
 
-  if (transition === "rootBoundaryUnknownFallback") {
-    // Unknown root identity is an uncertainty fallback, not evidence that
-    // reuse is safe. #726-CORE-09 can delete the legacy soft-commit writer
-    // once every promoted caller supplies graph-owned root boundary IDs from
-    // the route graph read model documented in routing/app-router.ts.
+  if (transition === "rootBoundaryUnknown") {
+    // Unknown topology is not semantic proof. The event may still commit its
+    // fully supplied payload, but it must not preserve absent slots, layouts,
+    // or previous slot content from snapshot-derived route shape.
     return {
       kind: "proposeCommit",
       proposal: {
-        preserveAbsentSlots: true,
+        ...cacheEntryProposalFields,
+        preserveAbsentSlots: false,
         preserveElementIds: [],
         preservePreviousSlotIds: [],
-        reason: "rootBoundaryUnknownFallback",
-        targetSnapshot: options.event.result.targetSnapshot,
+        reason: "unprovenTopologyFallback",
+        targetSnapshot,
       },
       token: options.event.token,
-      trace: createNavigationTrace(NavigationTraceReasonCodes.rootBoundaryUnknown, traceFields),
+      trace: createNavigationTrace(
+        NavigationTraceReasonCodes.rootBoundaryUnknown,
+        commitTraceFields,
+      ),
     };
+  }
+
+  if (currentTopology.kind !== "known" || targetTopology.kind !== "known") {
+    throw new Error("[vinext] Current-root navigation planning requires manifest topology");
   }
 
   return {
     kind: "proposeCommit",
     proposal: {
+      ...cacheEntryProposalFields,
       preserveAbsentSlots: false,
       preserveElementIds: resolveCurrentRootBoundaryCommitElementPersistence({
-        currentSnapshot: options.state.visibleSnapshot,
+        currentTopology: currentTopology.topology,
         lane: options.event.token.lane,
-        targetSnapshot: options.event.result.targetSnapshot,
+        targetTopology: targetTopology.topology,
       }),
       preservePreviousSlotIds: resolveCurrentRootBoundaryCommitSlotPersistence({
-        currentSnapshot: options.state.visibleSnapshot,
+        currentTopology: currentTopology.topology,
         lane: options.event.token.lane,
-        targetSnapshot: options.event.result.targetSnapshot,
+        targetTopology: targetTopology.topology,
       }),
       reason: "currentRootBoundary",
-      targetSnapshot: options.event.result.targetSnapshot,
+      targetSnapshot,
     },
     token: options.event.token,
-    trace: createNavigationTrace(NavigationTraceReasonCodes.commitCurrent, traceFields),
+    trace: createNavigationTrace(NavigationTraceReasonCodes.commitCurrent, commitTraceFields),
   };
 }
 
@@ -449,6 +1032,7 @@ function planNavigation(input: NavigationPlannerInput): NavigationDecisionV0 {
     case "flightResponseArrived":
       return planFlightResponseArrived({
         event: input.event,
+        routeManifest: input.routeManifest,
         state: input.state,
       });
     default: {

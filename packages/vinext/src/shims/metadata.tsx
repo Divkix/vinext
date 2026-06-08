@@ -6,6 +6,7 @@
  */
 import React from "react";
 import { makeThenableParams } from "./thenable-params.js";
+import { isAbsoluteOrProtocolRelativeUrl } from "./url-utils.js";
 
 // ---------------------------------------------------------------------------
 // Viewport types and resolution
@@ -139,15 +140,7 @@ export type Metadata = {
     description?: string;
     url?: string | URL;
     siteName?: string;
-    images?:
-      | string
-      | URL
-      | { url: string | URL; width?: number; height?: number; alt?: string; type?: string }
-      | Array<
-          | string
-          | URL
-          | { url: string | URL; width?: number; height?: number; alt?: string; type?: string }
-        >;
+    images?: string | URL | SocialImageDescriptor | Array<string | URL | SocialImageDescriptor>;
     videos?: Array<{ url: string | URL; width?: number; height?: number }>;
     audio?: Array<{ url: string | URL }>;
     locale?: string;
@@ -162,15 +155,7 @@ export type Metadata = {
     siteId?: string;
     title?: string;
     description?: string;
-    images?:
-      | string
-      | URL
-      | { url: string | URL; alt?: string; width?: number; height?: number; type?: string }
-      | Array<
-          | string
-          | URL
-          | { url: string | URL; alt?: string; width?: number; height?: number; type?: string }
-        >;
+    images?: string | URL | SocialImageDescriptor | Array<string | URL | SocialImageDescriptor>;
     creator?: string;
     creatorId?: string;
     players?: TwitterPlayerDescriptor | TwitterPlayerDescriptor[];
@@ -266,6 +251,14 @@ type TwitterAppDescriptor = {
   name?: string;
 };
 
+type SocialImageDescriptor = {
+  url: string | URL;
+  alt?: string;
+  width?: number;
+  height?: number;
+  type?: string;
+};
+
 type IconDescriptor = {
   url: string | URL;
   sizes?: string;
@@ -282,11 +275,16 @@ type AppleIconDescriptor = {
 type IconInput = string | URL | IconDescriptor;
 type AppleIconInput = string | URL | AppleIconDescriptor;
 
+type OtherIconDescriptor = { rel: string; url: string | URL; sizes?: string; type?: string };
+
 type IconsMap = {
   icon?: IconInput | IconInput[];
   shortcut?: string | URL | Array<string | URL>;
   apple?: AppleIconInput | AppleIconInput[];
-  other?: Array<{ rel: string; url: string | URL; sizes?: string; type?: string }>;
+  // Next.js accepts a single descriptor or an array (see resolveIcons in
+  // .nextjs-ref/packages/next/src/lib/metadata/resolvers/resolve-icons.ts —
+  // values pass through resolveAsArrayOrUndefined before iteration).
+  other?: OtherIconDescriptor | OtherIconDescriptor[];
 };
 
 type IconsMetadata = IconInput | IconInput[] | IconsMap;
@@ -547,7 +545,20 @@ export async function resolveModuleMetadata(
       searchParams === undefined
         ? { params: asyncParams }
         : { params: asyncParams, searchParams: makeThenableParams(searchParams) };
-    return await mod.generateMetadata(props, parent);
+    // Only pass the `parent` metadata when `generateMetadata` actually declares
+    // it (arity >= 2). Next.js omits the parent argument for `generateMetadata`
+    // functions that don't use it, which matters for `'use cache'` functions:
+    // the cache-key encoder (encodeReply) would otherwise try to serialize the
+    // resolved parent metadata, which can contain a non-serializable `URL`
+    // `metadataBase` and throws "URL objects are not supported".
+    // See Next.js resolve-metadata.ts (getResult / useCacheFunctionInfo.usedArgs[1]).
+    //
+    // Note: `fn.length` approximates Next.js's static usage analysis. It can
+    // diverge on default-parameter signatures — e.g. `(props, parent = x)`
+    // reports length 1, and `(props = {}, parent)` reports length 0 — but a
+    // default value on `generateMetadata`'s `parent` is unusual in practice.
+    const usesParent = mod.generateMetadata.length >= 2;
+    return await (usesParent ? mod.generateMetadata(props, parent) : mod.generateMetadata(props));
   }
   if (mod.metadata && typeof mod.metadata === "object") {
     return mod.metadata as Metadata;
@@ -601,7 +612,198 @@ function normalizeUrlDescriptorEntries<T extends { url: string | URL }>(
   return [normalizeUrlDescriptor(value, createDescriptor)];
 }
 
-export function MetadataHead({ metadata }: { metadata: Metadata }) {
+function stringifyUrl(url: string | URL): string {
+  return typeof url === "string" ? url : url.toString();
+}
+
+function createLocalMetadataBase(): URL {
+  const protocol = process.env.__NEXT_EXPERIMENTAL_HTTPS ? "https" : "http";
+  return new URL(`${protocol}://localhost:${process.env.PORT || 3000}`);
+}
+
+function getPreviewDeploymentUrl(): URL | null {
+  const origin = process.env.VERCEL_BRANCH_URL || process.env.VERCEL_URL;
+  return origin ? new URL(`https://${origin}`) : null;
+}
+
+function getProductionDeploymentUrl(): URL | null {
+  const origin = process.env.VERCEL_PROJECT_PRODUCTION_URL;
+  return origin ? new URL(`https://${origin}`) : null;
+}
+
+function getSocialImageMetadataBaseFallback(metadataBase: URL | null | undefined): URL {
+  const defaultMetadataBase = createLocalMetadataBase();
+  const previewDeploymentUrl = getPreviewDeploymentUrl();
+  const productionDeploymentUrl = getProductionDeploymentUrl();
+
+  if (process.env.NODE_ENV === "development") {
+    return defaultMetadataBase;
+  }
+
+  if (
+    process.env.NODE_ENV === "production" &&
+    process.env.VERCEL_ENV === "preview" &&
+    previewDeploymentUrl
+  ) {
+    return previewDeploymentUrl;
+  }
+
+  return metadataBase || productionDeploymentUrl || defaultMetadataBase;
+}
+
+function trimSlashes(value: string): string {
+  return value.replace(/^\/+|\/+$/g, "");
+}
+
+function joinMetadataPath(basePathname: string, pathname: string): string {
+  if (!basePathname || basePathname === "/") {
+    return pathname;
+  }
+
+  const base = trimSlashes(basePathname);
+  const path = trimSlashes(pathname);
+  return path ? `/${base}/${path}` : `/${base}`;
+}
+
+function resolveRelativeMetadataUrl(url: string, pathname: string): string {
+  if (url === "." || url === "./") {
+    return pathname || "/";
+  }
+  if (!url.startsWith("./")) {
+    return url;
+  }
+
+  const base = pathname === "/" ? "" : pathname.replace(/\/+$/g, "");
+  return `${base}/${url.slice(2)}`;
+}
+
+function formatResolvedMetadataUrl(url: URL): string {
+  if (url.pathname === "/" && url.search === "" && url.hash === "") {
+    return url.origin;
+  }
+  return url.href;
+}
+
+function resolveMetadataUrl(url: string | URL, metadataBase: URL | null | undefined): string {
+  const value = stringifyUrl(url);
+  if (isAbsoluteOrProtocolRelativeUrl(value) || !metadataBase) {
+    return value;
+  }
+
+  try {
+    return formatResolvedMetadataUrl(
+      new URL(joinMetadataPath(metadataBase.pathname, value), metadataBase),
+    );
+  } catch {
+    return value;
+  }
+}
+
+function resolveCanonicalUrl(
+  url: string | URL,
+  metadataBase: URL | null | undefined,
+  pathname: string,
+): string {
+  if (url instanceof URL) {
+    return resolveMetadataUrl(url, metadataBase);
+  }
+  return resolveMetadataUrl(resolveRelativeMetadataUrl(url, pathname), metadataBase);
+}
+
+function isSocialImageDescriptor(
+  value: string | URL | SocialImageDescriptor,
+): value is SocialImageDescriptor {
+  return typeof value === "object" && !(value instanceof URL);
+}
+
+function isMetadataRouteSocialImage(value: SocialImageDescriptor): boolean {
+  return Reflect.get(value, "metadataRoute") === true;
+}
+
+function resolveSocialImageUrl(
+  image: string | URL | SocialImageDescriptor,
+  metadataBase: URL | null | undefined,
+): string {
+  const imageUrl = isSocialImageDescriptor(image) ? image.url : image;
+  const metadataRoute = isSocialImageDescriptor(image) && isMetadataRouteSocialImage(image);
+  if (
+    typeof imageUrl === "string" &&
+    !isAbsoluteOrProtocolRelativeUrl(imageUrl) &&
+    (!metadataBase || metadataRoute)
+  ) {
+    return resolveMetadataUrl(imageUrl, getSocialImageMetadataBaseFallback(metadataBase));
+  }
+  return resolveMetadataUrl(imageUrl, metadataBase);
+}
+
+type MetadataHeadProps = {
+  metadata: Metadata;
+  pathname?: string;
+};
+
+function escapeHtmlText(value: string): string {
+  return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+}
+
+function escapeHtmlAttribute(value: string): string {
+  return escapeHtmlText(value).replaceAll('"', "&quot;");
+}
+
+function renderMetadataText(node: unknown): string {
+  if (node === null || node === undefined || typeof node === "boolean") return "";
+  if (Array.isArray(node)) return node.map(renderMetadataText).join("");
+  if (typeof node === "string" || typeof node === "number" || typeof node === "bigint") {
+    return escapeHtmlText(String(node));
+  }
+  return "";
+}
+
+function renderMetadataAttributes(props: object, names: readonly string[]): string {
+  const attributes: string[] = [];
+  for (const name of names) {
+    const value = Reflect.get(props, name);
+    if (value === null || value === undefined || typeof value === "boolean") continue;
+    const htmlName = name === "hrefLang" ? "hreflang" : name;
+    attributes.push(`${htmlName}="${escapeHtmlAttribute(String(value))}"`);
+  }
+  return attributes.length > 0 ? ` ${attributes.join(" ")}` : "";
+}
+
+function renderMetadataElementToHtml(node: unknown): string {
+  if (node === null || node === undefined || typeof node === "boolean") return "";
+  if (Array.isArray(node)) return node.map(renderMetadataElementToHtml).join("");
+  if (!React.isValidElement(node)) return renderMetadataText(node);
+
+  const props = typeof node.props === "object" && node.props !== null ? node.props : {};
+  if (node.type === React.Fragment) {
+    return renderMetadataElementToHtml(Reflect.get(props, "children"));
+  }
+  if (typeof node.type !== "string") return "";
+
+  switch (node.type) {
+    case "title":
+      return `<title>${renderMetadataText(Reflect.get(props, "children"))}</title>`;
+    case "meta":
+      return `<meta${renderMetadataAttributes(props, ["name", "property", "content"])}>`;
+    case "link":
+      return `<link${renderMetadataAttributes(props, [
+        "rel",
+        "href",
+        "hrefLang",
+        "media",
+        "type",
+        "sizes",
+      ])}>`;
+    default:
+      return "";
+  }
+}
+
+export function renderMetadataToHtml(metadata: Metadata, pathname = "/"): string {
+  return renderMetadataElementToHtml(MetadataHead({ metadata, pathname }));
+}
+
+export function MetadataHead({ metadata, pathname = "/" }: MetadataHeadProps) {
   const elements: React.ReactElement[] = [];
   let key = 0;
 
@@ -611,15 +813,7 @@ export function MetadataHead({ metadata }: { metadata: Metadata }) {
   function resolveUrl(url: string | URL | undefined): string | undefined;
   function resolveUrl(url: string | URL | undefined): string | undefined {
     if (!url) return undefined;
-    // Coerce URL objects to strings (Next.js metadata allows string | URL)
-    const s = typeof url === "string" ? url : url instanceof URL ? url.toString() : String(url);
-    if (!base) return s;
-    if (s.startsWith("http://") || s.startsWith("https://") || s.startsWith("//")) return s;
-    try {
-      return new URL(s, base).toString();
-    } catch {
-      return s;
-    }
+    return resolveMetadataUrl(url, base);
   }
 
   // Title
@@ -764,8 +958,9 @@ export function MetadataHead({ metadata }: { metadata: Metadata }) {
             ? og.images
             : [og.images];
       for (const img of imgList) {
-        const imgUrl = typeof img === "string" || img instanceof URL ? img : img.url;
-        elements.push(<meta key={key++} property="og:image" content={resolveUrl(imgUrl)} />);
+        elements.push(
+          <meta key={key++} property="og:image" content={resolveSocialImageUrl(img, base)} />,
+        );
         if (typeof img !== "string" && !(img instanceof URL)) {
           if (img.width)
             elements.push(
@@ -822,8 +1017,9 @@ export function MetadataHead({ metadata }: { metadata: Metadata }) {
             ? tw.images
             : [tw.images];
       for (const img of imgList) {
-        const imgUrl = typeof img === "string" || img instanceof URL ? img : img.url;
-        elements.push(<meta key={key++} name="twitter:image" content={resolveUrl(imgUrl)} />);
+        elements.push(
+          <meta key={key++} name="twitter:image" content={resolveSocialImageUrl(img, base)} />,
+        );
         if (typeof img !== "string" && !(img instanceof URL)) {
           if (img.type) {
             elements.push(<meta key={key++} name="twitter:image:type" content={img.type} />);
@@ -902,7 +1098,7 @@ export function MetadataHead({ metadata }: { metadata: Metadata }) {
         ? metadata.icons.shortcut
         : [metadata.icons.shortcut];
       for (const s of shortcuts) {
-        elements.push(<link key={key++} rel="shortcut icon" href={resolveUrl(s)} />);
+        elements.push(<link key={key++} rel="shortcut icon" href={stringifyUrl(s)} />);
       }
     }
     // Icon
@@ -912,7 +1108,7 @@ export function MetadataHead({ metadata }: { metadata: Metadata }) {
           <link
             key={key++}
             rel="icon"
-            href={resolveUrl(i.url)}
+            href={stringifyUrl(i.url)}
             {...(i.sizes ? { sizes: i.sizes } : {})}
             {...(i.type ? { type: i.type } : {})}
             {...(i.media ? { media: i.media } : {})}
@@ -930,22 +1126,27 @@ export function MetadataHead({ metadata }: { metadata: Metadata }) {
           <link
             key={key++}
             rel="apple-touch-icon"
-            href={resolveUrl(a.url)}
+            href={stringifyUrl(a.url)}
             {...(a.sizes ? { sizes: a.sizes } : {})}
             {...(a.type ? { type: a.type } : {})}
           />,
         );
       }
     }
-    // Other custom icon relations
+    // Other custom icon relations. Next.js accepts a single descriptor or an
+    // array; normalize before iterating.
     if (isIconsMap(metadata.icons) && metadata.icons.other) {
-      for (const o of metadata.icons.other) {
+      const others = Array.isArray(metadata.icons.other)
+        ? metadata.icons.other
+        : [metadata.icons.other];
+      for (const o of others) {
         elements.push(
           <link
             key={key++}
             rel={o.rel}
-            href={resolveUrl(o.url)}
+            href={stringifyUrl(o.url)}
             {...(o.sizes ? { sizes: o.sizes } : {})}
+            {...(o.type ? { type: o.type } : {})}
           />,
         );
       }
@@ -954,14 +1155,20 @@ export function MetadataHead({ metadata }: { metadata: Metadata }) {
 
   // Manifest
   if (metadata.manifest) {
-    elements.push(<link key={key++} rel="manifest" href={resolveUrl(metadata.manifest)} />);
+    elements.push(<link key={key++} rel="manifest" href={stringifyUrl(metadata.manifest)} />);
   }
 
   // Alternates
   if (metadata.alternates) {
     const alt = metadata.alternates;
     if (alt.canonical) {
-      elements.push(<link key={key++} rel="canonical" href={resolveUrl(alt.canonical)} />);
+      elements.push(
+        <link
+          key={key++}
+          rel="canonical"
+          href={resolveCanonicalUrl(alt.canonical, base, pathname)}
+        />,
+      );
     }
     if (alt.languages) {
       for (const [lang, href] of Object.entries(alt.languages)) {

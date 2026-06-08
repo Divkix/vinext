@@ -19,19 +19,32 @@ import React, {
   type MouseEvent,
   type TouchEvent,
 } from "react";
+import {
+  getNavigationRuntime,
+  hasAppNavigationRuntime,
+  registerNavigationRuntimeFunctions,
+} from "../client/navigation-runtime.js";
 // Import shared RSC prefetch utilities from navigation shim (relative path
 // so this resolves both via the Vite plugin and in direct vitest imports)
 import {
-  getCurrentInterceptionContext,
+  getPrefetchInterceptionContext,
+  getPrefetchCache,
   getPrefetchedUrls,
   getMountedSlotsHeader,
+  hasPrefetchCacheEntryForNavigation,
   navigateClientSide,
   prefetchRscResponse,
 } from "./navigation.js";
 import { AppElementsWire } from "../server/app-elements.js";
-import { createRscRequestHeaders, createRscRequestUrl } from "../server/app-rsc-cache-busting.js";
+import {
+  createRscRequestHeaders,
+  createRscRequestUrl,
+  stripRscCacheBustingSearchParam,
+  stripRscSuffix,
+} from "../server/app-rsc-cache-busting.js";
+import { APP_RSC_RENDER_MODE_PREFETCH_LOADING_SHELL } from "../server/app-rsc-render-mode.js";
 import { VINEXT_MOUNTED_SLOTS_HEADER } from "../server/headers.js";
-import { isDangerousScheme } from "./url-safety.js";
+import { isDangerousScheme, reportBlockedDangerousNavigation } from "./url-safety.js";
 import {
   canLinkIntentPrefetch,
   canLinkPrefetch,
@@ -50,8 +63,21 @@ import { appendSearchParamsToUrl, type UrlQuery, urlQueryToSearchParams } from "
 import { addLocalePrefix, getDomainLocaleUrl, type DomainLocale } from "../utils/domain-locale.js";
 import { getI18nContext } from "./i18n-context.js";
 import type { VinextLinkPrefetchRoute, VinextNextData } from "../client/vinext-next-data.js";
+import { navigatePagesRouterLink } from "../client/pages-router-link-navigation.js";
 import { createRouteTrieCache, matchRouteWithTrie } from "../routing/route-matching.js";
 import { stripBasePath } from "../utils/base-path.js";
+import {
+  prefetchPagesData,
+  resolvePagesDataNavigationTarget,
+} from "./internal/pages-data-target.js";
+import { markAppRouteDetectedOnPrefetch } from "./internal/app-route-detection.js";
+import { getCurrentBrowserLocale } from "./client-locale.js";
+import {
+  clearLinkForCurrentNavigation,
+  notifyLinkNavigationStart,
+  setLinkForCurrentNavigation,
+  type PendingLinkSetter,
+} from "./internal/link-status-registry.js";
 
 type NavigateEvent = {
   url: URL;
@@ -76,8 +102,23 @@ type LinkProps = {
   unstable_dynamicOnHover?: boolean;
   /** Whether to pass the href to the child element */
   passHref?: boolean;
+  /**
+   * Pre-Next.js-13 link behaviour. When true, <Link> expects its child to be
+   * an `<a>` (or a component that renders one) and forwards `href`, click,
+   * and prefetch handlers to the child via `React.cloneElement` instead of
+   * rendering its own wrapping `<a>`. Required when the user wants to
+   * style/instrument the anchor themselves.
+   */
+  legacyBehavior?: boolean;
   /** Scroll to top on navigation (default: true) */
   scroll?: boolean;
+  /**
+   * Pages Router: update the URL without re-running data fetching methods
+   * (getServerSideProps / getStaticProps / getInitialProps). The shallow change
+   * still triggers the route change events and updates `router.query`. Only
+   * applies to navigations within the same page. No-op on the App Router.
+   */
+  shallow?: boolean;
   /** Locale for i18n (used for locale-prefixed URLs) */
   locale?: string | false;
   /** Called before navigation happens (Next.js 16). Return value is ignored. */
@@ -115,20 +156,106 @@ export function useLinkStatus(): LinkStatusContextValue {
   return useContext(LinkStatusContext);
 }
 
+// Register the link-status reset hook on the navigation runtime as soon as this
+// module evaluates on the client. `navigateClientSide` calls it at the start of
+// every App Router navigation (including router.push and shallow routing), so a
+// stale link's pending state is cleared even when no <Link> initiated the
+// navigation. The registry itself lives in internal/link-status-registry.ts so
+// it can be unit-tested without rendering a <Link>.
+if (typeof window !== "undefined") {
+  registerNavigationRuntimeFunctions({
+    notifyLinkNavigationStart,
+  });
+}
+
 /** basePath from next.config.js, injected by the plugin at build time */
 const __basePath: string = process.env.__NEXT_ROUTER_BASEPATH ?? "";
 /** trailingSlash from next.config.js, injected by the plugin at build time */
 const __trailingSlash: boolean = process.env.__VINEXT_TRAILING_SLASH === "true";
+const __prefetchInlining: boolean = process.env.__VINEXT_PREFETCH_INLINING === "true";
 const linkPrefetchRouteTrieCache = createRouteTrieCache<VinextLinkPrefetchRoute>();
 
 function resolveHref(href: LinkProps["href"]): string {
   if (typeof href === "string") return href;
-  let url = href.pathname ?? "/";
+  // When `pathname` is omitted, leave the base empty so the result is a
+  // query-only href (e.g. `?params=foo`) rather than `/?params=foo`. Mirrors
+  // Next.js's `formatUrl()` (`pathname = urlObj.pathname || ''`) so that a
+  // `<Link href={{ query: {...} }} />` resolves against the *current* path at
+  // navigation time instead of collapsing onto the site root. Defaulting to
+  // "/" here recorded the wrong history entry for shallow links, breaking
+  // back/forward traversal (issue #1540).
+  let url = href.pathname ?? "";
   if (href.query) {
     const params = urlQueryToSearchParams(href.query);
     url = appendSearchParamsToUrl(url, params);
   }
   return url;
+}
+
+/**
+ * Collapse repeated forward-slashes (and convert backslashes to forward-slashes)
+ * in the path portion of a URL, preserving any query string.
+ *
+ * Ported from Next.js: packages/next/src/shared/lib/utils/normalize-repeated-slashes.ts
+ * https://github.com/vercel/next.js/blob/canary/packages/next/src/shared/lib/utils/normalize-repeated-slashes.ts
+ */
+function normalizeRepeatedSlashes(url: string): string {
+  const urlParts = url.split("?");
+  const urlNoQueryString = urlParts.shift() ?? "";
+  const queryString = urlParts.join("?");
+  return (
+    urlNoQueryString.replace(/\\/g, "/").replace(/\/\/+/g, "/") +
+    (queryString ? `?${queryString}` : "")
+  );
+}
+
+/**
+ * Emit Next.js's "Invalid href" `console.error` when `href` contains repeated
+ * forward slashes or backslashes in its path portion, and return the
+ * normalized URL (with `\\` converted to `/` and runs of `/` collapsed). If
+ * the href is already well-formed, the original string is returned unchanged.
+ *
+ * Ported from Next.js: packages/next/src/client/resolve-href.ts
+ * https://github.com/vercel/next.js/blob/canary/packages/next/src/client/resolve-href.ts
+ *
+ * Matches the message asserted by:
+ * test/e2e/repeated-forward-slashes-error/repeated-forward-slashes-error.test.ts
+ *
+ * Note: Next.js fires this warning unconditionally on every call to
+ * `resolveHref`. We mirror that behaviour (no dedup) for exact parity.
+ *
+ * Note: Next.js uses `router.pathname` (the route pattern, e.g.
+ * `/posts/[id]`) for the "in page" segment of the message. We do not have
+ * cheap access to the route pattern from inside the Link shim, so we
+ * fall back to `window.location.pathname` (or `"/"` during SSR). The text
+ * is cosmetic and is not asserted by the Next.js compat test.
+ */
+function warnAndNormalizeRepeatedSlashesInHref(urlAsString: string): string {
+  // Protocol-relative URLs (e.g. "//example.com/path") are treated by vinext
+  // as external — see `isAbsoluteOrProtocolRelativeUrl` in url-utils. We
+  // intentionally skip the repeated-slash warning and normalization for them
+  // so that locale prefixing and same-origin detection elsewhere in this
+  // shim continue to receive the original href. (Next.js itself does flag
+  // these, but our external-URL handling supersedes that behaviour.)
+  if (urlAsString.startsWith("//")) return urlAsString;
+
+  // Strip any protocol prefix (e.g. "https://") so we do not flag the
+  // legitimate `//` that separates the scheme from the authority.
+  const urlProtoMatch = urlAsString.match(/^[a-z][a-z0-9+.-]*:\/\//i);
+  const urlAsStringNoProto = urlProtoMatch
+    ? urlAsString.slice(urlProtoMatch[0].length)
+    : urlAsString;
+  const urlParts = urlAsStringNoProto.split("?", 1);
+  if (!(urlParts[0] || "").match(/(\/\/|\\)/)) return urlAsString;
+
+  const pathname =
+    typeof window !== "undefined" && window.location ? window.location.pathname : "/";
+  console.error(
+    `Invalid href '${urlAsString}' passed to next/router in page: '${pathname}'. Repeated forward-slashes (//) or backslashes \\ are not valid in the href.`,
+  );
+
+  const normalizedNoProto = normalizeRepeatedSlashes(urlAsStringNoProto);
+  return (urlProtoMatch ? urlProtoMatch[0] : "") + normalizedNoProto;
 }
 
 export function resolveLinkPrefetchMode(
@@ -156,9 +283,24 @@ function toSameOriginRouteHref(href: string): string | null {
 }
 
 function getLinkPrefetchRouterMode(): LinkPrefetchRouterMode {
-  return typeof window !== "undefined" && typeof window.__VINEXT_RSC_NAVIGATE__ === "function"
-    ? "app"
-    : "pages";
+  return hasAppNavigationRuntime() ? "app" : "pages";
+}
+
+function resolveMatchedAutoAppRoutePrefetch(route: VinextLinkPrefetchRoute): {
+  cacheForNavigation: boolean;
+  prefetchShellFirst: boolean;
+  shouldPrefetch: boolean;
+} {
+  const hasLoadingShell = route.isDynamic && route.canPrefetchLoadingShell;
+  return {
+    // Vinext does not yet have Next.js's per-segment runtime-prefetch hints.
+    // Until that route fact exists, dynamic routes without loading-shell
+    // fallbacks are treated as exact-URL full prefetches. The prefetch cache is
+    // keyed by the concrete RSC URL, so this cannot reuse data across params.
+    cacheForNavigation: !hasLoadingShell,
+    prefetchShellFirst: !route.isDynamic,
+    shouldPrefetch: true,
+  };
 }
 
 export function canAutoPrefetchFullAppRoute(href: string): boolean {
@@ -173,7 +315,34 @@ export function canAutoPrefetchFullAppRoute(href: string): boolean {
   const match = matchRouteWithTrie(routeHref, routes, linkPrefetchRouteTrieCache);
   if (!match) return false;
 
-  return !match.route.isDynamic;
+  return resolveMatchedAutoAppRoutePrefetch(match.route).cacheForNavigation;
+}
+
+export function resolveAutoAppRoutePrefetch(href: string): {
+  cacheForNavigation: boolean;
+  prefetchShellFirst: boolean;
+  shouldPrefetch: boolean;
+} {
+  if (typeof window === "undefined") {
+    return { cacheForNavigation: false, prefetchShellFirst: false, shouldPrefetch: false };
+  }
+
+  const routes = window.__VINEXT_LINK_PREFETCH_ROUTES__;
+  if (!routes) {
+    return { cacheForNavigation: false, prefetchShellFirst: false, shouldPrefetch: false };
+  }
+
+  const routeHref = toSameOriginRouteHref(href);
+  if (routeHref === null) {
+    return { cacheForNavigation: false, prefetchShellFirst: false, shouldPrefetch: false };
+  }
+
+  const match = matchRouteWithTrie(routeHref, routes, linkPrefetchRouteTrieCache);
+  if (!match) {
+    return { cacheForNavigation: false, prefetchShellFirst: false, shouldPrefetch: false };
+  }
+
+  return resolveMatchedAutoAppRoutePrefetch(match.route);
 }
 
 // ---------------------------------------------------------------------------
@@ -201,22 +370,41 @@ function prefetchUrl(href: string, mode: LinkPrefetchMode, priority: "low" | "hi
   if (prefetchHref == null) return;
 
   const fullHref = toBrowserNavigationHref(prefetchHref, window.location.href, __basePath);
+  const target = new URL(fullHref, window.location.href);
+  if (
+    target.origin === window.location.origin &&
+    target.pathname === window.location.pathname &&
+    target.search === window.location.search
+  ) {
+    return;
+  }
 
-  const schedule = window.requestIdleCallback ?? ((fn: () => void) => setTimeout(fn, 100));
+  const schedule =
+    priority === "high"
+      ? (fn: () => void) => {
+          fn();
+        }
+      : (window.requestIdleCallback ?? ((fn: () => void) => setTimeout(fn, 100)));
 
   schedule(() => {
     void (async () => {
-      if (typeof window.__VINEXT_RSC_NAVIGATE__ === "function") {
-        // `auto`/`null`/undefined should not behave like `prefetch={true}` for
-        // App Router dynamic routes. Next.js may prefetch a loading-boundary
-        // shell for dynamic routes, but vinext's current client cache stores
-        // complete RSC responses only; keep automatic full prefetch to route
-        // shapes that are statically known safe until segment prefetch exists.
-        if (mode === "auto" && !canAutoPrefetchFullAppRoute(prefetchHref)) return;
+      if (hasAppNavigationRuntime()) {
+        const autoPrefetch =
+          mode === "auto"
+            ? resolveAutoAppRoutePrefetch(prefetchHref)
+            : { cacheForNavigation: true, prefetchShellFirst: true, shouldPrefetch: true };
+        if (!autoPrefetch.shouldPrefetch) return;
 
-        const interceptionContext = getCurrentInterceptionContext();
+        const interceptionContext = getPrefetchInterceptionContext(fullHref);
         const mountedSlotsHeader = getMountedSlotsHeader();
-        const headers = createRscRequestHeaders({ interceptionContext });
+        const isOptimisticRouteShellPrefetch = !autoPrefetch.cacheForNavigation;
+        if (isOptimisticRouteShellPrefetch && interceptionContext !== null) return;
+        const headers = createRscRequestHeaders({
+          interceptionContext,
+          renderMode: isOptimisticRouteShellPrefetch
+            ? APP_RSC_RENDER_MODE_PREFETCH_LOADING_SHELL
+            : undefined,
+        });
         if (mountedSlotsHeader) {
           headers.set(VINEXT_MOUNTED_SLOTS_HEADER, mountedSlotsHeader);
         }
@@ -225,35 +413,146 @@ function prefetchUrl(href: string, mode: LinkPrefetchMode, priority: "low" | "hi
         const rscUrl = await createRscRequestUrl(fullHref, headers);
         const cacheKey = AppElementsWire.encodeCacheKey(rscUrl, interceptionContext);
         const prefetched = getPrefetchedUrls();
-        if (prefetched.has(cacheKey)) return;
+        if (prefetched.has(cacheKey)) {
+          if (!autoPrefetch.cacheForNavigation) {
+            return;
+          }
+
+          const existing = getPrefetchCache().get(cacheKey);
+          if (existing?.cacheForNavigation === false) {
+            existing.cacheForNavigation = true;
+          }
+        }
+        // A single freshness-aware gate covers both an exact prior prefetch and
+        // an equivalent `_rsc` variant; the helper also deletes any stale exact
+        // entry, so a stale `prefetched` member is harmlessly re-added below.
+        if (
+          autoPrefetch.cacheForNavigation &&
+          hasPrefetchCacheEntryForNavigation(rscUrl, interceptionContext, mountedSlotsHeader)
+        ) {
+          return;
+        }
         prefetched.add(cacheKey);
+        // Next's `prefetchInlining` Segment Cache path reserves the final
+        // payload while a route-tree request is still pending. Vinext keeps a
+        // unified route payload, so gate that payload behind a loading-shell
+        // request to preserve the same pending/dedup observable contract.
+        const fetchPromise =
+          __prefetchInlining && autoPrefetch.cacheForNavigation && autoPrefetch.prefetchShellFirst
+            ? (async () => {
+                const shellHeaders = createRscRequestHeaders({
+                  interceptionContext,
+                  renderMode: APP_RSC_RENDER_MODE_PREFETCH_LOADING_SHELL,
+                });
+                if (mountedSlotsHeader) {
+                  shellHeaders.set(VINEXT_MOUNTED_SLOTS_HEADER, mountedSlotsHeader);
+                }
+                const shellRscUrl = await createRscRequestUrl(fullHref, shellHeaders);
+                const shellResponse = await fetch(shellRscUrl, {
+                  headers: shellHeaders,
+                  credentials: "include",
+                  priority,
+                  // @ts-expect-error — purpose is a valid fetch option in some browsers
+                  purpose: "prefetch",
+                });
+                if (!shellResponse.ok) {
+                  return shellResponse;
+                }
+                await shellResponse.arrayBuffer().catch(() => {});
+                return fetch(rscUrl, {
+                  headers,
+                  credentials: "include",
+                  priority,
+                  // @ts-expect-error — purpose is a valid fetch option in some browsers
+                  purpose: "prefetch",
+                });
+              })()
+            : fetch(rscUrl, {
+                headers,
+                credentials: "include",
+                priority,
+                // @ts-expect-error — purpose is a valid fetch option in some browsers
+                purpose: "prefetch",
+              });
         prefetchRscResponse(
           rscUrl,
-          fetch(rscUrl, {
-            headers,
-            credentials: "include",
-            priority,
-            // @ts-expect-error — purpose is a valid fetch option in some browsers
-            purpose: "prefetch",
-          }),
+          fetchPromise,
           interceptionContext,
           mountedSlotsHeader,
+          undefined,
+          {
+            cacheForNavigation: autoPrefetch.cacheForNavigation,
+            optimisticRouteShell: isOptimisticRouteShellPrefetch,
+          },
         );
-      } else if ((window.__NEXT_DATA__ as VinextNextData | undefined)?.__vinext?.pageModuleUrl) {
-        // Pages Router: inject a prefetch link for the target page module
-        // We can't easily resolve the target page's module URL from the Link,
-        // so we create a <link rel="prefetch"> for the HTML page which helps
-        // the browser's preload scanner.
-        const link = document.createElement("link");
-        link.rel = "prefetch";
-        link.href = fullHref;
-        link.as = "document";
-        document.head.appendChild(link);
+      } else if (window.__NEXT_DATA__) {
+        // Pages Router prefetch. When a code-split loader is registered for
+        // the target route (prod builds expose them on window via the
+        // generated client entry), prefetch the data JSON + warm the page
+        // chunk in parallel — matching the actual navigation, so the click
+        // is a double cache hit. Otherwise (dev, or unmapped route) fall
+        // back to the legacy `<link rel="prefetch" as="document">` so the
+        // browser still preloads the HTML.
+        //
+        // The decision helper + prefetch action live in shims/internal/ so
+        // this file does not pull in the router shim at module init time,
+        // which would create a circular import and grow the SSR module graph.
+        const dataTarget = resolvePagesDataNavigationTarget(fullHref, __basePath);
+        if (dataTarget) {
+          prefetchPagesData(dataTarget);
+        } else {
+          // The target is not a Pages Router route — mark it on the Pages
+          // Router `components` map if it matches an App Router route in the
+          // shared prefetch manifest. Mirrors Next.js's `_bfl` marker write at
+          // `packages/next/src/shared/lib/router/router.ts:2525`; the Next.js
+          // deploy test reads `window.next.router.components[<path>]` to
+          // assert prefetch detection. See issue #1526.
+          markAppRouteDetectedOnPrefetch(fullHref, __basePath);
+
+          // Legacy fallback: hint the browser to preload the HTML document.
+          // Used in dev (no loader map populated) and for routes not in the
+          // client loader map.
+          const link = document.createElement("link");
+          link.rel = "prefetch";
+          link.href = fullHref;
+          link.as = "document";
+          document.head.appendChild(link);
+        }
       }
     })().catch((error) => {
       console.error("[vinext] RSC prefetch setup error:", error);
     });
   });
+}
+
+function promotePrefetchEntriesForNavigation(href: string): void {
+  if (typeof window === "undefined") return;
+
+  let target: URL;
+  try {
+    target = new URL(
+      toBrowserNavigationHref(href, window.location.href, __basePath),
+      window.location.href,
+    );
+  } catch {
+    return;
+  }
+
+  for (const [cacheKey, entry] of getPrefetchCache()) {
+    if (entry.optimisticRouteShell === true) continue;
+
+    const [rscUrl] = cacheKey.split("\0", 1);
+    let cached: URL;
+    try {
+      cached = new URL(rscUrl, window.location.href);
+    } catch {
+      continue;
+    }
+    stripRscCacheBustingSearchParam(cached);
+    if (stripRscSuffix(cached.pathname) === target.pathname && cached.search === target.search) {
+      entry.cacheForNavigation = true;
+    }
+  }
 }
 
 /**
@@ -286,7 +585,7 @@ function setVisibleLinkPrefetch(instance: LinkPrefetchInstance, isVisible: boole
 
 function registerVisibleLinkPing(): void {
   if (typeof window === "undefined") return;
-  window.__VINEXT_PING_VISIBLE_LINKS__ = pingVisibleLinkPrefetches;
+  registerNavigationRuntimeFunctions({ pingVisibleLinks: pingVisibleLinkPrefetches });
 }
 
 function pingVisibleLinkPrefetches(): void {
@@ -326,6 +625,17 @@ function getDefaultLocale(): string | undefined {
   return getI18nContext()?.defaultLocale;
 }
 
+function getCurrentLocale(): string | undefined {
+  if (typeof window !== "undefined") {
+    return getCurrentBrowserLocale({
+      basePath: __basePath,
+      domainLocales: getDomainLocales(),
+      hostname: getCurrentHostname(),
+    });
+  }
+  return getI18nContext()?.locale;
+}
+
 function getDomainLocales(): readonly DomainLocale[] | undefined {
   if (typeof window !== "undefined") {
     return (window.__NEXT_DATA__ as VinextNextData | undefined)?.domainLocales;
@@ -348,6 +658,25 @@ function getDomainLocaleHref(href: string, locale: string): string | undefined {
   });
 }
 
+function addLocalePrefixForRoot(href: string, locale: string): string | undefined {
+  if (href !== "/" && !href.startsWith("/?") && !href.startsWith("/#")) {
+    return undefined;
+  }
+
+  let parsed: URL;
+  try {
+    parsed = new URL(href, "http://vinext.local");
+  } catch {
+    return undefined;
+  }
+
+  if (parsed.origin !== "http://vinext.local" || parsed.pathname !== "/") {
+    return undefined;
+  }
+
+  return `/${locale}${parsed.search}${parsed.hash}`;
+}
+
 /**
  * Apply locale prefix to a URL path based on the locale prop.
  * - locale="fr" → prepend /fr (unless it already has a locale prefix)
@@ -360,8 +689,8 @@ function applyLocaleToHref(href: string, locale: string | false | undefined): st
     return href;
   }
 
-  if (locale === undefined) {
-    // No locale prop: keep current behavior (href as-is)
+  const resolvedLocale = locale ?? getCurrentLocale();
+  if (resolvedLocale === undefined) {
     return href;
   }
 
@@ -371,12 +700,18 @@ function applyLocaleToHref(href: string, locale: string | false | undefined): st
     return href;
   }
 
-  const domainLocaleHref = getDomainLocaleHref(href, locale);
+  const domainLocaleHref = getDomainLocaleHref(href, resolvedLocale);
   if (domainLocaleHref) {
     return domainLocaleHref;
   }
 
-  return addLocalePrefix(href, locale, getDefaultLocale() ?? "");
+  const defaultLocale = getDefaultLocale() ?? "";
+  if (resolvedLocale.toLowerCase() === defaultLocale.toLowerCase()) {
+    const localeRootHref = addLocalePrefixForRoot(href, resolvedLocale);
+    if (localeRootHref) return localeRootHref;
+  }
+
+  return addLocalePrefix(href, resolvedLocale, defaultLocale);
 }
 
 const Link = forwardRef<HTMLAnchorElement, LinkProps>(function Link(
@@ -386,12 +721,15 @@ const Link = forwardRef<HTMLAnchorElement, LinkProps>(function Link(
     replace = false,
     prefetch: prefetchProp,
     scroll = true,
-    children,
+    shallow = false,
+    children: childrenProp,
     onClick,
     onMouseEnter,
     onTouchStart,
     onNavigate,
     unstable_dynamicOnHover = false,
+    legacyBehavior = false,
+    passHref = false,
     ...rest
   },
   forwardedRef,
@@ -399,9 +737,28 @@ const Link = forwardRef<HTMLAnchorElement, LinkProps>(function Link(
   // Extract locale from rest props
   const { locale, ...restWithoutLocale } = rest;
 
+  // Next.js parity: in legacyBehavior, a string or number child is wrapped in
+  // a plain <a> so the cloneElement path below has an element to clone. The
+  // wrapper anchor receives the forwarded href + handlers from Link.
+  // Ported from Next.js: packages/next/src/client/link.tsx (around line 334)
+  // https://github.com/vercel/next.js/blob/canary/packages/next/src/client/link.tsx
+  let children: React.ReactNode = childrenProp;
+  if (legacyBehavior && (typeof childrenProp === "string" || typeof childrenProp === "number")) {
+    children = React.createElement("a", null, childrenProp);
+  }
+
   // If `as` is provided, use it as the actual URL (legacy Next.js pattern
   // where href is a route pattern like "/user/[id]" and as is "/user/1")
-  const resolvedHref = as ?? resolveHref(href);
+  const rawResolvedHref = as ?? resolveHref(href);
+
+  // Mirror Next.js: emit a console.error when the href contains repeated
+  // forward-slashes (e.g. "/foo//bar") or backslashes, and then normalize the
+  // href so navigation targets the collapsed path rather than the raw one.
+  // See packages/next/src/client/resolve-href.ts.
+  const resolvedHref =
+    typeof rawResolvedHref === "string"
+      ? warnAndNormalizeRepeatedSlashesInHref(rawResolvedHref)
+      : rawResolvedHref;
 
   const isDangerous = typeof resolvedHref === "string" && isDangerousScheme(resolvedHref);
 
@@ -426,10 +783,22 @@ const Link = forwardRef<HTMLAnchorElement, LinkProps>(function Link(
   // Track pending state for useLinkStatus()
   const [pending, setPending] = useState(false);
   const mountedRef = useRef(true);
+  // Stable setter so the global navigation registry can reset this link's
+  // pending state from another navigation without depending on render identity.
+  const setPendingRef = useRef<PendingLinkSetter | null>(null);
+  if (setPendingRef.current === null) {
+    setPendingRef.current = (next: boolean) => {
+      if (mountedRef.current) setPending(next);
+    };
+  }
   useEffect(() => {
     mountedRef.current = true;
+    const setter = setPendingRef.current;
     return () => {
       mountedRef.current = false;
+      // Drop our setter from the global registry on unmount so a later
+      // navigation never calls into an unmounted component.
+      if (setter) clearLinkForCurrentNavigation(setter);
     };
   }, []);
 
@@ -504,6 +873,7 @@ const Link = forwardRef<HTMLAnchorElement, LinkProps>(function Link(
       if (instance) {
         instance.mode = "full";
       }
+      promotePrefetchEntriesForNavigation(normalizedHref);
     }
     prefetchUrl(normalizedHref, intentMode, "high");
   }, [prefetchProp, isDangerous, prefetchMode, normalizedHref, unstable_dynamicOnHover]);
@@ -524,8 +894,16 @@ const Link = forwardRef<HTMLAnchorElement, LinkProps>(function Link(
     [onTouchStart, prefetchOnIntent],
   );
 
-  const handleClick = async (e: MouseEvent<HTMLAnchorElement>) => {
-    if (onClick) onClick(e);
+  const handleClick = async (
+    e: MouseEvent<HTMLAnchorElement>,
+    options: { skipLinkOnClick?: boolean } = {},
+  ) => {
+    // In legacyBehavior, the onClick prop on <Link> itself is ignored — the
+    // child's onClick is the one that runs (and Next.js even warns when
+    // `onClick` is passed to <Link> alongside `legacyBehavior`). Skip the
+    // preamble that calls Link's own onClick when invoked from that path.
+    // See: .nextjs-ref/packages/next/src/client/link.tsx (legacyBehavior branch).
+    if (!options.skipLinkOnClick && onClick) onClick(e);
     if (e.defaultPrevented) return;
 
     // Native download links must keep the browser's default behavior.
@@ -549,7 +927,17 @@ const Link = forwardRef<HTMLAnchorElement, LinkProps>(function Link(
     let navigateHref = normalizedHref;
     if (isAbsoluteOrProtocolRelativeUrl(resolvedHref)) {
       const localPath = toSameOriginAppPath(resolvedHref, __basePath);
-      if (localPath == null) return; // truly external
+      if (localPath == null) {
+        // Truly external. Mirror Next.js `linkClicked`: when `replace` is set
+        // we have to take over because the browser's default click navigation
+        // pushes to history rather than replacing the current entry.
+        // See `.nextjs-ref/packages/next/src/client/link.tsx` `linkClicked`.
+        if (replace) {
+          e.preventDefault();
+          window.location.replace(resolvedHref);
+        }
+        return;
+      }
       navigateHref = localPath;
     }
 
@@ -591,12 +979,18 @@ const Link = forwardRef<HTMLAnchorElement, LinkProps>(function Link(
 
     // App Router: delegate to navigateClientSide which handles scroll save,
     // hash-only changes, RSC fetch, and two-phase URL commit.
-    if (typeof window.__VINEXT_RSC_NAVIGATE__ === "function") {
+    if (getNavigationRuntime()?.functions.navigate) {
+      const setter = setPendingRef.current;
+      // Register this link as the one driving the current navigation. This
+      // resets any previously-pending link (e.g. a different link clicked
+      // moments earlier) so only the last-clicked link shows a pending state.
+      if (setter) setLinkForCurrentNavigation(setter);
       setPending(true);
       React.startTransition(() => {
         void navigateClientSide(navigateHref, replace ? "replace" : "push", scroll, true).finally(
           () => {
             if (mountedRef.current) setPending(false);
+            if (setter) clearLinkForCurrentNavigation(setter);
           },
         );
       });
@@ -608,13 +1002,14 @@ const Link = forwardRef<HTMLAnchorElement, LinkProps>(function Link(
       // Pages Router: use the Router singleton
       try {
         const routerModule = await import("next/router");
-        // oxlint-disable-next-line @typescript-eslint/no-explicit-any -- vinext's Router shim accepts (url, as, options)
-        const Router = routerModule.default as any;
-        if (replace) {
-          await Router.replace(absoluteHref, undefined, { scroll });
-        } else {
-          await Router.push(absoluteHref, undefined, { scroll });
-        }
+        const Router = routerModule.default;
+        await navigatePagesRouterLink(Router, {
+          href: absoluteHref,
+          replace,
+          scroll,
+          shallow,
+          locale,
+        });
       } catch {
         // Fallback to hard navigation if router fails
         if (replace) {
@@ -627,8 +1022,7 @@ const Link = forwardRef<HTMLAnchorElement, LinkProps>(function Link(
     }
   };
 
-  // Remove props that shouldn't be on <a>
-  const { passHref: _p, ...anchorProps } = restWithoutLocale;
+  const anchorProps = restWithoutLocale;
 
   const linkStatusValue = React.useMemo(() => ({ pending }), [pending]);
 
@@ -640,17 +1034,138 @@ const Link = forwardRef<HTMLAnchorElement, LinkProps>(function Link(
     if (process.env.NODE_ENV !== "production") {
       console.warn(`<Link> blocked dangerous href: ${resolvedHref}`);
     }
+    // Match Next.js parity: when a user clicks a Link whose href has a
+    // dangerous scheme, emit the same `console.error` that Next.js surfaces
+    // via React's event-handler runtime when `router.push` throws.
+    // Ported from Next.js: test/e2e/app-dir/javascript-urls/javascript-urls.test.ts
+    // https://github.com/vercel/next.js/blob/canary/test/e2e/app-dir/javascript-urls/javascript-urls.test.ts
+    const handleDangerousClick = (event: MouseEvent<HTMLAnchorElement>): void => {
+      if (onClick) onClick(event);
+      reportBlockedDangerousNavigation();
+    };
+    // In legacyBehavior, clone the child instead of wrapping it in our own
+    // <a>. Otherwise the dangerous-href branch would still produce nested
+    // anchors. We do not forward the dangerous href to the child — Next.js's
+    // safety guarantee is that the navigation never happens; the child can
+    // keep its own (sanitized) href if it wants.
+    if (legacyBehavior) {
+      const child = React.Children.only(children) as React.ReactElement<{
+        onClick?: (event: MouseEvent<HTMLAnchorElement>) => void;
+        ref?: React.Ref<HTMLAnchorElement>;
+      }>;
+      const childOnClick = child.props.onClick;
+      const childRef = child.props.ref;
+      const setDangerousRefs = (node: HTMLAnchorElement | null): void => {
+        internalRef.current = node;
+        if (typeof childRef === "function") {
+          childRef(node);
+        } else if (childRef) {
+          (childRef as React.MutableRefObject<HTMLAnchorElement | null>).current = node;
+        }
+      };
+      return (
+        <LinkStatusContext.Provider value={linkStatusValue}>
+          {React.cloneElement(child, {
+            ref: setDangerousRefs,
+            onClick: (event: MouseEvent<HTMLAnchorElement>) => {
+              if (childOnClick) childOnClick(event);
+              reportBlockedDangerousNavigation();
+            },
+          })}
+        </LinkStatusContext.Provider>
+      );
+    }
     return (
       <LinkStatusContext.Provider value={linkStatusValue}>
         <a
           ref={setRefs}
-          onClick={onClick}
+          onClick={handleDangerousClick}
           onMouseEnter={handleMouseEnter}
           onTouchStart={handleTouchStart}
           {...anchorProps}
         >
           {children}
         </a>
+      </LinkStatusContext.Provider>
+    );
+  }
+
+  // Next.js parity: in legacyBehavior, forward href/handlers to the single
+  // child via React.cloneElement instead of wrapping in our own <a>. This
+  // avoids the nested-anchor markup that broke onClick propagation and
+  // produced duplicated/hidden child content (issue #1469).
+  //
+  // Ported from Next.js: packages/next/src/client/link.tsx (around line 499)
+  // https://github.com/vercel/next.js/blob/canary/packages/next/src/client/link.tsx
+  if (legacyBehavior) {
+    const child = React.Children.only(children) as React.ReactElement<{
+      href?: string;
+      ref?: React.Ref<HTMLAnchorElement>;
+      onClick?: (event: MouseEvent<HTMLAnchorElement>) => void;
+      onMouseEnter?: (event: MouseEvent<HTMLAnchorElement>) => void;
+      onTouchStart?: (event: TouchEvent<HTMLAnchorElement>) => void;
+    }>;
+    if (process.env.NODE_ENV !== "production") {
+      if (onClick) {
+        console.warn(
+          `"onClick" was passed to <Link> with \`href\` of \`${resolveHref(href)}\` but "legacyBehavior" was set. The legacy behavior requires onClick be set on the child of next/link`,
+        );
+      }
+      if (onMouseEnter) {
+        console.warn(
+          `"onMouseEnter" was passed to <Link> with \`href\` of \`${resolveHref(href)}\` but "legacyBehavior" was set. The legacy behavior requires onMouseEnter be set on the child of next/link`,
+        );
+      }
+    }
+    const childPropsExisting = child.props;
+    // Use `'href' in props` (matches Next.js) so `href={undefined}` on the
+    // child is treated as "the child owns its href" — we won't overwrite it.
+    const childHasOwnHref = child.type === "a" ? "href" in childPropsExisting : false;
+    // Match Next.js: forward href when `passHref` is set OR the child is a
+    // plain <a> that does not already have an href. Otherwise, leave the
+    // child's href alone.
+    const shouldForwardHref = passHref || (child.type === "a" && !childHasOwnHref);
+    const childOnClick = childPropsExisting.onClick;
+    const childOnMouseEnter = childPropsExisting.onMouseEnter;
+    const childOnTouchStart = childPropsExisting.onTouchStart;
+    // Mirror Next.js: in legacy mode, the ref source is the child's own
+    // ref (e.g. `<a ref={myRef}>`), not Link's `forwardedRef`. In React 19
+    // `ref` is a regular prop on the element. Merge with our intersection
+    // observer ref via `setRefs` so prefetching still works.
+    const childRef = childPropsExisting.ref;
+    const setLegacyRefs = (node: HTMLAnchorElement | null): void => {
+      internalRef.current = node;
+      if (typeof childRef === "function") {
+        childRef(node);
+      } else if (childRef) {
+        (childRef as React.MutableRefObject<HTMLAnchorElement | null>).current = node;
+      }
+    };
+    const clonedProps: Record<string, unknown> = {
+      ref: setLegacyRefs,
+      onClick: (event: MouseEvent<HTMLAnchorElement>) => {
+        // Next.js parity: only the child's onClick runs in legacy mode. The
+        // onClick prop on <Link> is intentionally ignored (and a dev warning
+        // surfaces it above).
+        if (childOnClick) childOnClick(event);
+        if (event.defaultPrevented) return;
+        void handleClick(event, { skipLinkOnClick: true });
+      },
+      onMouseEnter: (event: MouseEvent<HTMLAnchorElement>) => {
+        if (childOnMouseEnter) childOnMouseEnter(event);
+        prefetchOnIntent();
+      },
+      onTouchStart: (event: TouchEvent<HTMLAnchorElement>) => {
+        if (childOnTouchStart) childOnTouchStart(event);
+        prefetchOnIntent();
+      },
+    };
+    if (shouldForwardHref) {
+      clonedProps.href = fullHref;
+    }
+    return (
+      <LinkStatusContext.Provider value={linkStatusValue}>
+        {React.cloneElement(child, clonedProps)}
       </LinkStatusContext.Provider>
     );
   }

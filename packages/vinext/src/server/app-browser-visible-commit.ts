@@ -1,4 +1,5 @@
 import type { ClientNavigationRenderSnapshot } from "vinext/shims/navigation";
+import type { RouteManifest } from "../routing/app-route-graph.js";
 import { mergeElements } from "vinext/shims/slot";
 import {
   normalizeAppElementsSlotBindings,
@@ -7,7 +8,9 @@ import {
 } from "./app-elements.js";
 import {
   createPendingNavigationCommit,
+  preserveBfcacheIdsForMergedElements,
   resolvePendingNavigationCommitDispositionDecision,
+  type AppNavigationPayloadOrigin,
   type AppRouterAction,
   type AppRouterState,
   type CommittedOperationRecord,
@@ -46,6 +49,7 @@ export type ApprovedVisibleCommit = {
   readonly [approvedVisibleCommitBrand]: true;
   readonly action: AppRouterAction;
   readonly decision: VisibleCommitDecision;
+  readonly interception: AppRouterAction["interception"];
   readonly interceptionContext: string | null;
   readonly previousNextUrl: string | null;
   readonly rootLayoutTreePath: string | null;
@@ -146,22 +150,31 @@ function reduceApprovedVisibleCommitState(
   const { action } = commit;
   switch (action.type) {
     case "traverse":
-    case "navigate":
+    case "navigate": {
+      const preserveElementIds = action.reuseCurrentBfcacheIds
+        ? commit.decision.preserveElementIds
+        : [];
+      const preservePreviousSlotIds = action.reuseCurrentBfcacheIds
+        ? commit.decision.preservePreviousSlotIds
+        : [];
+      const mergedElements = mergeElements(state.elements, action.elements, {
+        clearAbsentSlots: action.type === "traverse" || !action.reuseCurrentBfcacheIds,
+        preserveAbsentSlots: action.reuseCurrentBfcacheIds && commit.decision.preserveAbsentSlots,
+        preserveElementIds,
+        preservePreviousSlotIds,
+      });
       return commitVisibleRouterState(
         state,
         {
-          elements: mergeElements(state.elements, action.elements, {
-            clearAbsentSlots: action.type === "traverse",
-            preserveAbsentSlots: commit.decision.preserveAbsentSlots,
-            preserveElementIds: commit.decision.preserveElementIds,
-            preservePreviousSlotIds: commit.decision.preservePreviousSlotIds,
+          bfcacheIds: preserveBfcacheIdsForMergedElements({
+            elements: mergedElements,
+            next: action.bfcacheIds,
+            previous: action.reuseCurrentBfcacheIds ? state.bfcacheIds : {},
           }),
+          elements: mergedElements,
+          interception: action.interception,
           interceptionContext: action.interceptionContext,
-          layoutFlags: mergeLayoutFlags(
-            state.layoutFlags,
-            action.layoutFlags,
-            commit.decision.preserveElementIds,
-          ),
+          layoutFlags: mergeLayoutFlags(state.layoutFlags, action.layoutFlags, preserveElementIds),
           layoutIds: action.layoutIds,
           navigationSnapshot: action.navigationSnapshot,
           previousNextUrl: action.previousNextUrl,
@@ -172,16 +185,21 @@ function reduceApprovedVisibleCommitState(
             state.slotBindings,
             action.slotBindings,
             action.layoutIds,
-            commit.decision.preservePreviousSlotIds,
+            preservePreviousSlotIds,
           ),
         },
         action.operation,
       );
+    }
     case "replace":
       return commitVisibleRouterState(
         state,
         {
+          // Replace commits install the complete payload directly; if they ever
+          // start preserving previous elements, they must preserve bfcache ids too.
+          bfcacheIds: action.bfcacheIds,
           elements: action.elements,
+          interception: action.interception,
           interceptionContext: action.interceptionContext,
           layoutFlags: action.layoutFlags,
           layoutIds: action.layoutIds,
@@ -205,6 +223,7 @@ function resolvePendingNavigationCommitDecision(options: {
   activeNavigationId: number;
   currentState: AppRouterState;
   pending: PendingNavigationCommit;
+  routeManifest?: RouteManifest | null;
   startedNavigationId: number;
   targetHref: string;
 }): CommitDecision {
@@ -266,6 +285,7 @@ function createApprovedVisibleCommit(options: {
     [approvedVisibleCommitBrand]: true,
     action: options.pending.action,
     decision: options.decision,
+    interception: options.pending.interception,
     interceptionContext: options.pending.interceptionContext,
     previousNextUrl: options.pending.previousNextUrl,
     rootLayoutTreePath: options.pending.rootLayoutTreePath,
@@ -351,6 +371,7 @@ export function approvePendingNavigationCommit(options: {
   activeNavigationId: number;
   currentState: AppRouterState;
   pending: PendingNavigationCommit;
+  routeManifest?: RouteManifest | null;
   startedNavigationId: number;
   targetHref: string;
 }): CommitApproval {
@@ -359,6 +380,7 @@ export function approvePendingNavigationCommit(options: {
       activeNavigationId: options.activeNavigationId,
       currentState: options.currentState,
       pending: options.pending,
+      routeManifest: options.routeManifest ?? null,
       startedNavigationId: options.startedNavigationId,
       targetHref: options.targetHref,
     }),
@@ -397,8 +419,10 @@ export async function resolveAndClassifyNavigationCommit(options: {
   navigationSnapshot: ClientNavigationRenderSnapshot;
   nextElements: Promise<AppElements>;
   operationLane: OperationLane;
+  payloadOrigin: AppNavigationPayloadOrigin;
   previousNextUrl?: string | null;
   renderId: number;
+  routeManifest?: RouteManifest | null;
   startedNavigationId: number;
   targetHref: string;
   type: "navigate" | "replace" | "traverse";
@@ -408,6 +432,7 @@ export async function resolveAndClassifyNavigationCommit(options: {
     nextElements: options.nextElements,
     navigationSnapshot: options.navigationSnapshot,
     operationLane: options.operationLane,
+    payloadOrigin: options.payloadOrigin,
     previousNextUrl: options.previousNextUrl,
     renderId: options.renderId,
     type: options.type,
@@ -418,6 +443,7 @@ export async function resolveAndClassifyNavigationCommit(options: {
     activeNavigationId: options.getActiveNavigationId?.() ?? options.activeNavigationId,
     currentState: approvalState,
     pending,
+    routeManifest: options.routeManifest ?? null,
     startedNavigationId: options.startedNavigationId,
     targetHref: options.targetHref,
   });

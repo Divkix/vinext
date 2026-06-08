@@ -1,23 +1,71 @@
 import { buildRouteTrie, trieMatch } from "../routing/route-trie.js";
-import { matchRoutePattern, type RoutePatternParams } from "../routing/route-pattern.js";
-import { normalizePathnameForRouteMatch } from "../routing/utils.js";
+import {
+  matchRoutePattern,
+  matchRoutePatternPrefix,
+  type RoutePatternParams,
+} from "../routing/route-pattern.js";
+import { splitPathnameForRouteMatch } from "../routing/utils.js";
+
+/**
+ * Sentinel slot key used for sibling-style interception entries.
+ * When a matched intercept carries this key, the render layer replaces the
+ * route's main page element instead of a parallel slot.
+ */
+export const SIBLING_PAGE_INTERCEPT_SLOT_KEY = "__vinext_page_intercept";
 
 type AppRscRouteParams = RoutePatternParams;
 
 type AppRscInterceptForMatching = {
   targetPattern: string;
+  /**
+   * URL pattern of the *intercepting route* (the path that owns the slot,
+   * with route groups and `@slot` segments stripped). Mirrors Next.js'
+   * `interceptingRoute` from `extractInterceptionRouteInformation`.
+   *
+   * Next.js implements interception as a rewrite that fires only when the
+   * `Next-URL` header matches `^<sourceMatchPattern>(?:/.*)?$`. vinext's
+   * matcher enforces the same constraint at `findIntercept`: an intercept
+   * whose `targetPattern` matches the request URL is only valid when the
+   * provided source pathname (X-Vinext-Interception-Context / Next-URL)
+   * matches this pattern, with descendants allowed.
+   *
+   * Optional for backwards compat: when absent or empty, the matcher falls
+   * back to the legacy behavior of matching by target alone (still gated on
+   * a non-null source pathname).
+   *
+   * @see https://github.com/vercel/next.js/blob/canary/packages/next/src/lib/generate-interception-routes-rewrites.ts
+   */
+  sourceMatchPattern?: string;
   interceptLayouts: readonly unknown[];
   page: unknown;
+  __pageLoader?: (() => Promise<unknown>) | null;
   params: readonly string[];
 };
 
 type AppRscSlotForMatching = {
+  id?: string | null;
   intercepts?: readonly AppRscInterceptForMatching[];
 };
 
+type AppRscSiblingInterceptForMatching = {
+  targetPattern: string;
+  sourceMatchPattern: string | null;
+  slotId: string | null;
+  interceptLayouts: readonly unknown[];
+  page: unknown;
+  // Sibling intercept pages are lazy-loaded (manifest emits `page: null` plus a
+  // `__pageLoader`) so the intercepting page's CSS chunk stays isolated in
+  // production, matching slot intercepts (see #1738). The loader is awaited on
+  // demand by resolveAppPageInterceptState / probePage.
+  __pageLoader?: (() => Promise<unknown>) | null;
+  params: readonly string[];
+};
+
 type AppRscRouteForMatching = {
+  pattern: string;
   patternParts: string[];
   slots?: Record<string, AppRscSlotForMatching>;
+  siblingIntercepts?: AppRscSiblingInterceptForMatching[];
 };
 
 type AppRscInterceptMatch = AppRscInterceptLookupEntry & {
@@ -29,9 +77,13 @@ type AppRscInterceptLookupEntry = {
   slotKey: string;
   targetPattern: string;
   targetPatternParts: string[];
+  sourceMatchPattern: string | null;
+  sourceMatchPatternParts: string[] | null;
   interceptLayouts: readonly unknown[];
   page: unknown;
+  __pageLoader?: (() => Promise<unknown>) | null;
   params: readonly string[];
+  slotId: string | null;
 };
 
 function createRouteParams(): AppRscRouteParams {
@@ -41,7 +93,7 @@ function createRouteParams(): AppRscRouteParams {
 function appRscPathnameParts(pathname: string): string[] {
   const pathOnly = pathname.split("?")[0];
   const normalized = pathOnly === "/" ? "/" : pathOnly.replace(/\/$/, "");
-  return normalizePathnameForRouteMatch(normalized).split("/").filter(Boolean);
+  return splitPathnameForRouteMatch(normalized);
 }
 
 export function createAppRscRouteMatcher<Route extends AppRscRouteForMatching>(
@@ -58,46 +110,134 @@ export function createAppRscRouteMatcher<Route extends AppRscRouteForMatching>(
       return trieMatch(routeTrie, appRscPathnameParts(url));
     },
     findIntercept(pathname, sourcePathname = null) {
+      // Mirror Next.js' rewrite semantics: interception only fires when the
+      // Next-URL header is present AND matches the intercepting route's regex
+      // (with descendants allowed). Without a source pathname there is no
+      // header for the rewrite to gate on, so we render the direct route.
+      // https://github.com/vercel/next.js/blob/canary/packages/next/src/lib/generate-interception-routes-rewrites.ts
+      if (sourcePathname === null) return null;
+
       const urlParts = appRscPathnameParts(pathname);
+      const sourceParts = appRscPathnameParts(sourcePathname);
+
       for (const entry of interceptLookup) {
+        // Primary gate: when the intercept declares a `sourceMatchPattern`
+        // (the intercepting route's path, descendants allowed), require the
+        // request's source pathname to satisfy it. This mirrors Next.js'
+        // `^<interceptingRoute>(?:/.*)?$` header regex precisely and is the
+        // authoritative gate when the manifest carries the pattern.
+        if (!matchInterceptSource(sourceParts, entry)) continue;
+
         const params = matchAppRscRoutePattern(urlParts, entry.targetPatternParts);
-        if (params !== null) {
-          let sourceParams = createRouteParams();
-          if (sourcePathname !== null) {
-            const sourceRoute = routes[entry.sourceRouteIndex];
-            const sourceParts = appRscPathnameParts(sourcePathname);
-            const matchedSourceParams = sourceRoute
-              ? matchAppRscRoutePattern(sourceParts, sourceRoute.patternParts)
-              : null;
-            if (matchedSourceParams !== null) {
-              sourceParams = matchedSourceParams;
-            }
-          }
-          return { ...entry, matchedParams: mergeMatchedParams(sourceParams, params) };
+        if (params === null) continue;
+
+        const sourceRoute = routes[entry.sourceRouteIndex];
+        const matchedSourceParams = sourceRoute
+          ? matchAppRscRoutePattern(sourceParts, sourceRoute.patternParts)
+          : null;
+
+        // Secondary gate (from #1249): when the entry has no
+        // `sourceMatchPatternParts` declared (older manifest shapes), reject
+        // sources that don't match the slot owner's route pattern exactly.
+        // This is the safety net that keeps unrelated sources from pulling
+        // in a modal they have no slot for. When `sourceMatchPatternParts`
+        // *is* declared, `matchInterceptSource` above has already approved
+        // the source (including descendants), so a stricter exact-match
+        // check on the slot-owner route here would defeat the descendant
+        // semantics — fall back to empty params instead.
+        if (matchedSourceParams === null && entry.sourceMatchPatternParts === null) {
+          continue;
         }
+        const sourceParams = matchedSourceParams ?? createRouteParams();
+        return { ...entry, matchedParams: mergeMatchedParams(sourceParams, params) };
       }
       return null;
     },
   };
 }
 
+/**
+ * Check whether the request's source pathname (Next-URL / interception
+ * context) satisfies the intercept entry's intercepting-route pattern, with
+ * descendants allowed. Mirrors the header regex shape Next.js emits for the
+ * generated interception rewrite: `^<pattern>(?:/.*)?$`.
+ *
+ * When the entry has no declared `sourceMatchPatternParts`, fall back to the
+ * legacy behavior of accepting any source (we still require the source to be
+ * non-null at the caller — see `findIntercept`).
+ */
+function matchInterceptSource(sourceParts: string[], entry: AppRscInterceptLookupEntry): boolean {
+  const patternParts = entry.sourceMatchPatternParts;
+  if (!patternParts) return true;
+  // Root pattern (`/`) matches any source.
+  if (patternParts.length === 0) return true;
+  return matchRoutePatternPrefix(sourceParts, patternParts);
+}
+
 function createInterceptLookup<Route extends AppRscRouteForMatching>(
   routes: Route[],
 ): AppRscInterceptLookupEntry[] {
+  // Build a pattern→index map so slot intercepts resolve to the actual owner
+  // route rather than the inheriting descendant that carries the slot copy.
+  // When a route inherits a @slot from an ancestor (e.g. /groups/:id/new
+  // inheriting @modal from /interception-dyn-single), the inherited slot's
+  // interceptingRoutes include a sourceMatchPattern that names the real owner
+  // ("/interception-dyn-single"). Using that pattern's index as sourceRouteIndex
+  // ensures resolveAppPageInterceptState produces kind="source-route" (owner ≠
+  // current) rather than kind="current-route" (owner === current), which would
+  // render the descendant page instead of the owner's layout+page tree.
+  const patternToIndex = new Map<string, number>(routes.map((r, i) => [r.pattern, i]));
+
   const interceptLookup: AppRscInterceptLookupEntry[] = [];
   for (let routeIndex = 0; routeIndex < routes.length; routeIndex++) {
     const route = routes[routeIndex];
-    if (!route.slots) continue;
-    for (const [slotKey, slotModule] of Object.entries(route.slots)) {
-      if (!slotModule.intercepts) continue;
-      for (const intercept of slotModule.intercepts) {
+    if (route.slots) {
+      for (const [slotKey, slotModule] of Object.entries(route.slots)) {
+        if (!slotModule.intercepts) continue;
+        for (const intercept of slotModule.intercepts) {
+          const sourceMatchPattern = intercept.sourceMatchPattern ?? null;
+          const sourceMatchPatternParts = sourceMatchPattern
+            ? sourceMatchPattern.split("/").filter(Boolean)
+            : null;
+          // Prefer the route whose pattern matches sourceMatchPattern (the actual
+          // slot-owner route). Fall back to routeIndex when no match is found.
+          const ownerRouteIndex =
+            sourceMatchPattern !== null
+              ? (patternToIndex.get(sourceMatchPattern) ?? routeIndex)
+              : routeIndex;
+          interceptLookup.push({
+            sourceRouteIndex: ownerRouteIndex,
+            slotKey,
+            slotId: typeof slotModule.id === "string" ? slotModule.id : null,
+            targetPattern: intercept.targetPattern,
+            targetPatternParts: intercept.targetPattern.split("/").filter(Boolean),
+            sourceMatchPattern,
+            sourceMatchPatternParts,
+            interceptLayouts: intercept.interceptLayouts,
+            page: intercept.page,
+            __pageLoader: intercept.__pageLoader,
+            params: intercept.params,
+          });
+        }
+      }
+    }
+    if (route.siblingIntercepts) {
+      for (const intercept of route.siblingIntercepts) {
+        const sourceMatchPattern = intercept.sourceMatchPattern ?? null;
+        const sourceMatchPatternParts = sourceMatchPattern
+          ? sourceMatchPattern.split("/").filter(Boolean)
+          : null;
         interceptLookup.push({
           sourceRouteIndex: routeIndex,
-          slotKey,
+          slotKey: SIBLING_PAGE_INTERCEPT_SLOT_KEY,
+          slotId: typeof intercept.slotId === "string" ? intercept.slotId : null,
           targetPattern: intercept.targetPattern,
           targetPatternParts: intercept.targetPattern.split("/").filter(Boolean),
+          sourceMatchPattern,
+          sourceMatchPatternParts,
           interceptLayouts: intercept.interceptLayouts,
           page: intercept.page,
+          __pageLoader: intercept.__pageLoader,
           params: intercept.params,
         });
       }

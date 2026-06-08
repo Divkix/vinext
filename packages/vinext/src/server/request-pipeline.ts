@@ -1,10 +1,11 @@
 import { hasBasePath, stripBasePath, removeTrailingSlash } from "../utils/base-path.js";
 import type { NextHeader } from "../config/next-config.js";
-import type { RequestContext } from "../config/config-matchers.js";
+import type { BasePathMatchState, RequestContext } from "../config/config-matchers.js";
 import { matchHeaders } from "../config/config-matchers.js";
 import {
   INTERNAL_HEADERS,
   MIDDLEWARE_HEADER_PREFIX,
+  VINEXT_INTERNAL_HEADERS,
   VINEXT_STATIC_FILE_HEADER,
 } from "./headers.js";
 import { forbiddenResponse, notFoundResponse } from "./http-error-responses.js";
@@ -115,6 +116,12 @@ type ApplyConfigHeadersOptions = {
   configHeaders: NextHeader[];
   pathname: string;
   requestContext: RequestContext;
+  /**
+   * basePath gating state. When omitted, every rule is treated as a default
+   * (basePath: true) rule for backward compatibility — callers that need to
+   * support `basePath: false` headers must pass this in.
+   */
+  basePathState?: BasePathMatchState;
 };
 
 type StaticFileSignalContext = {
@@ -129,6 +136,12 @@ type ResolvePublicFileRouteOptions = {
   publicFiles: ReadonlySet<string>;
   request: Request;
 };
+
+const FILE_LIKE_PATHNAME_RE = /\.[^/]+\/?$/;
+
+function isWellKnownPathname(pathname: string): boolean {
+  return pathname === "/.well-known" || pathname.startsWith("/.well-known/");
+}
 
 function findHeaderRecordKey(headers: HeaderRecord, lowerName: string): string | undefined {
   for (const key of Object.keys(headers)) {
@@ -176,7 +189,12 @@ export function applyConfigHeadersToResponse(
   responseHeaders: Headers,
   options: ApplyConfigHeadersOptions,
 ): void {
-  const matched = matchHeaders(options.pathname, options.configHeaders, options.requestContext);
+  const matched = matchHeaders(
+    options.pathname,
+    options.configHeaders,
+    options.requestContext,
+    options.basePathState,
+  );
   for (const header of matched) {
     const lowerName = header.key.toLowerCase();
     if (lowerName === "vary" || lowerName === "set-cookie") {
@@ -195,7 +213,12 @@ export function applyConfigHeadersToHeaderRecord(
   headers: HeaderRecord,
   options: ApplyConfigHeadersOptions,
 ): void {
-  const matched = matchHeaders(options.pathname, options.configHeaders, options.requestContext);
+  const matched = matchHeaders(
+    options.pathname,
+    options.configHeaders,
+    options.requestContext,
+    options.basePathState,
+  );
   for (const header of matched) {
     const lowerName = header.key.toLowerCase();
     if (lowerName === "set-cookie") {
@@ -240,6 +263,33 @@ export function resolvePublicFileRoute(options: ResolvePublicFileRouteOptions): 
   return createStaticFileSignal(options.cleanPathname, options.middlewareContext);
 }
 
+export function normalizeTrailingSlashPathname(
+  pathname: string,
+  trailingSlash: boolean,
+): string | null {
+  if (pathname === "/" || pathname === "/api" || pathname.startsWith("/api/")) {
+    return null;
+  }
+
+  const hasTrailing = pathname.endsWith("/");
+
+  if (trailingSlash) {
+    // Next.js emits two internal redirect rules for trailingSlash:true:
+    // file-looking paths lose a trailing slash, non-file paths gain one, and
+    // /.well-known stays untouched for RFC-defined discovery URLs.
+    if (isWellKnownPathname(pathname)) return null;
+    if (FILE_LIKE_PATHNAME_RE.test(pathname)) {
+      const normalized = removeTrailingSlash(pathname);
+      return normalized === pathname ? null : normalized;
+    }
+    if (!hasTrailing && !pathname.endsWith(".rsc")) return `${pathname}/`;
+    return null;
+  }
+
+  if (hasTrailing) return removeTrailingSlash(pathname);
+  return null;
+}
+
 /**
  * Check if the pathname needs a trailing slash redirect, and return the
  * redirect Response if so.
@@ -248,6 +298,8 @@ export function resolvePublicFileRoute(options: ResolvePublicFileRouteOptions): 
  * - `/api` routes are never redirected
  * - The root path `/` is never redirected
  * - If `trailingSlash` is true, redirect `/about` → `/about/`
+ * - If `trailingSlash` is true, redirect file-looking `/file.ext/` → `/file.ext`
+ * - If `trailingSlash` is true, do not redirect `/.well-known/*`
  * - If `trailingSlash` is false (default), redirect `/about/` → `/about`
  *
  * @param pathname - The basePath-stripped pathname
@@ -272,22 +324,12 @@ export function normalizeTrailingSlash(
   if (isOpenRedirectShaped(pathname)) {
     return notFoundResponse();
   }
-  const hasTrailing = pathname.endsWith("/");
-  // RSC (client-side navigation) requests arrive as /path.rsc — don't
-  // redirect those to /path.rsc/ when trailingSlash is enabled.
-  if (trailingSlash && !hasTrailing && !pathname.endsWith(".rsc")) {
-    return new Response(null, {
-      status: 308,
-      headers: { Location: basePath + pathname + "/" + search },
-    });
-  }
-  if (!trailingSlash && hasTrailing) {
-    return new Response(null, {
-      status: 308,
-      headers: { Location: basePath + removeTrailingSlash(pathname) + search },
-    });
-  }
-  return null;
+  const normalizedPathname = normalizeTrailingSlashPathname(pathname, trailingSlash);
+  if (normalizedPathname === null) return null;
+  return new Response(null, {
+    status: 308,
+    headers: { Location: basePath + normalizedPathname + search },
+  });
 }
 
 /**
@@ -562,7 +604,9 @@ export function processMiddlewareHeaders(headers: Headers): void {
  *
  * @see `./headers.ts` for the canonical definition.
  */
-export { INTERNAL_HEADERS } from "./headers.js";
+export { INTERNAL_HEADERS, VINEXT_INTERNAL_HEADERS } from "./headers.js";
+
+const STRIPPED_INTERNAL_HEADERS = new Set([...INTERNAL_HEADERS, ...VINEXT_INTERNAL_HEADERS]);
 
 type RequestInitWithCf = RequestInit & { cf?: unknown };
 
@@ -579,12 +623,12 @@ type RequestInitWithCf = RequestInit & { cf?: unknown };
  * for the same cloning pattern).
  *
  * @param headers - The source Headers (never modified)
- * @returns A new Headers with INTERNAL_HEADERS removed
+ * @returns A new Headers with internal framework headers removed
  */
 export function filterInternalHeaders(headers: Headers): Headers {
   const filtered = new Headers();
   for (const [key, value] of headers) {
-    if (!INTERNAL_HEADERS.includes(key.toLowerCase())) {
+    if (!STRIPPED_INTERNAL_HEADERS.has(key.toLowerCase())) {
       filtered.append(key, value);
     }
   }
@@ -627,6 +671,54 @@ export function cloneRequestWithHeaders(request: Request, headers: Headers): Req
       init.duplex = "half";
     }
     cloned = new Request(request.url, init);
+  }
+  const cf = getRequestCf(request);
+  if (cf !== undefined) {
+    // new Request() does not copy Workers-specific cf, so re-attach it.
+    Object.defineProperty(cloned, "cf", {
+      value: cf,
+      enumerable: true,
+      configurable: true,
+    });
+  }
+  return cloned;
+}
+
+/**
+ * Clone a Request while overriding the URL, preserving headers and metadata
+ * when possible.
+ *
+ * Mirrors `cloneRequestWithHeaders`, but rewrites the URL instead of the
+ * headers. Workers support `new Request(url, request)` to copy method/headers/
+ * body onto a new URL; Node/undici can throw on a foreign Request instance, so
+ * we fall back to a manual RequestInit. `new Request()` does not copy the
+ * Workers-specific `cf` property and omits `duplex` for streaming bodies, so
+ * both are handled explicitly — the same reasons `cloneRequestWithHeaders`
+ * exists.
+ */
+export function cloneRequestWithUrl(request: Request, url: string): Request {
+  let cloned: Request;
+  try {
+    cloned = new Request(url, request);
+  } catch {
+    const init: RequestInitWithCf = {
+      method: request.method,
+      headers: request.headers,
+      body: request.body ?? undefined,
+      redirect: request.redirect,
+      signal: request.signal,
+      integrity: request.integrity,
+      cache: request.cache,
+      mode: request.mode,
+      credentials: request.credentials,
+      referrer: request.referrer,
+      referrerPolicy: request.referrerPolicy,
+    };
+    if (request.body) {
+      // @ts-expect-error — duplex needed for streaming request bodies
+      init.duplex = "half";
+    }
+    cloned = new Request(url, init);
   }
   const cf = getRequestCf(request);
   if (cf !== undefined) {

@@ -1,4 +1,5 @@
 import { fnv1a64 } from "../utils/hash.js";
+import { isUnknownRecord as isRecord } from "../utils/record.js";
 
 export const ARTIFACT_COMPATIBILITY_SCHEMA_VERSION = 1;
 
@@ -18,6 +19,20 @@ export type ArtifactCompatibilityEnvelope = Readonly<{
   renderEpoch: string | null;
 }>;
 
+// Canonical ordered list of every field in ArtifactCompatibilityEnvelope.
+// Order is load-bearing — hash-producing consumers iterate this array to
+// guarantee deterministic ordering across runtimes.
+export const ARTIFACT_COMPATIBILITY_PROOF_FIELDS: readonly (keyof ArtifactCompatibilityEnvelope)[] =
+  [
+    "schemaVersion",
+    "graphVersion",
+    "deploymentVersion",
+    "appElementsSchemaVersion",
+    "rscPayloadSchemaVersion",
+    "rootBoundaryId",
+    "renderEpoch",
+  ];
+
 type ArtifactCompatibilityEnvelopeInput = Readonly<{
   graphVersion?: string | null;
   deploymentVersion?: string | null;
@@ -34,7 +49,7 @@ type ArtifactCompatibilityMap = Readonly<{
   renderEpochs?: readonly ArtifactCompatibilitySet[];
 }>;
 
-type ArtifactCompatibilityEvaluationOptions = Readonly<{
+export type ArtifactCompatibilityEvaluationOptions = Readonly<{
   compatibilityMap?: ArtifactCompatibilityMap;
 }>;
 
@@ -97,10 +112,6 @@ export function createArtifactCompatibilityGraphVersion(
 ): string {
   const fingerprint = fnv1a64(JSON.stringify([input.routePattern, input.rootBoundaryId]));
   return `app-route-graph:${fingerprint}`;
-}
-
-function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function isStringOrNull(value: unknown): value is string | null {

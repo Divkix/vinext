@@ -23,6 +23,16 @@ export async function middleware(request: NextRequest, event: NextFetchEvent) {
   // (RSC env). A single request should produce exactly one invocation.
   recordMiddlewareInvocation(pathname);
 
+  // Regression for cloudflare/vinext#1480: a node-runtime middleware that
+  // reads the request body on POST (auth, logging, body-size accounting, …)
+  // and then falls through must NOT prevent the downstream server-action POST
+  // from being intercepted and reading its own body. We consume the body here
+  // exactly as Next.js' `middleware-node.js` fixture does, then `.next()`.
+  if (pathname === "/nextjs-compat/action-node-mw" && request.method === "POST") {
+    await request.text();
+    return NextResponse.next();
+  }
+
   // Test NextRequest.cookies - this would fail with TypeError if request is plain Request
   const sessionToken = request.cookies.get("session");
   const acceptsRsc = request.headers.get("accept")?.startsWith("text/x-component") ?? false;
@@ -62,6 +72,14 @@ export async function middleware(request: NextRequest, event: NextFetchEvent) {
     return NextResponse.rewrite(new URL("/", request.url));
   }
 
+  // Used by Vitest: nextjs-compat/hooks.test.ts — verifies usePathname()
+  // returns the CANONICAL URL (the one the user sees) after a middleware
+  // rewrite, not the internal rewrite target. Mirrors the Next.js test
+  // semantics for `/rewritten-use-pathname` via a middleware rewrite.
+  if (pathname === "/middleware-rewritten-use-pathname") {
+    return NextResponse.rewrite(new URL("/nextjs-compat/hooks-search", request.url));
+  }
+
   // Ported from Next.js: test/e2e/middleware-rewrites/app/middleware.js
   // https://github.com/vercel/next.js/blob/canary/test/e2e/middleware-rewrites/app/middleware.js
   if (pathname === "/middleware-external-rewrite") {
@@ -89,12 +107,32 @@ export async function middleware(request: NextRequest, event: NextFetchEvent) {
     );
   }
 
+  // Issue #1342 / Next.js parity: middleware preserves the original request's
+  // query by mutating `request.nextUrl` (which carries the existing search)
+  // rather than constructing a fresh path-only URL. Mirrors Next.js:
+  // test/e2e/middleware-rewrites/app/middleware.js — `url.pathname = '/x'` then
+  // `NextResponse.rewrite(url)`.
+  if (pathname === "/middleware-rewrite-keep-original-query") {
+    const target = request.nextUrl.clone();
+    target.pathname = "/search-query";
+    return NextResponse.rewrite(target);
+  }
+
   // Rewrite with custom status code
   // Ref: opennextjs-cloudflare middleware.ts — NextResponse.rewrite with status
   if (pathname === "/middleware-rewrite-status") {
     return NextResponse.rewrite(new URL("/", request.url), {
       status: 403,
     });
+  }
+
+  // Action forward loop test: rewrite POSTs from /nextjs-compat/action-forward-loop
+  // to /nextjs-compat/action-forward-loop-rewrite so the receiving page does not
+  // bundle the action. Without the x-action-forwarded guard, a multi-worker
+  // deployment would loop indefinitely. In vinext's single-worker model, the
+  // guard still fires defensively when the header is injected.
+  if (pathname === "/nextjs-compat/action-forward-loop" && request.method === "POST") {
+    return NextResponse.rewrite(new URL("/nextjs-compat/action-forward-loop-rewrite", request.url));
   }
 
   // Block /middleware-blocked with custom response
@@ -215,6 +253,21 @@ export async function middleware(request: NextRequest, event: NextFetchEvent) {
     return NextResponse.next({ request: { headers } });
   }
 
+  // Locale rewrite for interception-dynamic-segment-middleware suite.
+  // Scoped exclusively to /interception-mw/* to avoid interfering with other tests.
+  // Mirrors Next.js: test/e2e/app-dir/interception-dynamic-segment-middleware/middleware.ts
+  // https://github.com/vercel/next.js/blob/canary/test/e2e/app-dir/interception-dynamic-segment-middleware/middleware.ts
+  if (pathname.startsWith("/interception-mw/")) {
+    const withoutPrefix = pathname.slice("/interception-mw".length); // → /foo/p/1
+    const locale = "en";
+    const hasLocale = withoutPrefix.startsWith(`/${locale}/`) || withoutPrefix === `/${locale}`;
+    if (!hasLocale) {
+      const target = request.nextUrl.clone();
+      target.pathname = `/interception-mw/${locale}${withoutPrefix}`;
+      return NextResponse.rewrite(target);
+    }
+  }
+
   // Forward search params as a header for RSC testing
   // Ref: opennextjs-cloudflare middleware.ts — search-params header
   const requestHeaders = new Headers(request.headers);
@@ -255,7 +308,10 @@ export async function middleware(request: NextRequest, event: NextFetchEvent) {
       "script-src 'nonce-vinext-test-nonce' 'strict-dynamic';",
     );
   }
-  if (pathname === "/revalidate-test" && request.nextUrl.searchParams.has("csp-nonce")) {
+  if (
+    (pathname === "/revalidate-test" || pathname.startsWith("/beforeinteractive-head-ordering")) &&
+    request.nextUrl.searchParams.has("csp-nonce")
+  ) {
     const nonce = request.nextUrl.searchParams.get("csp-nonce") ?? "vinext-test-nonce";
     r.headers.set("content-security-policy", `script-src 'nonce-${nonce}' 'strict-dynamic';`);
   }
@@ -277,12 +333,24 @@ export async function middleware(request: NextRequest, event: NextFetchEvent) {
 }
 
 export const config = {
+  // Declare the Node.js runtime so the `/nextjs-compat/action-node-mw`
+  // server-action regression (cloudflare/vinext#1480) faithfully mirrors
+  // Next.js' `middleware-node.js` fixture (`export const config = { runtime:
+  // 'nodejs' }`). vinext runs all middleware on Node regardless of this value:
+  // middleware dispatch reads config only via `middlewareMatcher()` (i.e.
+  // `config.matcher`) with no `config.runtime` branch — see
+  // packages/vinext/src/server/middleware-runtime.ts (resolveMiddlewareModuleHandler /
+  // middlewareMatcher). So this is a behavioural no-op for the other matcher
+  // entries — but it guards the named scenario and documents intent.
+  runtime: "nodejs",
   matcher: [
     "/about",
     "/middleware-redirect",
     "/middleware-rewrite",
+    "/middleware-rewritten-use-pathname",
     "/middleware-external-rewrite",
     "/middleware-rewrite-query",
+    "/middleware-rewrite-keep-original-query",
     "/middleware-rewrite-status",
     "/middleware-blocked",
     "/middleware-throw",
@@ -292,6 +360,7 @@ export const config = {
     "/headers/override-from-middleware",
     "/header-override-delete",
     "/api/header-override-delete",
+    "/api/pages-og",
     "/header-override-after-prior-access",
     "/pages-header-override-delete",
     "/revalidate-test",
@@ -299,6 +368,8 @@ export const config = {
     "/script-manual-nonce",
     "/pages-script-manual-nonce",
     "/nextjs-compat/dynamic/:path*",
+    "/nextjs-compat/action-forward-loop",
+    "/nextjs-compat/action-node-mw",
     "/use-client-page-pathname/:path*",
     "/rsc-fetch-redirect-src",
     "/rsc-fetch-error-target",
@@ -312,6 +383,9 @@ export const config = {
     },
     "/mw-gated-fallback-pages",
     "/photos/:path*",
+    "/interception-mw/:path*",
     "/actions",
+    "/beforeinteractive-head-ordering/:path*",
+    "/beforeinteractive-head-ordering",
   ],
 };

@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vite-plus/test";
 import {
+  type AppPageCacheOutcomeMetric,
   buildAppPageCacheTags,
   buildAppPageCachedResponse,
   finalizeAppPageHtmlCacheResponse,
@@ -12,6 +13,11 @@ import {
   VINEXT_RSC_COMPATIBILITY_ID_HEADER,
   VINEXT_RSC_VARY_HEADER,
 } from "../packages/vinext/src/server/app-rsc-cache-busting.js";
+import {
+  buildRenderObservation,
+  buildRenderRequestApiObservations,
+  type RenderObservation,
+} from "../packages/vinext/src/server/cache-proof.js";
 import type { CachedAppPageValue } from "../packages/vinext/src/shims/cache.js";
 import { withEnvVar } from "./env-test-helpers.js";
 
@@ -34,8 +40,9 @@ function buildCachedAppPageValue(
   html: string,
   rscData?: ArrayBuffer,
   status?: number,
+  renderObservation?: RenderObservation,
 ): CachedAppPageValue {
-  return {
+  const value: CachedAppPageValue = {
     kind: "APP_PAGE",
     html,
     rscData,
@@ -43,6 +50,31 @@ function buildCachedAppPageValue(
     postponed: undefined,
     status,
   };
+  if (renderObservation) {
+    value.renderObservation = renderObservation;
+  }
+  return value;
+}
+
+function buildQueryInvariantRenderObservation(): RenderObservation {
+  return buildRenderObservation({
+    boundaryOutcome: { kind: "success" },
+    cacheability: "public",
+    cacheTags: [],
+    completeness: "complete",
+    dynamicFetches: [],
+    output: {
+      kind: "app-html",
+      renderEpoch: null,
+      rootBoundaryId: null,
+      routeId: "route:/cached",
+    },
+    pathTags: [],
+    requestApis: buildRenderRequestApiObservations({
+      completeness: "complete",
+      observed: [],
+    }),
+  });
 }
 
 describe("app page cache helpers", () => {
@@ -72,6 +104,9 @@ describe("app page cache helpers", () => {
     expect(htmlResponse?.headers.get("content-type")).toBe("text/html; charset=utf-8");
     expect(htmlResponse?.headers.get("cache-control")).toBe("s-maxage=60, stale-while-revalidate");
     expect(htmlResponse?.headers.get("x-vinext-cache")).toBe("HIT");
+    // Ported from Next.js: test/e2e/app-dir/app-root-params-getters/generate-static-params.test.ts
+    // https://github.com/vercel/next.js/blob/canary/test/e2e/app-dir/app-root-params-getters/generate-static-params.test.ts
+    expect(htmlResponse?.headers.get("x-nextjs-cache")).toBe("HIT");
     await expect(htmlResponse?.text()).resolves.toBe("<h1>cached</h1>");
 
     const rscResponse = withEnvVar("__VINEXT_RSC_COMPATIBILITY_ID", "compat-a", () =>
@@ -85,6 +120,7 @@ describe("app page cache helpers", () => {
     expect(rscResponse?.headers.get("content-type")).toBe("text/x-component");
     expect(rscResponse?.headers.get("cache-control")).toBe("s-maxage=0, stale-while-revalidate");
     expect(rscResponse?.headers.get(VINEXT_RSC_COMPATIBILITY_ID_HEADER)).toBe("compat-a");
+    expect(rscResponse?.headers.get("x-nextjs-cache")).toBe("STALE");
     expect(await rscResponse?.arrayBuffer()).toEqual(rscData);
   });
 
@@ -249,9 +285,50 @@ describe("app page cache helpers", () => {
     ).toBeNull();
   });
 
+  it("emits the `x-edge-runtime: 1` marker on cached responses for edge-runtime routes", () => {
+    const rscData = new TextEncoder().encode("flight").buffer;
+    const cached = buildCachedAppPageValue("<h1>cached</h1>", rscData);
+
+    const htmlResponse = buildAppPageCachedResponse(cached, {
+      cacheState: "HIT",
+      isEdgeRuntime: true,
+      isRscRequest: false,
+      revalidateSeconds: 60,
+    });
+    expect(htmlResponse?.headers.get("x-edge-runtime")).toBe("1");
+
+    const rscResponse = buildAppPageCachedResponse(cached, {
+      cacheState: "HIT",
+      isEdgeRuntime: true,
+      isRscRequest: true,
+      revalidateSeconds: 60,
+    });
+    expect(rscResponse?.headers.get("x-edge-runtime")).toBe("1");
+  });
+
+  it("omits the `x-edge-runtime` marker on cached responses for nodejs-runtime routes", () => {
+    const rscData = new TextEncoder().encode("flight").buffer;
+    const cached = buildCachedAppPageValue("<h1>cached</h1>", rscData);
+
+    const htmlResponse = buildAppPageCachedResponse(cached, {
+      cacheState: "HIT",
+      isRscRequest: false,
+      revalidateSeconds: 60,
+    });
+    expect(htmlResponse?.headers.get("x-edge-runtime")).toBeNull();
+
+    const rscResponse = buildAppPageCachedResponse(cached, {
+      cacheState: "HIT",
+      isRscRequest: true,
+      revalidateSeconds: 60,
+    });
+    expect(rscResponse?.headers.get("x-edge-runtime")).toBeNull();
+  });
+
   it("returns cached HIT responses and clears request state", async () => {
     let didClearRequestContext = false;
     const middlewareHeaders = new Headers({ "X-From-Middleware": "hit" });
+    const cacheOutcomes: AppPageCacheOutcomeMetric[] = [];
 
     const response = await readAppPageCacheResponse({
       cleanPathname: "/cached",
@@ -271,6 +348,9 @@ describe("app page cache helpers", () => {
       async isrSet() {},
       middlewareHeaders,
       middlewareStatus: 203,
+      recordCacheOutcome(metric) {
+        cacheOutcomes.push(metric);
+      },
       revalidateSeconds: 60,
       async renderFreshPageForCache() {
         throw new Error("should not render");
@@ -283,6 +363,141 @@ describe("app page cache helpers", () => {
     expect(response?.headers.get("x-vinext-cache")).toBe("HIT");
     expect(response?.headers.get("x-from-middleware")).toBe("hit");
     expect(response?.status).toBe(203);
+    await expect(response?.text()).resolves.toBe("<h1>cached</h1>");
+    expect(didClearRequestContext).toBe(true);
+    expect(cacheOutcomes).toEqual([
+      {
+        artifact: "html",
+        cacheKey: "html:/cached",
+        outcome: "hit",
+        reason: "served",
+      },
+    ]);
+  });
+
+  it("treats unproofed cached HIT responses as misses for query-bearing requests", async () => {
+    let didRenderFresh = false;
+    const cacheOutcomes: AppPageCacheOutcomeMetric[] = [];
+
+    const response = await readAppPageCacheResponse({
+      cleanPathname: "/cached",
+      clearRequestContext() {
+        throw new Error("unproofed query cache hit should not clear request context");
+      },
+      hasRequestSearchParams: true,
+      isRscRequest: false,
+      async isrGet() {
+        return buildISRCacheEntry(buildCachedAppPageValue("<h1>cached empty query</h1>"));
+      },
+      isrHtmlKey(pathname) {
+        return "html:" + pathname;
+      },
+      isrRscKey(pathname) {
+        return "rsc:" + pathname;
+      },
+      async isrSet() {},
+      recordCacheOutcome(metric) {
+        cacheOutcomes.push(metric);
+      },
+      revalidateSeconds: 60,
+      async renderFreshPageForCache() {
+        didRenderFresh = true;
+        return {
+          html: "<h1>fresh</h1>",
+          rscData: new ArrayBuffer(0),
+          tags: [],
+        };
+      },
+      scheduleBackgroundRegeneration() {
+        throw new Error("should not schedule regeneration");
+      },
+    });
+
+    expect(response).toBeNull();
+    expect(didRenderFresh).toBe(false);
+    expect(cacheOutcomes).toEqual([
+      {
+        artifact: "html",
+        cacheKey: "html:/cached",
+        outcome: "miss",
+        reason: "query-variant-unproven",
+      },
+    ]);
+  });
+
+  it("serves cached HIT responses for query-bearing requests with negative searchParams proof", async () => {
+    let didClearRequestContext = false;
+
+    const response = await readAppPageCacheResponse({
+      cleanPathname: "/cached",
+      clearRequestContext() {
+        didClearRequestContext = true;
+      },
+      hasRequestSearchParams: true,
+      isRscRequest: false,
+      async isrGet() {
+        return buildISRCacheEntry(
+          buildCachedAppPageValue(
+            "<h1>cached</h1>",
+            undefined,
+            undefined,
+            buildQueryInvariantRenderObservation(),
+          ),
+        );
+      },
+      isrHtmlKey(pathname) {
+        return "html:" + pathname;
+      },
+      isrRscKey(pathname) {
+        return "rsc:" + pathname;
+      },
+      async isrSet() {},
+      revalidateSeconds: 60,
+      async renderFreshPageForCache() {
+        throw new Error("should not render");
+      },
+      scheduleBackgroundRegeneration() {
+        throw new Error("should not schedule regeneration");
+      },
+    });
+
+    expect(response?.headers.get("x-vinext-cache")).toBe("HIT");
+    await expect(response?.text()).resolves.toBe("<h1>cached</h1>");
+    expect(didClearRequestContext).toBe(true);
+  });
+
+  it("returns cached HIT responses when the cache outcome recorder throws", async () => {
+    let didClearRequestContext = false;
+
+    const response = await readAppPageCacheResponse({
+      cleanPathname: "/cached",
+      clearRequestContext() {
+        didClearRequestContext = true;
+      },
+      isRscRequest: false,
+      async isrGet() {
+        return buildISRCacheEntry(buildCachedAppPageValue("<h1>cached</h1>"));
+      },
+      isrHtmlKey(pathname) {
+        return "html:" + pathname;
+      },
+      isrRscKey(pathname) {
+        return "rsc:" + pathname;
+      },
+      async isrSet() {},
+      recordCacheOutcome() {
+        throw new Error("metrics sink unavailable");
+      },
+      revalidateSeconds: 60,
+      async renderFreshPageForCache() {
+        throw new Error("should not render");
+      },
+      scheduleBackgroundRegeneration() {
+        throw new Error("should not schedule regeneration");
+      },
+    });
+
+    expect(response?.headers.get("x-vinext-cache")).toBe("HIT");
     await expect(response?.text()).resolves.toBe("<h1>cached</h1>");
     expect(didClearRequestContext).toBe(true);
   });
@@ -517,6 +732,7 @@ describe("app page cache helpers", () => {
 
   it("falls through and logs on cache read errors", async () => {
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const cacheOutcomes: AppPageCacheOutcomeMetric[] = [];
 
     const response = await readAppPageCacheResponse({
       cleanPathname: "/broken",
@@ -532,6 +748,9 @@ describe("app page cache helpers", () => {
         return "rsc:" + pathname;
       },
       async isrSet() {},
+      recordCacheOutcome(metric) {
+        cacheOutcomes.push(metric);
+      },
       revalidateSeconds: 60,
       async renderFreshPageForCache() {
         throw new Error("should not render");
@@ -540,8 +759,67 @@ describe("app page cache helpers", () => {
     });
 
     expect(response).toBeNull();
+    expect(cacheOutcomes).toEqual([
+      {
+        artifact: "html",
+        cacheKey: "html:/broken",
+        outcome: "miss",
+        reason: "read-error",
+      },
+    ]);
     expect(errorSpy).toHaveBeenCalledOnce();
     errorSpy.mockRestore();
+  });
+
+  it("records a miss when a cache key contains a non-app-page value", async () => {
+    const cacheOutcomes: AppPageCacheOutcomeMetric[] = [];
+
+    const response = await readAppPageCacheResponse({
+      cleanPathname: "/wrong-kind",
+      clearRequestContext() {
+        throw new Error("should not clear request context when falling through");
+      },
+      isRscRequest: false,
+      async isrGet() {
+        return {
+          isStale: false,
+          value: {
+            lastModified: Date.now(),
+            value: {
+              kind: "REDIRECT",
+              props: {},
+            },
+          },
+        };
+      },
+      isrHtmlKey(pathname) {
+        return "html:" + pathname;
+      },
+      isrRscKey(pathname) {
+        return "rsc:" + pathname;
+      },
+      async isrSet() {},
+      recordCacheOutcome(metric) {
+        cacheOutcomes.push(metric);
+      },
+      revalidateSeconds: 60,
+      async renderFreshPageForCache() {
+        throw new Error("should not render");
+      },
+      scheduleBackgroundRegeneration() {
+        throw new Error("should not schedule regeneration");
+      },
+    });
+
+    expect(response).toBeNull();
+    expect(cacheOutcomes).toEqual([
+      {
+        artifact: "html",
+        cacheKey: "html:/wrong-kind",
+        outcome: "miss",
+        reason: "non-app-page-entry",
+      },
+    ]);
   });
 
   it("finalizes HTML responses by teeing the stream and writing HTML and RSC cache keys", async () => {

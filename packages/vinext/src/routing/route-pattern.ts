@@ -142,6 +142,68 @@ export function matchRoutePattern(
   return params;
 }
 
+export function matchRoutePatternPrefix(
+  pathParts: readonly string[],
+  patternParts: readonly string[],
+): boolean {
+  let pathIndex = 0;
+  for (let patternIndex = 0; patternIndex < patternParts.length; patternIndex++) {
+    const patternPart = patternParts[patternIndex];
+    const isTerminal = patternIndex === patternParts.length - 1;
+
+    if (patternPart.startsWith(":") && patternPart.endsWith("+")) {
+      return isTerminal && pathParts.length - pathIndex >= 1;
+    }
+    if (patternPart.startsWith(":") && patternPart.endsWith("*")) {
+      return isTerminal;
+    }
+    if (pathIndex >= pathParts.length) return false;
+    if (patternPart.startsWith(":")) {
+      pathIndex++;
+      continue;
+    }
+    if (pathParts[pathIndex] !== patternPart) return false;
+    pathIndex++;
+  }
+
+  return true;
+}
+
+export function matchRoutePatternWithOptionalDynamicSegments(
+  pathParts: readonly string[],
+  patternParts: readonly string[],
+): boolean {
+  function matchFrom(pathIndex: number, patternIndex: number): boolean {
+    if (patternIndex === patternParts.length) {
+      return pathIndex === pathParts.length;
+    }
+
+    const patternPart = patternParts[patternIndex];
+    const isCatchAll =
+      patternPart.startsWith(":") && (patternPart.endsWith("+") || patternPart.endsWith("*"));
+
+    if (isCatchAll) {
+      const minLength = patternPart.endsWith("+") ? 1 : 0;
+      for (let endIndex = pathIndex + minLength; endIndex <= pathParts.length; endIndex++) {
+        if (matchFrom(endIndex, patternIndex + 1)) return true;
+      }
+      return false;
+    }
+
+    if (patternPart.startsWith(":")) {
+      return (
+        matchFrom(pathIndex, patternIndex + 1) ||
+        (pathIndex < pathParts.length && matchFrom(pathIndex + 1, patternIndex + 1))
+      );
+    }
+
+    if (pathIndex >= pathParts.length || pathParts[pathIndex] !== patternPart) return false;
+    return matchFrom(pathIndex + 1, patternIndex + 1);
+  }
+
+  return matchFrom(0, 0);
+}
+
 /**
  * A single entry from `getStaticPaths().paths`.
  *

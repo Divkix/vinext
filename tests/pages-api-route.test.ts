@@ -1,18 +1,23 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { describe, expect, it, vi } from "vite-plus/test";
 import {
   handlePagesApiRoute,
   type PagesApiRouteMatch,
 } from "../packages/vinext/src/server/pages-api-route.js";
 
+type PagesApiRouteModule = PagesApiRouteMatch["route"]["module"];
+
 function createMatch(
-  handler: PagesApiRouteMatch["route"]["module"]["default"],
+  handler: PagesApiRouteModule["default"],
   params: Record<string, string | string[]> = {},
+  moduleConfig?: PagesApiRouteModule["config"],
 ): PagesApiRouteMatch {
   return {
     params,
     route: {
       pattern: "/api/test",
       module: {
+        config: moduleConfig,
         default: handler,
       },
     },
@@ -253,5 +258,125 @@ describe("pages api route", () => {
     // Only one set-cookie header — the replacement
     const cookies = response.headers.getSetCookie();
     expect(cookies).toEqual(["session=xyz"]);
+  });
+
+  it("calls edge API route handlers with a Fetch Request and returns their Response", async () => {
+    // Ported from Next.js: test/e2e/edge-async-local-storage/index.test.ts
+    // https://github.com/vercel/next.js/blob/canary/test/e2e/edge-async-local-storage/index.test.ts
+    const response = await handlePagesApiRoute({
+      match: createMatch(
+        (request: Request) => {
+          const id = request.headers.get("req-id");
+          return Response.json({ id });
+        },
+        {},
+        { runtime: "edge" },
+      ),
+      request: new Request("https://example.com/api/test", {
+        headers: { "req-id": "req-42" },
+      }),
+      url: "/api/test",
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({ id: "req-42" });
+  });
+
+  it("passes a NextRequest with nextUrl.searchParams to edge API handlers", async () => {
+    // Ported from Next.js: test/e2e/edge-pages-support/app/pages/api/hello.js
+    // https://github.com/vercel/next.js/blob/canary/test/e2e/edge-pages-support/app/pages/api/hello.js
+    // Next.js wraps the request in a NextRequest before invoking the user's
+    // edge API handler, so handlers can use `req.nextUrl.searchParams`.
+    const response = await handlePagesApiRoute({
+      match: createMatch(
+        (request: Request) => {
+          const nextUrl = (request as Request & { nextUrl?: URL }).nextUrl;
+          if (!nextUrl) {
+            return new Response("missing nextUrl", { status: 500 });
+          }
+          return Response.json({
+            hello: "world",
+            query: Object.fromEntries(nextUrl.searchParams),
+          });
+        },
+        {},
+        { runtime: "edge" },
+      ),
+      request: new Request("https://example.com/api/hello?a=b"),
+      url: "/api/hello?a=b",
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({
+      hello: "world",
+      query: { a: "b" },
+    });
+  });
+
+  it("recognises bare \"export const runtime = 'edge'\" as an edge API route", async () => {
+    // Ported from Next.js: packages/next/src/build/analysis/get-page-static-info.ts
+    // Both `export const runtime = "edge"` and `export const config = { runtime: "edge" }`
+    // are valid ways to mark a Pages Router API route as edge. Next.js resolves
+    // via `config.runtime ?? config.config?.runtime`.
+    const response = await handlePagesApiRoute({
+      match: {
+        params: {},
+        route: {
+          pattern: "/api/edge-bare",
+          module: {
+            runtime: "edge",
+            default: (request: Request) => Response.json({ ok: true, kind: typeof request }),
+          } as unknown as PagesApiRouteModule,
+        },
+      },
+      request: new Request("https://example.com/api/edge-bare"),
+      url: "/api/edge-bare",
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({ ok: true, kind: "object" });
+  });
+
+  it("preserves nested AsyncLocalStorage state across concurrent edge API requests", async () => {
+    // Ported from Next.js: test/e2e/edge-async-local-storage/index.test.ts
+    // https://github.com/vercel/next.js/blob/canary/test/e2e/edge-async-local-storage/index.test.ts
+    const topStorage = new AsyncLocalStorage<{ id: string }>();
+    const ids = Array.from({ length: 100 }, (_, i) => `req-${i}`);
+
+    const responses = await Promise.all(
+      ids.map((id) =>
+        handlePagesApiRoute({
+          match: createMatch(
+            (request: Request) => {
+              const requestId = request.headers.get("req-id") ?? "";
+              return topStorage.run({ id: requestId }, async () => {
+                const nestedStorage = new AsyncLocalStorage<string>();
+                const nested = await nestedStorage.run(`nested-${requestId}`, async () => {
+                  await Promise.resolve();
+                  return { nestedId: nestedStorage.getStore() };
+                });
+
+                await Promise.resolve();
+                return Response.json({ ...nested, ...topStorage.getStore() });
+              });
+            },
+            {},
+            { runtime: "experimental-edge" },
+          ),
+          request: new Request("https://example.com/api/test", {
+            headers: { "req-id": id },
+          }),
+          url: "/api/test",
+        }),
+      ),
+    );
+
+    for (const [index, response] of responses.entries()) {
+      expect(response.status).toBe(200);
+      await expect(response.json()).resolves.toEqual({
+        id: ids[index],
+        nestedId: `nested-${ids[index]}`,
+      });
+    }
   });
 });

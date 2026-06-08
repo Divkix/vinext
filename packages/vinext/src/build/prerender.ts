@@ -23,6 +23,7 @@ import type { Server as HttpServer } from "node:http";
 import type { Route } from "../routing/pages-router.js";
 import type { AppRoute } from "../routing/app-router.js";
 import type { ResolvedNextConfig } from "../config/next-config.js";
+import { BLOCKED_PAGES } from "vinext/shims/constants";
 import { classifyPagesRoute, classifyAppRoute, getAppRouteRenderEntryPath } from "./report.js";
 import {
   concatUint8Arrays,
@@ -39,9 +40,21 @@ import {
 import { runWithHeadersContext, headersContextFromRequest } from "vinext/shims/headers";
 import { createValidFileMatcher, findFileWithExtensions } from "../routing/file-matcher.js";
 import { normalizeStaticPathsEntry, type StaticPathsEntry } from "../routing/route-pattern.js";
-import { VINEXT_PRERENDER_SECRET_HEADER } from "../server/headers.js";
+import { navigationRuntimeRscBootstrapExpression } from "../server/app-ssr-stream.js";
+import {
+  VINEXT_PRERENDER_ROUTE_PARAMS_HEADER,
+  VINEXT_PRERENDER_SECRET_HEADER,
+} from "../server/headers.js";
+import {
+  encodePrerenderRouteParams,
+  serializePrerenderRouteParamsHeader,
+  type PrerenderRouteParamsPayload,
+} from "../server/prerender-route-params.js";
 import { startProdServer } from "../server/prod-server.js";
 import { readPrerenderSecret } from "./server-manifest.js";
+import { getOutputPath, getRscOutputPath } from "../utils/prerender-output-paths.js";
+import type { MetadataFileRoute } from "../server/metadata-routes.js";
+import { createAppPprFallbackShells } from "../server/app-ppr-fallback-shell.js";
 export { readPrerenderSecret } from "./server-manifest.js";
 
 function getErrorMessageWithStack(err: Error): string {
@@ -57,6 +70,8 @@ function getErrorMessageWithStack(err: Error): string {
 export type PrerenderResult = {
   /** One entry per route (including skipped/error routes). */
   routes: PrerenderRouteResult[];
+  /** Additional generated files that are not represented as route entries. */
+  outputFiles?: string[];
 };
 
 export type PrerenderRouteResult =
@@ -154,6 +169,8 @@ type PrerenderPagesOptions = {
 type PrerenderAppOptions = {
   /** Discovered app routes. */
   routes: AppRoute[];
+  /** Discovered file-based metadata routes. Used by static export. */
+  metadataRoutes?: readonly MetadataFileRoute[];
   /**
    * Absolute path to the pre-built RSC handler bundle (e.g. `dist/server/index.js`).
    */
@@ -186,12 +203,14 @@ const NOT_FOUND_SENTINEL_PATH = "/__vinext_nonexistent_for_404__";
 
 const DEFAULT_CONCURRENCY = Math.min(os.availableParallelism(), 8);
 
-const RSC_CHUNK_SCRIPT_PREFIX = "self.__VINEXT_RSC_CHUNKS__=self.__VINEXT_RSC_CHUNKS__||[];";
-const RSC_DONE_MARKER = "__VINEXT_RSC_DONE__=true";
-// Full literal that createRscEmbedTransform concatenates before the
-// safeJsonStringify(chunk) argument. Keep this in sync with the writer at
-// packages/vinext/src/server/app-ssr-stream.ts:73.
-const RSC_CHUNK_FULL_PREFIX = `${RSC_CHUNK_SCRIPT_PREFIX}self.__VINEXT_RSC_CHUNKS__.push(`;
+const RSC_LEGACY_CHUNK_SCRIPT_PREFIX = "self.__VINEXT_RSC_CHUNKS__=self.__VINEXT_RSC_CHUNKS__||[];";
+const RSC_LEGACY_DONE_SCRIPT = "self.__VINEXT_RSC_DONE__=true";
+// Full literals that createRscEmbedTransform concatenates before the chunk
+// argument in packages/vinext/src/server/app-ssr-stream.ts.
+const RSC_LEGACY_CHUNK_FULL_PREFIX = `${RSC_LEGACY_CHUNK_SCRIPT_PREFIX}self.__VINEXT_RSC_CHUNKS__.push(`;
+const RSC_RUNTIME_BOOTSTRAP_EXPRESSION = navigationRuntimeRscBootstrapExpression();
+const RSC_RUNTIME_CHUNK_FULL_PREFIX = `${RSC_RUNTIME_BOOTSTRAP_EXPRESSION}.rsc.push(`;
+const RSC_RUNTIME_DONE_SCRIPT = `${RSC_RUNTIME_BOOTSTRAP_EXPRESSION}.done=true`;
 
 /**
  * Reconstruct the RSC payload from a prerender HTML response by parsing the
@@ -217,13 +236,22 @@ export function extractRscPayloadFromPrerenderedHtml(html: string): Uint8Array |
   while ((match = scriptPattern.exec(html)) !== null) {
     const script = (match[1] ?? "").trim().replace(/;$/, "");
 
-    if (script === `self.${RSC_DONE_MARKER}`) {
+    if (script === RSC_RUNTIME_DONE_SCRIPT || script === RSC_LEGACY_DONE_SCRIPT) {
       sawDone = true;
       continue;
     }
 
-    if (script.startsWith(RSC_CHUNK_SCRIPT_PREFIX)) {
-      chunks.push(decodeRscEmbeddedChunk(parseRscChunkPushArgument(script)));
+    if (script.startsWith(RSC_RUNTIME_CHUNK_FULL_PREFIX)) {
+      chunks.push(
+        decodeRscEmbeddedChunk(parseRscChunkPushArgument(script, RSC_RUNTIME_CHUNK_FULL_PREFIX)),
+      );
+      continue;
+    }
+
+    if (script.startsWith(RSC_LEGACY_CHUNK_SCRIPT_PREFIX)) {
+      chunks.push(
+        decodeRscEmbeddedChunk(parseRscChunkPushArgument(script, RSC_LEGACY_CHUNK_FULL_PREFIX)),
+      );
     }
   }
 
@@ -238,7 +266,7 @@ export function extractRscPayloadFromPrerenderedHtml(html: string): Uint8Array |
     );
   }
   if (!sawDone) {
-    throw new Error("[vinext] Malformed prerender RSC embed: missing __VINEXT_RSC_DONE__ marker");
+    throw new Error("[vinext] Malformed prerender RSC embed: missing RSC done marker");
   }
 
   return concatUint8Arrays(chunks);
@@ -251,11 +279,11 @@ export function extractRscPayloadFromPrerenderedHtml(html: string): Uint8Array |
  * prefix and ends with `)`. JSON.parse on the slice catches any tampering or
  * trailing code.
  */
-function parseRscChunkPushArgument(script: string): RscEmbeddedChunk {
-  if (!script.startsWith(RSC_CHUNK_FULL_PREFIX) || !script.endsWith(")")) {
+function parseRscChunkPushArgument(script: string, chunkPrefix: string): RscEmbeddedChunk {
+  if (!script.startsWith(chunkPrefix) || !script.endsWith(")")) {
     throw new Error("[vinext] Malformed prerender RSC embed: unexpected chunk script shape");
   }
-  const jsonSource = script.slice(RSC_CHUNK_FULL_PREFIX.length, -1);
+  const jsonSource = script.slice(chunkPrefix.length, -1);
   let parsed: unknown;
   try {
     parsed = JSON.parse(jsonSource);
@@ -355,25 +383,42 @@ function buildUrlFromParams(
   return "/" + result.join("/");
 }
 
-/**
- * Determine the HTML output file path for a URL.
- * Respects trailingSlash config.
- */
-export function getOutputPath(urlPath: string, trailingSlash: boolean): string {
-  if (urlPath === "/") return "index.html";
-  const clean = urlPath.replace(/^\//, "");
-  if (trailingSlash) return `${clean}/index.html`;
-  return `${clean}.html`;
+function metadataOutputPath(servedUrl: string): string | null {
+  const pathname = servedUrl.split("?", 1)[0];
+  if (!pathname || !pathname.startsWith("/")) return null;
+
+  const segments = pathname.split("/").filter(Boolean);
+  if (segments.length === 0 || segments.some((segment) => segment === "." || segment === "..")) {
+    return null;
+  }
+
+  return segments.join("/");
+}
+
+function emitStaticMetadataFiles(
+  metadataRoutes: readonly MetadataFileRoute[],
+  outDir: string,
+): string[] {
+  const outputFiles: string[] = [];
+  for (const route of metadataRoutes) {
+    if (route.isDynamic) continue;
+
+    const outputPath = metadataOutputPath(route.servedUrl);
+    // scanMetadataFiles controls servedUrl; this remains defensive against malformed route data.
+    if (!outputPath) continue;
+
+    const fullPath = path.join(outDir, ...outputPath.split("/"));
+    fs.mkdirSync(path.dirname(fullPath), { recursive: true });
+    fs.copyFileSync(route.filePath, fullPath);
+    outputFiles.push(outputPath);
+  }
+  return outputFiles;
 }
 
 /** Map of route patterns to generateStaticParams functions (or null/undefined). */
 export type StaticParamsMap = Record<
   string,
-  | ((opts: {
-      params: Record<string, string | string[]>;
-    }) => Promise<Record<string, string | string[]>[]>)
-  | null
-  | undefined
+  ((opts: { params: Record<string, string | string[]> }) => Promise<unknown>) | null | undefined
 >;
 
 /**
@@ -385,7 +430,6 @@ export type StaticParamsMap = Record<
  */
 export async function resolveParentParams(
   childRoute: AppRoute,
-  routeIndex: ReadonlyMap<string, AppRoute>,
   staticParamsMap: StaticParamsMap,
 ): Promise<Record<string, string | string[]>[]> {
   const { patternParts } = childRoute;
@@ -403,7 +447,7 @@ export async function resolveParentParams(
 
   type GenerateStaticParamsFn = (opts: {
     params: Record<string, string | string[]>;
-  }) => Promise<Record<string, string | string[]>[]>;
+  }) => Promise<unknown>;
 
   const parentSegments: GenerateStaticParamsFn[] = [];
 
@@ -413,38 +457,41 @@ export async function resolveParentParams(
     prefixPattern += "/" + part;
     if (!part.startsWith(":")) continue;
 
-    const parentRoute = routeIndex.get(prefixPattern);
-    // TODO: layout-level generateStaticParams — a layout segment can define
-    // generateStaticParams without a corresponding page file, so parentRoute
-    // may be undefined here even though the layout exports generateStaticParams.
-    // resolveParentParams currently only looks up routes that have a pagePath
-    // (i.e. leaf pages), missing layout-level providers. Fix requires scanning
-    // layout files in addition to page files during route collection.
-    if (parentRoute?.pagePath) {
-      const fn = staticParamsMap[prefixPattern];
-      if (typeof fn === "function") {
-        parentSegments.push(fn);
-      }
+    const fn = staticParamsMap[prefixPattern];
+    if (typeof fn === "function") {
+      parentSegments.push(fn);
     }
   }
 
   if (parentSegments.length === 0) return [];
 
   let currentParams: Record<string, string | string[]>[] = [{}];
+  let resolvedAnyParent = false;
+
   for (const generateStaticParams of parentSegments) {
     const nextParams: Record<string, string | string[]>[] = [];
+    let resolvedThisParent = false;
+
     for (const parentParams of currentParams) {
       const results = await generateStaticParams({ params: parentParams });
-      if (Array.isArray(results)) {
-        for (const result of results) {
-          nextParams.push({ ...parentParams, ...result });
-        }
+      // `null` is the CF Workers Proxy sentinel: the proxy has no
+      // generateStaticParams for this pattern. Skip and let later providers run.
+      if (results === null) continue;
+      if (!Array.isArray(results)) return [];
+
+      resolvedThisParent = true;
+      resolvedAnyParent = true;
+      for (const result of results) {
+        nextParams.push({ ...parentParams, ...result });
       }
     }
-    currentParams = nextParams;
+
+    if (resolvedThisParent) {
+      currentParams = nextParams;
+    }
   }
 
-  return currentParams;
+  return resolvedAnyParent ? currentParams : [];
 }
 
 // ─── Pages Router Prerender ───────────────────────────────────────────────────
@@ -605,9 +652,12 @@ export async function prerenderPages({
     const pagesToRender: PageToRender[] = [];
 
     for (const route of bundlePageRoutes) {
-      // Skip internal pages (_app, _document, _error, etc.)
-      const routeName = path.basename(route.filePath, path.extname(route.filePath));
-      if (routeName.startsWith("_")) continue;
+      // Skip Next.js special pages (_app, _document, _error)
+      if (BLOCKED_PAGES.includes(route.pattern)) continue;
+      // `/404` is rendered by the dedicated 404 block below. Production serves
+      // it with a 404 status, so the generic static-page loop must not treat
+      // that non-2xx response as a prerender failure.
+      if (route.pattern === "/404") continue;
 
       // Cross-reference with file-system route scan.
       const fsRoute = routes.find(
@@ -765,14 +815,13 @@ export async function prerenderPages({
     results.push(...pageResults);
 
     // ── Render 404 page ───────────────────────────────────────────────────
-    const has404 =
-      findFileWithExtensions(path.join(pagesDir, "404"), fileMatcher) ||
-      findFileWithExtensions(path.join(pagesDir, "_error"), fileMatcher);
-    if (has404) {
+    const hasCustom404 = findFileWithExtensions(path.join(pagesDir, "404"), fileMatcher);
+    const hasErrorPage = findFileWithExtensions(path.join(pagesDir, "_error"), fileMatcher);
+    if (hasCustom404 || hasErrorPage) {
       try {
-        const notFoundRes = await renderPage(NOT_FOUND_SENTINEL_PATH);
+        const notFoundRes = await renderPage(hasCustom404 ? "/404" : NOT_FOUND_SENTINEL_PATH);
         const contentType = notFoundRes.headers.get("content-type") ?? "";
-        if (contentType.includes("text/html")) {
+        if (notFoundRes.status === 404 && contentType.includes("text/html")) {
           const html404 = await notFoundRes.text();
           const fullPath = path.join(outDir, "404.html");
           fs.writeFileSync(fullPath, html404, "utf-8");
@@ -826,6 +875,7 @@ export async function prerenderPages({
  */
 export async function prerenderApp({
   routes,
+  metadataRoutes = [],
   outDir,
   config,
   mode,
@@ -897,12 +947,21 @@ export async function prerenderApp({
 
     rscHandler = (req: Request) => {
       // Forward the request to the local prod server.
+      // `redirect: "manual"` ensures pages that call `redirect()` surface as
+      // their original 3xx response — otherwise fetch follows the Location
+      // header server-side, the prerender harness sees a 200 for the
+      // destination page, and that destination HTML gets written under the
+      // redirecting route's filename. At runtime the prod server then serves
+      // the cached HTML with status 200 instead of emitting a 307 for the
+      // document load. Mirrors the pages-prerender `renderPage` helper above.
+      // See: https://github.com/cloudflare/vinext/issues/1530
       const parsed = new URL(req.url);
       const url = `${baseUrl}${parsed.pathname}${parsed.search}`;
       return fetch(url, {
         method: req.method,
         headers: { ...secretHeaders, ...Object.fromEntries(req.headers.entries()) },
         body: req.method !== "GET" && req.method !== "HEAD" ? req.body : undefined,
+        redirect: "manual",
       });
     };
 
@@ -962,13 +1021,12 @@ export async function prerenderApp({
       },
     });
 
-    const routeIndex = new Map(routes.map((r) => [r.pattern, r]));
-
     // ── Collect URLs to render ────────────────────────────────────────────────
     type UrlToRender = {
       urlPath: string;
       /** The file-system route pattern this URL was expanded from (e.g. `/blog/:slug`). */
       routePattern: string;
+      prerenderRouteParams: PrerenderRouteParamsPayload | null;
       revalidate: number | false;
       isSpeculative: boolean; // 'unknown' route — mark skipped if render fails
     };
@@ -1048,7 +1106,7 @@ export async function prerenderApp({
             continue;
           }
 
-          const parentParamSets = await resolveParentParams(route, routeIndex, staticParamsMap);
+          const parentParamSets = await resolveParentParams(route, staticParamsMap);
           let paramSets: Record<string, string | string[]>[] | null;
 
           if (parentParamSets.length > 0) {
@@ -1067,10 +1125,14 @@ export async function prerenderApp({
                     ...childParams,
                   });
                 }
+              } else {
+                paramSets = [];
+                break;
               }
             }
           } else {
-            paramSets = await generateStaticParamsFn({ params: {} });
+            const results = await generateStaticParamsFn({ params: {} });
+            paramSets = Array.isArray(results) || results === null ? results : [];
           }
 
           // null: route has no generateStaticParams (CF Workers Proxy returned null)
@@ -1093,6 +1155,7 @@ export async function prerenderApp({
             continue;
           }
 
+          const queuedRouteUrls = new Set<string>();
           for (const params of paramSets) {
             // Defensively guard against a generateStaticParams() that returns
             // entries with no params object. Next.js's app static-paths code
@@ -1106,12 +1169,32 @@ export async function prerenderApp({
               );
             }
             const urlPath = buildUrlFromParams(route.pattern, params);
+            queuedRouteUrls.add(urlPath);
             urlsToRender.push({
               urlPath,
               routePattern: route.pattern,
+              prerenderRouteParams: encodePrerenderRouteParams(route.pattern, params),
               revalidate,
               isSpeculative: false,
             });
+
+            if (config.cacheComponents === true) {
+              for (const fallbackShell of createAppPprFallbackShells(route, params)) {
+                if (queuedRouteUrls.has(fallbackShell.pathname)) continue;
+                queuedRouteUrls.add(fallbackShell.pathname);
+                urlsToRender.push({
+                  urlPath: fallbackShell.pathname,
+                  routePattern: route.pattern,
+                  prerenderRouteParams: encodePrerenderRouteParams(
+                    route.pattern,
+                    fallbackShell.params,
+                    fallbackShell.fallbackParamNames,
+                  ),
+                  revalidate,
+                  isSpeculative: false,
+                });
+              }
+            }
           }
         } catch (e) {
           const err = e as Error;
@@ -1129,6 +1212,7 @@ export async function prerenderApp({
         urlsToRender.push({
           urlPath: route.pattern,
           routePattern: route.pattern,
+          prerenderRouteParams: null,
           revalidate: false,
           isSpeculative: true,
         });
@@ -1137,6 +1221,7 @@ export async function prerenderApp({
         urlsToRender.push({
           urlPath: route.pattern,
           routePattern: route.pattern,
+          prerenderRouteParams: null,
           revalidate,
           isSpeculative: false,
         });
@@ -1154,6 +1239,7 @@ export async function prerenderApp({
     async function renderUrl({
       urlPath,
       routePattern,
+      prerenderRouteParams,
       revalidate,
       isSpeculative,
     }: UrlToRender): Promise<PrerenderRouteResult> {
@@ -1167,7 +1253,13 @@ export async function prerenderApp({
         // (devWorker.fetch) so the ALS context set up here on the Node side never
         // reaches the worker isolate. The wrapping is a no-op for the CF path but
         // harmless — and it keeps renderUrl() shape-compatible across both modes.
-        const htmlRequest = new Request(`http://localhost${urlPath}`);
+        const prerenderRouteParamsHeader =
+          serializePrerenderRouteParamsHeader(prerenderRouteParams);
+        const htmlHeaders = new Headers();
+        if (prerenderRouteParamsHeader !== null) {
+          htmlHeaders.set(VINEXT_PRERENDER_ROUTE_PARAMS_HEADER, prerenderRouteParamsHeader);
+        }
+        const htmlRequest = new Request(`http://localhost${urlPath}`, { headers: htmlHeaders });
         const htmlRender = await runWithHeadersContext(
           headersContextFromRequest(htmlRequest),
           async () => {
@@ -1237,8 +1329,12 @@ export async function prerenderApp({
         // response that never went through createRscEmbedTransform.
         let rscData = extractRscPayloadFromPrerenderedHtml(html);
         if (rscData === null) {
+          const rscHeaders = new Headers({ Accept: "text/x-component", RSC: "1" });
+          if (prerenderRouteParamsHeader !== null) {
+            rscHeaders.set(VINEXT_PRERENDER_ROUTE_PARAMS_HEADER, prerenderRouteParamsHeader);
+          }
           const rscRequest = new Request(`http://localhost${urlPath}`, {
-            headers: { Accept: "text/x-component", RSC: "1" },
+            headers: rscHeaders,
           });
           const rscRes = await runWithHeadersContext(headersContextFromRequest(rscRequest), () =>
             rscHandler(rscRequest),
@@ -1315,6 +1411,11 @@ export async function prerenderApp({
     });
     results.push(...appResults);
 
+    const outputFiles =
+      mode === "export" && metadataRoutes.length > 0
+        ? emitStaticMetadataFiles(metadataRoutes, outDir)
+        : [];
+
     // ── Render 404 page ───────────────────────────────────────────────────────
     // Fetch a known-nonexistent URL to get the App Router's not-found response.
     // The RSC handler returns 404 with full HTML for the not-found.tsx page (or
@@ -1349,7 +1450,10 @@ export async function prerenderApp({
         trailingSlash: config.trailingSlash,
       });
 
-    return { routes: results };
+    return {
+      routes: results,
+      ...(outputFiles.length > 0 ? { outputFiles } : {}),
+    };
   } finally {
     setCacheHandler(previousHandler);
     if (previousPrerenderFlag === undefined) delete process.env.VINEXT_PRERENDER;
@@ -1358,16 +1462,6 @@ export async function prerenderApp({
       await new Promise<void>((resolve) => ownedProdServerHandle!.server.close(() => resolve()));
     }
   }
-}
-
-/**
- * Determine the RSC output file path for a URL.
- * "/blog/hello-world" → "blog/hello-world.rsc"
- * "/"                 → "index.rsc"
- */
-export function getRscOutputPath(urlPath: string): string {
-  if (urlPath === "/") return "index.rsc";
-  return urlPath.replace(/^\//, "") + ".rsc";
 }
 
 function resolveRenderedCacheControl(
