@@ -704,7 +704,7 @@ export function registerCachedFunction<TArgs extends unknown[], TResult>(
       if (probePromise) promises.push(probePromise);
       promises.push(timeoutPromise);
 
-      return Promise.race(promises).finally(() => {
+      return (Promise.race(promises) as Promise<TResult>).finally(() => {
         if (probeTimer !== undefined) clearTimeout(probeTimer);
         if (timeoutTimer !== undefined) clearTimeout(timeoutTimer);
       });
