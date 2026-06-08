@@ -17,10 +17,6 @@ concurrency:
   group: npm-publish
   cancel-in-progress: true
 
-permissions:
-  contents: write
-  id-token: write
-
 jobs:
   ci:
     name: CI Gate
@@ -31,10 +27,14 @@ jobs:
     needs: ci
     if: github.repository_owner == 'cloudflare'
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           fetch-depth: 0 # full history for changelog generation
+          persist-credentials: false
 
       - uses: ./.github/actions/setup
 
@@ -80,15 +80,17 @@ jobs:
         run: vp pm publish --no-git-checks --access public -- --provenance
 
       - name: Tag release
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
-          git tag "v${{ steps.version.outputs.version }}"
-          git push origin "v${{ steps.version.outputs.version }}"
+          git tag "v${VERSION}"
+          git push origin "v${VERSION}"
 
       - name: Get changes since last version
         env:
           GH_TOKEN: ${{ github.token }}
+          PREV_TAG: v${{ steps.version.outputs.previous }}
         run: |
-          PREV_TAG="v${{ steps.version.outputs.previous }}"
           FORMAT="%H %s"
           if git rev-parse "$PREV_TAG" >/dev/null 2>&1; then
             git log "$PREV_TAG"..HEAD --format="$FORMAT" --no-merges > /tmp/raw-commits.txt
@@ -115,6 +117,8 @@ jobs:
           CF_ACCOUNT_ID: ${{ secrets.CF_AI_GATEWAY_ACCOUNT_ID }}
           CF_GATEWAY_NAME: ${{ secrets.CF_AI_GATEWAY_NAME }}
           CF_API_TOKEN: ${{ secrets.CF_AI_GATEWAY_TOKEN }}
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+          REPO: ${{ github.repository }}
         run: |
           COMMITS=$(cat /tmp/commits.txt)
           echo "::group::Commits since last release"
@@ -126,7 +130,7 @@ jobs:
             -H "Content-Type: application/json" \
             -H "cf-aig-authorization: Bearer ${CF_API_TOKEN}" \
             -H "anthropic-version: 2023-06-01" \
-            -d "$(jq -n --arg commits "$COMMITS" --arg version "${{ steps.version.outputs.version }}" '{
+            -d "$(jq -n --arg commits "$COMMITS" --arg version "$RELEASE_VERSION" '{
               model: "claude-sonnet-4-20250514",
               max_tokens: 1024,
               messages: [{
@@ -147,7 +151,7 @@ jobs:
           fi
 
           if [ -z "$SUMMARY" ]; then
-            SUMMARY="See commits: https://github.com/${{ github.repository }}/commits/v${{ steps.version.outputs.version }}"
+            SUMMARY="See commits: https://github.com/${REPO}/commits/v${RELEASE_VERSION}"
           fi
 
           echo "::group::Release summary"
@@ -200,10 +204,14 @@ jobs:
     needs: ci
     if: github.repository_owner == 'cloudflare'
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - uses: ./.github/actions/setup
 
@@ -248,15 +256,17 @@ jobs:
         run: vp pm publish --no-git-checks --access public -- --provenance
 
       - name: Tag release
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
-          git tag "create-vinext-app-v${{ steps.version.outputs.version }}"
-          git push origin "create-vinext-app-v${{ steps.version.outputs.version }}"
+          git tag "create-vinext-app-v${VERSION}"
+          git push origin "create-vinext-app-v${VERSION}"
 
       - name: Get changes since last version
         env:
           GH_TOKEN: ${{ github.token }}
+          PREV_TAG: create-vinext-app-v${{ steps.version.outputs.previous }}
         run: |
-          PREV_TAG="create-vinext-app-v${{ steps.version.outputs.previous }}"
           FORMAT="%H %s"
           if git rev-parse "$PREV_TAG" >/dev/null 2>&1; then
             git log "$PREV_TAG"..HEAD --format="$FORMAT" --no-merges -- packages/create-vinext-app/ > /tmp/cva-commits.txt
@@ -282,6 +292,8 @@ jobs:
           CF_ACCOUNT_ID: ${{ secrets.CF_AI_GATEWAY_ACCOUNT_ID }}
           CF_GATEWAY_NAME: ${{ secrets.CF_AI_GATEWAY_NAME }}
           CF_API_TOKEN: ${{ secrets.CF_AI_GATEWAY_TOKEN }}
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+          REPO: ${{ github.repository }}
         run: |
           COMMITS=$(cat /tmp/cva-commits-with-authors.txt)
           echo "::group::Commits since last release"
@@ -293,7 +305,7 @@ jobs:
             -H "Content-Type: application/json" \
             -H "cf-aig-authorization: Bearer ${CF_API_TOKEN}" \
             -H "anthropic-version: 2023-06-01" \
-            -d "$(jq -n --arg commits "$COMMITS" --arg version "${{ steps.version.outputs.version }}" '{
+            -d "$(jq -n --arg commits "$COMMITS" --arg version "$RELEASE_VERSION" '{
               model: "claude-sonnet-4-20250514",
               max_tokens: 1024,
               messages: [{
@@ -314,7 +326,7 @@ jobs:
           fi
 
           if [ -z "$SUMMARY" ]; then
-            SUMMARY="See commits: https://github.com/${{ github.repository }}/commits/create-vinext-app-v${{ steps.version.outputs.version }}"
+            SUMMARY="See commits: https://github.com/${REPO}/commits/create-vinext-app-v${RELEASE_VERSION}"
           fi
 
           echo "::group::Release summary"
