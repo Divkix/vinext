@@ -32,6 +32,17 @@ export class UseCacheDeadlockError extends Error {
   }
 }
 
+// The digest fields and type guards below provide module-graph-robust detection
+// of these errors. Plain `instanceof` is fragile across the RSC/SSR/probe
+// module graphs because each graph holds its own class identity.  The string
+// digest survives those boundaries.
+//
+// Currently consumed by the probe logic (use-cache-probe-pool.ts) and the
+// unit tests.
+//
+// TODO: Wire isUseCacheTimeoutError / isUseCacheDeadlockError into the App
+// Router dev error handler to surface a friendly overlay message keyed off the
+// digest (matching Next.js behaviour).
 export function isUseCacheTimeoutError(err: unknown): err is UseCacheTimeoutError {
   if (
     typeof err !== "object" ||

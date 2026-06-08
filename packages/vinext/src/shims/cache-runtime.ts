@@ -689,6 +689,11 @@ export function registerCachedFunction<TArgs extends unknown[], TResult>(
         }
       }
 
+      // The 54s timeout applies to every shared "use cache" fill in dev,
+      // regardless of whether a probe is installed (i.e. it fires even in
+      // Pages Router dev or when the probe pool failed to init). This is a
+      // behavioral change vs. the original `return executeWithContext(...)` dev
+      // path, but it matches Next.js's dev cache timeout and is intentional.
       const timeoutPromise = new Promise<never>((_, reject) => {
         timeoutTimer = setTimeout(() => reject(new UseCacheTimeoutError()), USE_CACHE_TIMEOUT_MS);
         if (typeof (timeoutTimer as NodeJS.Timeout).unref === "function") {

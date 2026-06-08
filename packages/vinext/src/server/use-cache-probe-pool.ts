@@ -131,6 +131,16 @@ export function initUseCacheProbePool(environment: DevEnvironmentLike | DevEnvir
     } catch (err) {
       // If the probe timed out, the result is inconclusive — the function
       // might genuinely hang even in isolation.
+      //
+      // Correctness note: this `instanceof UseCacheTimeoutError` works because
+      // the `_probeDepth: 1` guard in cache-runtime.ts (see
+      // `runWithRequestContext` call in `runWithProbeRequestStore`) causes the
+      // isolated runner's own cache-runtime to short-circuit *before* setting
+      // up its timeout, so it can never throw a different-class-identity
+      // UseCacheTimeoutError.  If that guard were ever moved below the timeout
+      // setup in the isolated runner, an isolated-graph timeout would be a
+      // different class and this branch would misclassify it as a deadlock
+      // (return true).
       if (err instanceof UseCacheTimeoutError) {
         return false;
       }
