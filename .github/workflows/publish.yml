@@ -21,6 +21,8 @@ jobs:
   ci:
     name: CI Gate
     uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
 
   publish:
     name: Publish vinext
