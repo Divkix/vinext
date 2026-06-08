@@ -635,7 +635,7 @@ export function filterInternalHeaders(headers: Headers): Headers {
   return filtered;
 }
 
-function getRequestCf(request: Request): unknown | undefined {
+function getRequestCf(request: Request): unknown {
   const cf = Reflect.get(request, "cf");
   return cf === undefined ? undefined : cf;
 }

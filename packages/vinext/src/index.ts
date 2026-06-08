@@ -3071,7 +3071,7 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
             invalidateRouteCache(pagesDir);
           }
           if (hasAppDir && shouldInvalidateAppRouteFile(appDir, filePath, fileMatcher)) {
-            invalidateAppRoutingModules();
+            void invalidateAppRoutingModules();
             regenerateAppRouteTypes();
           }
         });
@@ -3080,7 +3080,7 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
             invalidateRouteCache(pagesDir);
           }
           if (hasAppDir && shouldInvalidateAppRouteFile(appDir, filePath, fileMatcher)) {
-            invalidateAppRoutingModules();
+            void invalidateAppRoutingModules();
             regenerateAppRouteTypes();
           }
         });
