@@ -35,7 +35,6 @@ import {
   deferUntilStreamConsumed,
   renderAppPageHtmlStream,
   renderAppPageHtmlStreamWithRecovery,
-  shouldRerenderAppPageWithGlobalError,
   type AppPageSsrHandler,
 } from "./app-page-stream.js";
 import type { AppRscRenderMode } from "./app-rsc-render-mode.js";
@@ -170,7 +169,6 @@ type RenderAppPageLifecycleOptions = {
     element: ReactNode | AppOutgoingElements,
     options: { onError: AppPageBoundaryOnError },
   ) => ReadableStream<Uint8Array>;
-  routeHasLocalBoundary: boolean;
   routePattern: string;
   runWithSuppressedHookWarning<T>(probe: () => Promise<T>): Promise<T>;
   scriptNonce?: string;
@@ -886,20 +884,6 @@ export async function renderAppPageLifecycle(
         void htmlStream.cancel().catch(() => {});
         return options.renderPageSpecialError(specialError);
       }
-    }
-  }
-
-  if (
-    shouldRerenderAppPageWithGlobalError({
-      capturedError: rscErrorTracker.getCapturedError(),
-      hasLocalBoundary: options.routeHasLocalBoundary,
-    })
-  ) {
-    const cleanResponse = await options.renderErrorBoundaryResponse(
-      rscErrorTracker.getCapturedError(),
-    );
-    if (cleanResponse) {
-      return cleanResponse;
     }
   }
 
