@@ -97,6 +97,7 @@ export function createRequestContext(opts?: Partial<UnifiedRequestContext>): Uni
     actionRevalidationKind: 0,
     dynamicUsageDetected: false,
     renderRequestApiUsage: new Set(),
+    connectionProbe: null,
     invalidDynamicUsageError: null,
     pendingSetCookies: [],
     draftModeCookieHeader: null,
