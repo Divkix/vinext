@@ -137,7 +137,7 @@ import { AppRouterContext } from "vinext/shims/internal/app-router-context";
 import { BfcacheStateKeyMapContext, ElementsContext, Slot } from "vinext/shims/slot";
 import type { RouteManifest } from "../routing/app-route-graph.js";
 import { stripBasePath } from "../utils/base-path.js";
-import { createOnUncaughtError } from "./app-browser-error.js";
+import { createOnUncaughtError, prodOnCaughtError } from "./app-browser-error.js";
 import { createClientReuseManifestHeaderFromVisibleAppState } from "./app-browser-client-reuse-manifest.js";
 import {
   devOnCaughtError,
@@ -1604,6 +1604,7 @@ function bootstrapHydration(rscStream: ReadableStream<Uint8Array>): void {
       })
     : createVinextHydrateRootOptions({
         formState,
+        onCaughtError: prodOnCaughtError,
         onUncaughtError,
       });
   window.__VINEXT_RSC_ROOT__ = hydrateRootInTransition({
