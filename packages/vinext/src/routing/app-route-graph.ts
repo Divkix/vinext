@@ -7,7 +7,7 @@
 import path from "node:path";
 import fs from "node:fs";
 import { createHash } from "node:crypto";
-import { compareRoutes, decodeRouteSegment, isInvisibleSegment } from "./utils.js";
+import { decodeRouteSegment, isInvisibleSegment, sortRoutes } from "./utils.js";
 import { findFileWithExts, scanWithExtensions, type ValidFileMatcher } from "./file-matcher.js";
 import { validateRoutePatterns } from "./route-validation.js";
 import { compareStrings } from "../utils/compare.js";
@@ -958,7 +958,7 @@ export async function buildAppRouteGraph(
   validateRoutePatterns(interceptTargetPatterns);
 
   // Sort: static routes first, then dynamic, then catch-all
-  routes.sort(compareRoutes);
+  sortRoutes(routes);
 
   return { routes, routeManifest: createRouteManifest(routes) };
 }
