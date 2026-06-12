@@ -274,6 +274,14 @@ export type NextConfig = {
      */
     defineServer?: Record<string, string | number | boolean>;
   };
+  experimental?: {
+    /**
+     * Enables the experimental App Router gesture transition API:
+     * `useRouter().experimental_gesturePush()`.
+     */
+    gestureTransition?: boolean;
+    [key: string]: unknown;
+  };
   /**
    * Path to a custom cache handler module (e.g., KV, Redis, DynamoDB).
    * Accepts relative paths, absolute paths, or file:// URLs from import.meta.resolve().
@@ -329,6 +337,11 @@ export type ResolvedNextConfig = {
   pageExtensions: string[];
   instrumentationClientInject: string[];
   cacheComponents: boolean;
+  /**
+   * Enables the experimental App Router gesture transition API:
+   * `useRouter().experimental_gesturePush()`.
+   */
+  gestureTransition: boolean;
   /**
    * Whether `experimental.prefetchInlining` is configured. Next.js uses this
    * with the Segment Cache to fetch the route tree before the bundled inlined
@@ -434,6 +447,13 @@ export type ResolvedNextConfig = {
    * `test/e2e/optimized-loading` test fixture.
    */
   disableOptimizedLoading: boolean;
+  /**
+   * Mirrors Next.js `experimental.scrollRestoration`. When true, the Pages
+   * Router client takes ownership of browser history scroll restoration by
+   * setting `window.history.scrollRestoration = "manual"` and snapshotting
+   * scroll positions per history entry.
+   */
+  scrollRestoration: boolean;
   /**
    * Build-time constant replacement map applied to BOTH client and server
    * bundles. Sourced from `compiler.define` in next.config. Values are
@@ -1192,6 +1212,7 @@ export async function resolveNextConfig(
       output: "",
       pageExtensions: normalizePageExtensions(),
       cacheComponents: false,
+      gestureTransition: false,
       prefetchInlining: false,
       redirects: [],
       rewrites: { beforeFiles: [], afterFiles: [], fallback: [] },
@@ -1220,6 +1241,7 @@ export async function resolveNextConfig(
       sassOptions: null,
       removeConsole: false,
       disableOptimizedLoading: false,
+      scrollRestoration: false,
       compilerDefine: {},
       compilerDefineServer: {},
       instrumentationClientInject: [],
@@ -1475,6 +1497,7 @@ export async function resolveNextConfig(
         )
       : [],
     cacheComponents: config.cacheComponents ?? false,
+    gestureTransition: experimental?.gestureTransition === true,
     prefetchInlining,
     redirects,
     rewrites,
@@ -1513,6 +1536,7 @@ export async function resolveNextConfig(
     // Next.js stores this under `experimental.disableOptimizedLoading`.
     // Default `false` matches Next.js: page scripts get `defer` in <head>.
     disableOptimizedLoading: experimental?.disableOptimizedLoading === true,
+    scrollRestoration: experimental?.scrollRestoration === true,
     compilerDefine: serializeCompilerDefine(config.compiler?.define),
     compilerDefineServer: serializeCompilerDefine(config.compiler?.defineServer),
     clientTraceMetadata: Array.isArray(experimental?.clientTraceMetadata)

@@ -29,6 +29,7 @@ import {
   peekDynamicFetchObservations,
   runWithFetchDedupe,
   setCurrentFetchCacheMode,
+  setCurrentForceDynamicFetchDefault,
   setCurrentFetchSoftTags,
 } from "vinext/shims/fetch-cache";
 import { AppElementsWire, type AppOutgoingElements } from "./app-elements.js";
@@ -285,6 +286,7 @@ type DispatchAppPageOptions<TRoute extends AppPageDispatchRoute> = {
   request: Request;
   revalidateSeconds: number | null;
   resolveRouteFetchCacheMode?: (route: TRoute) => FetchCacheMode | null;
+  resolveRouteDynamicConfig?: (route: TRoute) => string | null | undefined;
   rootForbiddenModule?: AppPageModule | null;
   rootNotFoundModule?: AppPageModule | null;
   rootUnauthorizedModule?: AppPageModule | null;
@@ -442,6 +444,7 @@ async function runAppPageRevalidationContext<
   const requestContext = createRequestContext({
     headersContext,
     currentFetchCacheMode: options.currentFetchCacheMode ?? null,
+    currentForceDynamicFetchDefault: options.dynamicConfig === "force-dynamic",
     executionContext: getRequestExecutionContext(),
     unstableCacheRevalidation: "foreground",
   });
@@ -505,6 +508,7 @@ async function dispatchAppPageInner<TRoute extends AppPageDispatchRoute>(
 
   setCurrentFetchSoftTags(buildAppPageTags(options.cleanPathname, [], route.routeSegments));
   setCurrentFetchCacheMode(options.fetchCache ?? null);
+  setCurrentForceDynamicFetchDefault(isForceDynamic);
 
   if (options.hasPageModule && !options.hasPageDefaultExport) {
     options.clearRequestContext();
@@ -618,7 +622,9 @@ async function dispatchAppPageInner<TRoute extends AppPageDispatchRoute>(
               options.resolveRouteFetchCacheMode?.(revalidationTarget.route) ??
               (revalidationTarget.route === route ? (options.fetchCache ?? null) : null),
             draftModeSecret: options.draftModeSecret,
-            dynamicConfig,
+            dynamicConfig:
+              options.resolveRouteDynamicConfig?.(revalidationTarget.route) ??
+              (revalidationTarget.route === route ? dynamicConfig : undefined),
             params: revalidationTarget.navigationParams,
             routePattern: revalidationTarget.route.pattern,
             routeSegments: revalidationTarget.route.routeSegments,
@@ -767,7 +773,16 @@ async function dispatchAppPageInner<TRoute extends AppPageDispatchRoute>(
     ) {
       // Hydrate the intercept source route before reading its page module.
       await options.ensureRouteLoaded?.(interceptRoute);
+      // Deliberately no save/restore around buildPageElement: when this
+      // callback runs, resolveAppPageIntercept returns the intercept response
+      // directly and the dispatch never falls through to the original route.
+      // The intercept route's fetch defaults must also stay active past this
+      // call — its server components fetch lazily during the
+      // renderToReadableStream in renderInterceptResponse below.
       setCurrentFetchCacheMode(options.resolveRouteFetchCacheMode?.(interceptRoute) ?? null);
+      setCurrentForceDynamicFetchDefault(
+        options.resolveRouteDynamicConfig?.(interceptRoute) === "force-dynamic",
+      );
       return options.buildPageElement(
         interceptRoute,
         interceptParams,
