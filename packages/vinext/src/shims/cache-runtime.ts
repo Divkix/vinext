@@ -203,6 +203,16 @@ function getUseCacheKeySeed(): string | undefined {
   return getUseCacheDeploymentIdDefine() || getUseCacheBuildIdDefine();
 }
 
+function getUseCacheTimeoutMs(): number {
+  try {
+    const configured = Number(process.env.__VINEXT_USE_CACHE_TIMEOUT_MS);
+    return Number.isFinite(configured) && configured > 0 ? configured : 54_000;
+  } catch (error) {
+    if (error instanceof ReferenceError) return 54_000;
+    throw error;
+  }
+}
+
 type ProbeModules = {
   UseCacheTimeoutError: typeof import("./use-cache-errors.js").UseCacheTimeoutError;
   UseCacheDeadlockError: typeof import("./use-cache-errors.js").UseCacheDeadlockError;
@@ -549,37 +559,8 @@ export function registerCachedFunction<TArgs extends unknown[], TResult>(
         return fn(...args);
       }
 
-      // "use cache: private" uses per-request in-memory cache
-      if (cacheVariant === "private") {
-        const parentCtx = cacheContextStorage.getStore();
-        if (parentCtx && parentCtx.variant !== "private") {
-          throwPrivateUseCacheInsidePublicUseCacheError();
-        }
-
-        if (typeof process !== "undefined" && process.env.VINEXT_PRERENDER === "1") {
-          // Next.js treats "use cache: private" as dynamic during prerendering:
-          // it is excluded from the static artifact and resolved per request.
-          // https://github.com/vercel/next.js/blob/canary/packages/next/src/server/use-cache/use-cache-wrapper.ts
-          markDynamicUsage();
-        }
-
-        const privateCache = _getPrivateState()._privateCache!;
-        const privateHit = privateCache.get(cacheKey);
-        if (privateHit !== undefined) {
-          // The private cache is heterogeneous across cached functions; the key
-          // includes this function's stable id, so a hit belongs to this TResult.
-          return privateHit as TResult;
-        }
-
-        const result = await executeWithContext(fn, args, cacheVariant);
-        privateCache.set(cacheKey, result);
-        return result;
-      }
-
-      // In dev mode, always execute fresh — skip shared cache lookup/storage.
-      // This ensures HMR changes are reflected immediately.
-      if (isDev) {
-        const useCacheTimeoutMs = 54_000;
+      const executeDevFill = async (): Promise<TResult> => {
+        const useCacheTimeoutMs = getUseCacheTimeoutMs();
         const fillDeadlineAt = performance.now() + useCacheTimeoutMs;
         const requestCtx = getRequestContext();
         if ((requestCtx._probeDepth ?? 0) > 0) {
@@ -606,6 +587,7 @@ export function registerCachedFunction<TArgs extends unknown[], TResult>(
                 typeof value === "string" || Array.isArray(value) ? value : undefined,
               ]),
             ) as Record<string, string | string[] | undefined>,
+            draftModeSecret: requestCtx.headersContext?.draftModeSecret,
           };
 
           let encodedArgsForProbe: EncodedArgsForProbe | null = null;
@@ -635,6 +617,7 @@ export function registerCachedFunction<TArgs extends unknown[], TResult>(
 
                 probe({
                   id,
+                  kind: cacheVariant,
                   encodedArguments: encodedArgsForProbe,
                   request: requestSnapshot,
                   timeoutMs: probeInternalTimeoutMs,
@@ -666,6 +649,41 @@ export function registerCachedFunction<TArgs extends unknown[], TResult>(
           if (probeTimer !== undefined) clearTimeout(probeTimer);
           if (timeoutTimer !== undefined) clearTimeout(timeoutTimer);
         });
+      };
+
+      // "use cache: private" uses per-request in-memory cache
+      if (cacheVariant === "private") {
+        const parentCtx = cacheContextStorage.getStore();
+        if (parentCtx && parentCtx.variant !== "private") {
+          throwPrivateUseCacheInsidePublicUseCacheError();
+        }
+
+        if (typeof process !== "undefined" && process.env.VINEXT_PRERENDER === "1") {
+          // Next.js treats "use cache: private" as dynamic during prerendering:
+          // it is excluded from the static artifact and resolved per request.
+          // https://github.com/vercel/next.js/blob/canary/packages/next/src/server/use-cache/use-cache-wrapper.ts
+          markDynamicUsage();
+        }
+
+        const privateCache = _getPrivateState()._privateCache!;
+        const privateHit = privateCache.get(cacheKey);
+        if (privateHit !== undefined) {
+          // The private cache is heterogeneous across cached functions; the key
+          // includes this function's stable id, so a hit belongs to this TResult.
+          return privateHit as TResult;
+        }
+
+        const result = await (isDev
+          ? executeDevFill()
+          : executeWithContext(fn, args, cacheVariant));
+        privateCache.set(cacheKey, result);
+        return result;
+      }
+
+      // In dev mode, always execute fresh — skip shared cache lookup/storage.
+      // This ensures HMR changes are reflected immediately.
+      if (isDev) {
+        return executeDevFill();
       }
 
       // Shared cache ("use cache" / "use cache: remote")

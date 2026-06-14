@@ -6286,6 +6286,101 @@ describe("use-cache deadlock probe behavior", () => {
       setUseCacheProbe(undefined);
     }
   });
+
+  it('schedules private "use cache" misses with the private probe variant', async () => {
+    const { setUseCacheProbe } =
+      await import("../packages/vinext/src/shims/use-cache-probe-globals.js");
+
+    let probedKind: string | undefined;
+    let probedDraftModeSecret: string | undefined;
+    setUseCacheProbe(async ({ kind, request }) => {
+      probedKind = kind;
+      probedDraftModeSecret = request.draftModeSecret;
+      return true;
+    });
+
+    vi.stubEnv("NODE_ENV", "development");
+    vi.useFakeTimers();
+    vi.resetModules();
+
+    const { registerCachedFunction } =
+      await import("../packages/vinext/src/shims/cache-runtime.js");
+    const { createRequestContext, runWithRequestContext } =
+      await import("../packages/vinext/src/shims/unified-request-context.js");
+
+    let resolveHung!: (value: string) => void;
+    const cached = registerCachedFunction(
+      () =>
+        new Promise<string>((resolve) => {
+          resolveHung = resolve;
+        }),
+      "test:private-deadlock-race",
+      "private",
+    );
+
+    try {
+      const ctx = createRequestContext({
+        headersContext: {
+          headers: new Headers(),
+          cookies: new Map(),
+          draftModeSecret: "probe-draft-secret",
+        },
+      });
+      const promise = runWithRequestContext(ctx, () => cached());
+      promise.catch(() => {});
+
+      await vi.advanceTimersByTimeAsync(10_000);
+      await Promise.resolve();
+
+      expect(probedKind).toBe("private");
+      expect(probedDraftModeSecret).toBe("probe-draft-secret");
+    } finally {
+      resolveHung?.("cleanup");
+      vi.useRealTimers();
+      vi.unstubAllEnvs();
+      setUseCacheProbe(undefined);
+    }
+  });
+
+  it("uses the configured dev use-cache timeout", async () => {
+    vi.stubEnv("NODE_ENV", "development");
+    vi.stubEnv("__VINEXT_USE_CACHE_TIMEOUT_MS", "2500");
+    vi.useFakeTimers();
+    vi.resetModules();
+
+    const { registerCachedFunction } =
+      await import("../packages/vinext/src/shims/cache-runtime.js");
+    const { isUseCacheTimeoutError } =
+      await import("../packages/vinext/src/shims/use-cache-errors.js");
+
+    let resolveHung!: (value: string) => void;
+    const cached = registerCachedFunction(
+      () =>
+        new Promise<string>((resolve) => {
+          resolveHung = resolve;
+        }),
+      "test:configured-timeout",
+    );
+
+    try {
+      const promise = cached();
+      let caughtError: Error | undefined;
+      promise.catch((error) => {
+        caughtError = error as Error;
+      });
+
+      await vi.advanceTimersByTimeAsync(2_500);
+      for (let index = 0; index < 10 && !caughtError; index++) {
+        await Promise.resolve();
+      }
+
+      expect(isUseCacheTimeoutError(caughtError)).toBe(true);
+    } finally {
+      resolveHung?.("cleanup");
+      vi.useRealTimers();
+      vi.unstubAllEnvs();
+    }
+  });
 });
 
 describe("replyToCacheKey deterministic hashing", () => {

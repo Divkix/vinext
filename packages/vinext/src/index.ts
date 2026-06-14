@@ -1385,6 +1385,9 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
         defines["process.env.__VINEXT_DEPLOYMENT_ID"] = JSON.stringify(
           nextConfig.deploymentId ?? "",
         );
+        defines["process.env.__VINEXT_USE_CACHE_TIMEOUT_MS"] = JSON.stringify(
+          nextConfig.useCacheTimeout * 1_000,
+        );
         // Public `process.env.NEXT_DEPLOYMENT_ID` — Next.js statically inlines
         // this into client (and web worker) bundles via its DefinePlugin so
         // that user code like `new Worker(new URL('./w.ts', import.meta.url))`

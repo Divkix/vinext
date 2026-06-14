@@ -17,6 +17,15 @@ import {
   PHASE_DEVELOPMENT_SERVER,
 } from "../packages/vinext/src/shims/constants.js";
 
+describe("experimental.useCacheTimeout", () => {
+  it("defaults to 54 seconds and preserves a positive configured value", async () => {
+    await expect(resolveNextConfig(null)).resolves.toMatchObject({ useCacheTimeout: 54 });
+    await expect(
+      resolveNextConfig({ experimental: { useCacheTimeout: 40 } }),
+    ).resolves.toMatchObject({ useCacheTimeout: 40 });
+  });
+});
+
 function makeTempDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "vinext-config-test-"));
 }
@@ -1832,6 +1841,7 @@ describe("detectNextIntlConfig", () => {
       cacheComponents: false,
       gestureTransition: false,
       prefetchInlining: false,
+      useCacheTimeout: 54,
       redirects: [],
       rewrites: { beforeFiles: [], afterFiles: [], fallback: [] },
       headers: [],

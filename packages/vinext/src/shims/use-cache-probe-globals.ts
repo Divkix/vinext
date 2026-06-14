@@ -16,6 +16,7 @@ export type UseCacheProbeRequestSnapshot = {
   urlPathname: string;
   urlSearch: string;
   rootParams: Record<string, string | string[] | undefined>;
+  draftModeSecret?: string;
 };
 
 /** Wire-format for encoded probe arguments */
@@ -28,6 +29,7 @@ export type EncodedArgsForProbe =
 
 export type UseCacheProbe = (msg: {
   id: string;
+  kind: string;
   encodedArguments: EncodedArgsForProbe;
   request: UseCacheProbeRequestSnapshot;
   timeoutMs: number;

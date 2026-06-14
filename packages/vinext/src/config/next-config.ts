@@ -359,6 +359,8 @@ export type ResolvedNextConfig = {
    * segment payload.
    */
   prefetchInlining: boolean;
+  /** Dev "use cache" fill timeout in seconds. Defaults to 54. */
+  useCacheTimeout: number;
   redirects: NextRedirect[];
   rewrites: {
     beforeFiles: NextRewrite[];
@@ -1280,6 +1282,7 @@ export async function resolveNextConfig(
       cacheComponents: false,
       gestureTransition: false,
       prefetchInlining: false,
+      useCacheTimeout: 54,
       redirects: [],
       rewrites: { beforeFiles: [], afterFiles: [], fallback: [] },
       headers: [],
@@ -1597,6 +1600,10 @@ export async function resolveNextConfig(
     cacheComponents: config.cacheComponents ?? false,
     gestureTransition: experimental?.gestureTransition === true,
     prefetchInlining,
+    useCacheTimeout:
+      typeof experimental?.useCacheTimeout === "number" && experimental.useCacheTimeout > 0
+        ? experimental.useCacheTimeout
+        : 54,
     redirects,
     rewrites,
     headers,

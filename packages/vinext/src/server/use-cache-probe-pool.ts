@@ -51,7 +51,7 @@ export function initUseCacheProbePool(environment: DevEnvironmentLike | DevEnvir
     // createDirectRunner creates a fresh ModuleRunner with its own isolated
     // EvaluatedModules instance, which is exactly what we need for probes.
     const runner = createDirectRunner(env);
-    const { id, encodedArguments, request, timeoutMs } = msg;
+    const { id, kind, encodedArguments, request, timeoutMs } = msg;
 
     // Internal timeout so the probe aborts before the outer render timeout.
     const deadline = performance.now() + timeoutMs;
@@ -93,7 +93,7 @@ export function initUseCacheProbePool(environment: DevEnvironmentLike | DevEnvir
 
       // Wrap it with registerCachedFunction so the probe runs through the
       // same cache-runtime path (fresh ALS, no shared state).
-      const variant = ""; // Only shared caches reach the probe block.
+      const variant = kind === "private" ? "private" : "";
       const wrapped = registerCachedFunction(
         originalFn as (...args: unknown[]) => Promise<unknown>,
         id,
@@ -128,25 +128,11 @@ export function initUseCacheProbePool(environment: DevEnvironmentLike | DevEnvir
       ]);
 
       return true;
-    } catch (err) {
-      // If the probe timed out, the result is inconclusive — the function
-      // might genuinely hang even in isolation.
-      //
-      // Correctness note: this `instanceof UseCacheTimeoutError` works because
-      // the `_probeDepth: 1` guard in cache-runtime.ts (see
-      // `runWithRequestContext` call in `runWithProbeRequestStore`) causes the
-      // isolated runner's own cache-runtime to short-circuit *before* setting
-      // up its timeout, so it can never throw a different-class-identity
-      // UseCacheTimeoutError.  If that guard were ever moved below the timeout
-      // setup in the isolated runner, an isolated-graph timeout would be a
-      // different class and this branch would misclassify it as a deadlock
-      // (return true).
-      if (err instanceof UseCacheTimeoutError) {
-        return false;
-      }
-      // The function threw — it ran to completion (with an error). If the main
-      // fill is still stuck, this is evidence of a deadlock on shared state.
-      return true;
+    } catch {
+      // Import, decode, request reconstruction, timeout, and user-function
+      // errors are all inconclusive. Only a successful isolated completion
+      // proves the outer fill is stuck on module-scoped state.
+      return false;
     } finally {
       if (probeTimeoutTimer !== undefined) clearTimeout(probeTimeoutTimer);
       runner.close().catch(() => {});
@@ -174,14 +160,16 @@ async function decodeProbeArgs(
 ): Promise<unknown[] | null> {
   try {
     const rsc = (await runner.import("@vitejs/plugin-rsc/react/rsc")) as {
+      createTemporaryReferenceSet: () => unknown;
       decodeReply: (
         data: string | FormData,
         options?: { temporaryReferences?: unknown },
       ) => Promise<unknown[]>;
     };
+    const temporaryReferences = rsc.createTemporaryReferenceSet();
 
     if (encoded.kind === "string") {
-      const decoded = await rsc.decodeReply(encoded.data, { temporaryReferences: undefined });
+      const decoded = await rsc.decodeReply(encoded.data, { temporaryReferences });
       if (!Array.isArray(decoded)) return [decoded];
       return decoded;
     }
@@ -198,7 +186,7 @@ async function decodeProbeArgs(
       }
     }
 
-    const decoded = await rsc.decodeReply(formData, { temporaryReferences: undefined });
+    const decoded = await rsc.decodeReply(formData, { temporaryReferences });
     if (!Array.isArray(decoded)) return [decoded];
     return decoded;
   } catch {
@@ -217,6 +205,7 @@ async function runWithProbeRequestStore<T>(
     urlPathname: string;
     urlSearch: string;
     rootParams: Record<string, string | string[] | undefined>;
+    draftModeSecret?: string;
   },
   fn: () => Promise<T>,
 ): Promise<T> {
@@ -236,7 +225,9 @@ async function runWithProbeRequestStore<T>(
     headers: new Headers(requestSnapshot.headers),
   });
 
-  const headersContext = headersContextFromRequest(request);
+  const headersContext = headersContextFromRequest(request, {
+    draftModeSecret: requestSnapshot.draftModeSecret,
+  });
   const ctx = createRequestContext({
     headersContext,
     executionContext: null,
