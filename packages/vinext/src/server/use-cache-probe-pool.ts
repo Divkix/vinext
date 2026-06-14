@@ -93,7 +93,7 @@ export function initUseCacheProbePool(environment: DevEnvironmentLike | DevEnvir
 
       // Wrap it with registerCachedFunction so the probe runs through the
       // same cache-runtime path (fresh ALS, no shared state).
-      const variant = kind === "private" ? "private" : "";
+      const variant = kind;
       const wrapped = registerCachedFunction(
         originalFn as (...args: unknown[]) => Promise<unknown>,
         id,

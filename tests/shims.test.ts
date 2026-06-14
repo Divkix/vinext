@@ -6389,6 +6389,46 @@ describe("use-cache deadlock probe behavior", () => {
       vi.unstubAllEnvs();
     }
   });
+
+  it('preserves the "use cache: remote" probe variant', async () => {
+    const { setUseCacheProbe } =
+      await import("../packages/vinext/src/shims/use-cache-probe-globals.js");
+
+    let probedKind: string | undefined;
+    setUseCacheProbe(async ({ kind }) => {
+      probedKind = kind;
+      return true;
+    });
+
+    vi.stubEnv("NODE_ENV", "development");
+    vi.useFakeTimers();
+    vi.resetModules();
+
+    const { registerCachedFunction } =
+      await import("../packages/vinext/src/shims/cache-runtime.js");
+    let resolveHung!: (value: string) => void;
+    const cached = registerCachedFunction(
+      () =>
+        new Promise<string>((resolve) => {
+          resolveHung = resolve;
+        }),
+      "test:remote-deadlock-race",
+      "remote",
+    );
+
+    try {
+      const promise = cached();
+      promise.catch(() => {});
+      await vi.advanceTimersByTimeAsync(10_000);
+      await Promise.resolve();
+      expect(probedKind).toBe("remote");
+    } finally {
+      resolveHung?.("cleanup");
+      vi.useRealTimers();
+      vi.unstubAllEnvs();
+      setUseCacheProbe(undefined);
+    }
+  });
 });
 
 describe("replyToCacheKey deterministic hashing", () => {
