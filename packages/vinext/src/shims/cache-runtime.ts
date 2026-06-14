@@ -577,10 +577,11 @@ export function registerCachedFunction<TArgs extends unknown[], TResult>(
         if (probe) {
           const headers = requestCtx.headersContext?.headers;
           const navCtx = requestCtx.serverContext;
+          const search = navCtx?.searchParams?.toString();
           const requestSnapshot = {
             headers: headers ? Array.from(headers.entries()) : [],
             urlPathname: navCtx?.pathname ?? "/",
-            urlSearch: navCtx?.searchParams?.toString() ?? "",
+            urlSearch: search ? `?${search}` : "",
             rootParams: Object.fromEntries(
               Object.entries(requestCtx.rootParams ?? {}).map(([key, value]) => [
                 key,

@@ -6293,9 +6293,11 @@ describe("use-cache deadlock probe behavior", () => {
 
     let probedKind: string | undefined;
     let probedDraftModeSecret: string | undefined;
+    let probedUrlSearch: string | undefined;
     setUseCacheProbe(async ({ kind, request }) => {
       probedKind = kind;
       probedDraftModeSecret = request.draftModeSecret;
+      probedUrlSearch = request.urlSearch;
       return true;
     });
 
@@ -6325,6 +6327,11 @@ describe("use-cache deadlock probe behavior", () => {
           cookies: new Map(),
           draftModeSecret: "probe-draft-secret",
         },
+        serverContext: {
+          pathname: "/private",
+          searchParams: new URLSearchParams({ mode: "probe" }),
+          params: {},
+        },
       });
       const promise = runWithRequestContext(ctx, () => cached());
       promise.catch(() => {});
@@ -6334,6 +6341,7 @@ describe("use-cache deadlock probe behavior", () => {
 
       expect(probedKind).toBe("private");
       expect(probedDraftModeSecret).toBe("probe-draft-secret");
+      expect(probedUrlSearch).toBe("?mode=probe");
     } finally {
       resolveHung?.("cleanup");
       vi.useRealTimers();
