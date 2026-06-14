@@ -16,12 +16,13 @@ import {
   validateCookieAttributeValue,
   validateCookieName,
 } from "./internal/cookie-serialize.js";
-import { parseCookieHeader } from "./internal/parse-cookie-header.js";
+import { parseEdgeRequestCookieHeader } from "../utils/parse-cookie.js";
 import {
   isInsideUnifiedScope,
   getRequestContext,
   runWithUnifiedStateMutation,
 } from "./unified-request-context.js";
+import { createPprFallbackShellSuspensePromise } from "./ppr-fallback-shell.js";
 import type { RenderRequestApiKind } from "../server/cache-proof.js";
 
 // ---------------------------------------------------------------------------
@@ -155,7 +156,7 @@ function rebuildCookiesFromHeader(ctx: HeadersContext, cookieHeader: string | nu
   ctx.cookies.clear();
   if (cookieHeader === null) return;
 
-  const nextCookies = parseCookieHeader(cookieHeader);
+  const nextCookies = parseEdgeRequestCookieHeader(cookieHeader);
   for (const [name, value] of nextCookies) {
     ctx.cookies.set(name, value);
   }
@@ -644,6 +645,30 @@ function _decorateRejectedRequestApiPromise<T extends object>(error: unknown): P
   return _decorateRequestApiPromise(promise, throwingTarget);
 }
 
+function _decorateSuspendingRequestApiPromise<T extends object>(
+  promise: Promise<T>,
+): Promise<T> & T {
+  return new Proxy(promise as Promise<T> & T, {
+    get(promiseTarget, prop) {
+      if (prop === "then" || prop === "catch" || prop === "finally") {
+        const value = Reflect.get(promiseTarget, prop, promiseTarget);
+        return typeof value === "function" ? value.bind(promiseTarget) : value;
+      }
+
+      throw promise;
+    },
+    getOwnPropertyDescriptor() {
+      throw promise;
+    },
+    has() {
+      throw promise;
+    },
+    ownKeys() {
+      throw promise;
+    },
+  });
+}
+
 function _sealHeaders(headers: Headers): Headers {
   return new Proxy(headers, {
     get(target, prop) {
@@ -783,7 +808,7 @@ export function headersContextFromRequest(
     if (_cookies) return _cookies;
     // Read from the proxy so middleware-modified cookie headers are respected.
     const cookieHeader = headersProxy.get("cookie") || "";
-    _cookies = parseCookieHeader(cookieHeader);
+    _cookies = parseEdgeRequestCookieHeader(cookieHeader);
     return _cookies;
   }
 
@@ -831,6 +856,11 @@ export function headers(): Promise<Headers> & Headers {
   }
 
   markDynamicUsage();
+  const fallbackShellPromise = createPprFallbackShellSuspensePromise<Headers>("`headers()`");
+  if (fallbackShellPromise) {
+    return _decorateSuspendingRequestApiPromise(fallbackShellPromise);
+  }
+
   const readonlyHeaders = _getReadonlyHeaders(state.headersContext);
   return _getOrCreateDecoratedRequestApiPromise(_decoratedHeadersPromises, readonlyHeaders);
 }
@@ -861,6 +891,11 @@ export function cookies(): Promise<RequestCookies> & RequestCookies {
   }
 
   markDynamicUsage();
+  const fallbackShellPromise = createPprFallbackShellSuspensePromise<RequestCookies>("`cookies()`");
+  if (fallbackShellPromise) {
+    return _decorateSuspendingRequestApiPromise(fallbackShellPromise);
+  }
+
   const cookieStore = _areCookiesMutableInCurrentPhase()
     ? _getMutableCookies(state.headersContext)
     : _getReadonlyCookies(state.headersContext);
@@ -937,7 +972,7 @@ export function isDraftModeRequest(request: Request, draftModeSecret: string): b
   const cookieHeader = request.headers.get("cookie");
   if (!cookieHeader) return false;
   return (
-    parseCookieHeader(cookieHeader).get(DRAFT_MODE_COOKIE) ===
+    parseEdgeRequestCookieHeader(cookieHeader).get(DRAFT_MODE_COOKIE) ===
     validateDraftModeSecret(draftModeSecret)
   );
 }

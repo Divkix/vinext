@@ -1,9 +1,12 @@
-import { describe, it, expect, beforeEach, afterEach } from "vite-plus/test";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vite-plus/test";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
+import { pathToFileURL } from "node:url";
+import { execFileSync } from "node:child_process";
 import {
   detectProject,
+  deploy,
   generateWranglerConfig,
   generateAppRouterWorkerEntry,
   generatePagesRouterWorkerEntry,
@@ -13,9 +16,13 @@ import {
   getFilesToGenerate,
   ensureESModule,
   renameCJSConfigs,
+  buildNodeCliInvocation,
+  buildWranglerInvocation,
   buildWranglerDeployArgs,
   parseDeployArgs,
   resolveWranglerBin,
+  runWranglerDeploy,
+  validateWranglerEnvName,
   withCloudflareEnv,
   isPackageResolvable,
   viteConfigHasCloudflarePlugin,
@@ -24,6 +31,7 @@ import {
   hasWranglerConfig,
   formatMissingCloudflarePluginError,
   formatMissingCacheAdapterError,
+  injectPregeneratedConcretePaths,
 } from "../packages/vinext/src/deploy.js";
 import {
   detectPackageManager,
@@ -43,6 +51,7 @@ import {
   resolveStaticAssetSignal,
 } from "../packages/vinext/src/server/worker-utils.js";
 import { domainCandidates, parseWranglerConfig } from "../packages/vinext/src/cloudflare/tpr.js";
+import { clearPregeneratedConcretePaths } from "../packages/vinext/src/server/pregenerated-concrete-paths.js";
 
 // ─── Test Helpers ────────────────────────────────────────────────────────────
 
@@ -134,6 +143,40 @@ describe("buildWranglerDeployArgs", () => {
   it("treats empty string env as production", () => {
     expect(buildWranglerDeployArgs({ env: "" })).toEqual({ args: ["deploy"], env: undefined });
   });
+
+  it("preserves shell metacharacters as a literal environment argument", () => {
+    const env = "preview & whoami > vinext-pwned.txt & rem";
+    expect(buildWranglerDeployArgs({ env })).toEqual({
+      args: ["deploy", "--env", env],
+      env,
+    });
+  });
+
+  it.each(["production", "preview-1", "staging_eu", "release.2026", "team/app @ 1"])(
+    "accepts Wrangler environment name %s",
+    (env) => {
+      expect(validateWranglerEnvName(env)).toBe(env);
+    },
+  );
+
+  it("rejects null bytes without imposing an artificial length limit", () => {
+    expect(() => validateWranglerEnvName("preview\0prod")).toThrow("null bytes");
+    expect(validateWranglerEnvName("a".repeat(1024))).toBe("a".repeat(1024));
+  });
+});
+
+describe("deploy environment validation", () => {
+  it("rejects invalid environment names before project side effects", async () => {
+    writeFile(tmpDir, "package.json", '{"name":"unchanged"}\n');
+    const before = fs.readFileSync(path.join(tmpDir, "package.json"), "utf-8");
+
+    await expect(deploy({ root: tmpDir, env: "preview\0prod", dryRun: true })).rejects.toThrow(
+      "null bytes",
+    );
+
+    expect(fs.readFileSync(path.join(tmpDir, "package.json"), "utf-8")).toBe(before);
+    expect(fs.existsSync(path.join(tmpDir, ".vinext"))).toBe(false);
+  });
 });
 
 // ─── CLOUDFLARE_ENV propagation (issue #1210) ──────────────────────────────
@@ -211,50 +254,105 @@ describe("withCloudflareEnv", () => {
   });
 });
 
-// ─── Wrangler bin resolution (Windows shim handling) ────────────────────────
+// ─── Wrangler JavaScript entrypoint resolution ──────────────────────────────
 
 describe("resolveWranglerBin", () => {
-  it("uses bare name on non-Windows platforms", () => {
-    mkdir(tmpDir, "node_modules/.bin");
-    writeFile(tmpDir, "node_modules/.bin/wrangler", "#!/usr/bin/env node");
+  function writeWranglerPackage(
+    bin: string | Record<string, string> = { wrangler: "bin/wrangler.js" },
+  ) {
+    writeFile(
+      tmpDir,
+      "node_modules/wrangler/package.json",
+      JSON.stringify({ name: "wrangler", bin }),
+    );
+    writeFile(tmpDir, "node_modules/wrangler/bin/wrangler.js", "#!/usr/bin/env node");
+  }
 
-    const resolved = resolveWranglerBin(tmpDir, "linux");
-    expect(resolved).toBe(path.join(tmpDir, "node_modules", ".bin", "wrangler"));
+  function expectedWranglerBin(): string {
+    return fs.realpathSync(path.join(tmpDir, "node_modules", "wrangler", "bin", "wrangler.js"));
+  }
+
+  it("resolves the JavaScript entrypoint from Wrangler's bin map", () => {
+    writeWranglerPackage();
+    expect(resolveWranglerBin(tmpDir)).toBe(expectedWranglerBin());
   });
 
-  it("prefers .CMD shim on Windows when present", () => {
-    mkdir(tmpDir, "node_modules/.bin");
-    writeFile(tmpDir, "node_modules/.bin/wrangler", "#!/usr/bin/env node");
-    writeFile(tmpDir, "node_modules/.bin/wrangler.CMD", "@ECHO off");
-
-    const resolved = resolveWranglerBin(tmpDir, "win32");
-    expect(resolved).toBe(path.join(tmpDir, "node_modules", ".bin", "wrangler.CMD"));
+  it("supports a string-valued package bin", () => {
+    writeWranglerPackage("bin/wrangler.js");
+    expect(resolveWranglerBin(tmpDir)).toBe(expectedWranglerBin());
   });
 
-  it("falls back to bare name on Windows if no .CMD shim exists", () => {
-    mkdir(tmpDir, "node_modules/.bin");
-    writeFile(tmpDir, "node_modules/.bin/wrangler", "#!/usr/bin/env node");
-
-    const resolved = resolveWranglerBin(tmpDir, "win32");
-    expect(resolved).toBe(path.join(tmpDir, "node_modules", ".bin", "wrangler"));
-  });
-
-  it("walks up to a hoisted workspace node_modules on Windows", () => {
+  it("walks up to a hoisted workspace node_modules", () => {
     mkdir(tmpDir, "apps/web");
-    mkdir(tmpDir, "node_modules/.bin");
-    writeFile(tmpDir, "node_modules/.bin/wrangler.CMD", "@ECHO off");
-
-    const resolved = resolveWranglerBin(path.join(tmpDir, "apps", "web"), "win32");
-    expect(resolved).toBe(path.join(tmpDir, "node_modules", ".bin", "wrangler.CMD"));
+    writeWranglerPackage();
+    expect(resolveWranglerBin(path.join(tmpDir, "apps", "web"))).toBe(expectedWranglerBin());
   });
 
-  it("returns platform-appropriate fallback path when nothing is found", () => {
-    expect(resolveWranglerBin(tmpDir, "win32")).toBe(
-      path.join(tmpDir, "node_modules", ".bin", "wrangler.CMD"),
+  it("supports package resolvers such as Yarn Plug'n'Play", () => {
+    writeWranglerPackage();
+    const packageJsonPath = path.join(tmpDir, "node_modules", "wrangler", "package.json");
+    expect(resolveWranglerBin("/virtual/project", () => packageJsonPath)).toBe(
+      path.join(tmpDir, "node_modules", "wrangler", "bin", "wrangler.js"),
     );
-    expect(resolveWranglerBin(tmpDir, "linux")).toBe(
-      path.join(tmpDir, "node_modules", ".bin", "wrangler"),
+  });
+
+  it("returns a clear fallback path when Wrangler is missing", () => {
+    expect(resolveWranglerBin(tmpDir)).toBe(
+      path.join(tmpDir, "node_modules", "wrangler", "bin", "wrangler.js"),
     );
+  });
+
+  it("passes deploy arguments literally to Node without a command shell", () => {
+    writeWranglerPackage();
+    expect(buildWranglerInvocation(tmpDir, { env: "preview-1" }, "node.exe")).toEqual({
+      file: "node.exe",
+      args: [expectedWranglerBin(), "deploy", "--env", "preview-1"],
+      env: "preview-1",
+    });
+  });
+
+  it("keeps Windows shell metacharacters in one literal argument", () => {
+    const payload = "preview & whoami > vinext-pwned.txt & rem";
+    expect(buildNodeCliInvocation("wrangler.js", ["deploy", "--env", payload], "node.exe")).toEqual(
+      {
+        file: "node.exe",
+        args: ["wrangler.js", "deploy", "--env", payload],
+      },
+    );
+  });
+
+  it("executes Wrangler with shell disabled and literal metacharacters", () => {
+    writeWranglerPackage();
+    const payload = "preview & whoami > vinext-pwned.txt & rem";
+    let observed: Parameters<typeof execFileSync> | undefined;
+    const execute = ((...args: Parameters<typeof execFileSync>) => {
+      observed = args;
+      return "";
+    }) as typeof execFileSync;
+
+    runWranglerDeploy(tmpDir, { env: payload }, execute);
+
+    expect(observed?.[0]).toBe(process.execPath);
+    expect(observed?.[1]).toEqual([expectedWranglerBin(), "deploy", "--env", payload]);
+    expect(observed?.[2]).toMatchObject({ shell: false });
+  });
+
+  it("does not execute metacharacters in a real subprocess", () => {
+    const argvPath = path.join(tmpDir, "argv.json");
+    const pwnedPath = path.join(tmpDir, "vinext-pwned.txt");
+    const scriptPath = path.join(tmpDir, "capture-argv.cjs");
+    const payload = `preview & echo pwned > ${pwnedPath} & rem`;
+    writeFile(
+      tmpDir,
+      "capture-argv.cjs",
+      `require("node:fs").writeFileSync(${JSON.stringify(argvPath)}, JSON.stringify(process.argv.slice(2)))`,
+    );
+    const invocation = buildNodeCliInvocation(scriptPath, ["deploy", "--env", payload]);
+
+    execFileSync(invocation.file, invocation.args, { cwd: tmpDir, shell: false });
+
+    expect(JSON.parse(fs.readFileSync(argvPath, "utf-8"))).toEqual(["deploy", "--env", payload]);
+    expect(fs.existsSync(pwnedPath)).toBe(false);
   });
 });
 
@@ -574,6 +672,16 @@ describe("generateAppRouterWorkerEntry", () => {
     expect(content).toContain("handleImageOptimization");
   });
 
+  it("threads configured image widths and qualities into the App Router worker", () => {
+    const content = generateAppRouterWorkerEntry();
+    expect(content).toContain("process.env.__VINEXT_IMAGE_DEVICE_SIZES");
+    expect(content).toContain("process.env.__VINEXT_IMAGE_SIZES");
+    expect(content).toContain("process.env.__VINEXT_IMAGE_QUALITIES");
+    expect(content).toContain("JSON.stringify(DEFAULT_DEVICE_SIZES)");
+    expect(content).toContain("JSON.stringify(DEFAULT_IMAGE_SIZES)");
+    expect(content).toContain("}, allowedWidths, imageConfig)");
+  });
+
   it("declares Env interface with IMAGES binding", () => {
     const content = generateAppRouterWorkerEntry();
     expect(content).toContain("interface Env");
@@ -842,17 +950,17 @@ describe("generatePagesRouterWorkerEntry", () => {
     expect(content).toContain("runPagesRequest(request, deps)");
   });
 
-  it("handles basePath stripping and creates a new request with stripped URL for middleware", () => {
+  it("handles basePath stripping and clones the request with the stripped URL", () => {
     const content = generatePagesRouterWorkerEntry();
     expect(content).toContain("basePath");
     expect(content).toContain(
       'import { hasBasePath, stripBasePath } from "vinext/utils/base-path"',
     );
     expect(content).toContain("const stripped = stripBasePath(pathname, basePath);");
-    // After stripping, a new request with the stripped URL must be created
-    // in the adapter so runPagesRequest receives a clean basePath-free request.
+    // After stripping, clone with the stripped URL so runPagesRequest receives
+    // a clean basePath-free request without dropping Worker metadata.
     expect(content).toContain("strippedUrl.pathname = stripped");
-    expect(content).toContain("new Request(strippedUrl, request)");
+    expect(content).toContain("cloneRequestWithUrl(request, strippedUrl.toString())");
   });
 
   it("handles trailing slash normalization", () => {
@@ -871,6 +979,11 @@ describe("generatePagesRouterWorkerEntry", () => {
     expect(content).toContain('handleApi: typeof handleApiRoute === "function"');
     expect(content).toContain("handleApiRoute(req, apiUrl, ctx)");
     expect(content).toContain("runPagesRequest(request, deps)");
+  });
+
+  it("preserves request metadata when stripping Pages Router basePath", () => {
+    const content = generatePagesRouterWorkerEntry();
+    expect(content).toContain("cloneRequestWithUrl(request, strippedUrl.toString())");
   });
 
   it("includes error handling", () => {
@@ -1163,6 +1276,14 @@ describe("generatePagesRouterWorkerEntry", () => {
     expect(basePathPos).toBeGreaterThan(-1);
     expect(imagePos).toBeGreaterThan(-1);
     expect(basePathPos).toBeLessThan(imagePos);
+  });
+
+  it("threads configured image widths and qualities into optimization validation", () => {
+    const content = generatePagesRouterWorkerEntry();
+    expect(content).toContain("vinextConfig?.images?.deviceSizes ?? DEFAULT_DEVICE_SIZES");
+    expect(content).toContain("vinextConfig?.images?.imageSizes ?? DEFAULT_IMAGE_SIZES");
+    expect(content).toContain("qualities: vinextConfig.images.qualities");
+    expect(content).toContain("}, allowedWidths, imageConfig)");
   });
 
   it("uses segment-boundary check before skipping redirect destination prefixing", () => {
@@ -3040,5 +3161,171 @@ describe("parseWranglerConfig — custom domain extraction", () => {
     );
     const config = parseWranglerConfig(tmpDir);
     expect(config?.kvNamespaceId).toBe("abc123");
+  });
+});
+
+describe("injectPregeneratedConcretePaths", () => {
+  it("second call replaces first injection", () => {
+    const sourceCode = `import { handler } from "vinext/server/app-router-entry";\n`;
+    const manifestA = {
+      buildId: "build-a",
+      routes: [
+        {
+          route: "/blog/:slug",
+          status: "rendered",
+          router: "app",
+          path: "/blog/post-a",
+          revalidate: 60,
+        },
+      ],
+    };
+    const manifestB = {
+      buildId: "build-b",
+      routes: [
+        {
+          route: "/blog/:slug",
+          status: "rendered",
+          router: "app",
+          path: "/blog/post-b",
+          revalidate: 60,
+        },
+      ],
+    };
+
+    mkdir(tmpDir, "dist/server");
+    writeFile(tmpDir, "dist/server/index.js", sourceCode);
+
+    writeFile(tmpDir, "dist/server/vinext-prerender.json", JSON.stringify(manifestA));
+    injectPregeneratedConcretePaths(tmpDir);
+
+    const afterA = fs.readFileSync(path.join(tmpDir, "dist/server/index.js"), "utf-8");
+    expect(afterA).toContain("post-a");
+    expect(afterA).not.toContain("post-b");
+
+    writeFile(tmpDir, "dist/server/vinext-prerender.json", JSON.stringify(manifestB));
+    injectPregeneratedConcretePaths(tmpDir);
+
+    const afterB = fs.readFileSync(path.join(tmpDir, "dist/server/index.js"), "utf-8");
+    expect(afterB).toContain("post-b");
+    expect(afterB).not.toContain("post-a");
+    expect(afterB).toContain('import { handler } from "vinext/server/app-router-entry"');
+  });
+
+  it("missing manifest strips prior injection", () => {
+    const priorInjection = [
+      "/* __VINEXT_PREGENERATED_CONCRETE_PATHS_START__ */",
+      'globalThis.__VINEXT_PREGENERATED_CONCRETE_PATHS = [["/blog/:slug",["/blog/post-a"]]];',
+      "/* __VINEXT_PREGENERATED_CONCRETE_PATHS_END__ */",
+      'import { handler } from "vinext/server/app-router-entry";',
+      "",
+    ].join("\n");
+
+    mkdir(tmpDir, "dist/server");
+    writeFile(tmpDir, "dist/server/index.js", priorInjection);
+
+    injectPregeneratedConcretePaths(tmpDir);
+
+    const after = fs.readFileSync(path.join(tmpDir, "dist/server/index.js"), "utf-8");
+    expect(after).not.toContain("__VINEXT_PREGENERATED_CONCRETE_PATHS");
+    expect(after).toContain('import { handler } from "vinext/server/app-router-entry"');
+  });
+
+  it("excludes fallback-shell placeholder paths from injection", () => {
+    const sourceCode = 'export default { fetch(request) { return new Response("ok"); } };\n';
+    const manifest = {
+      buildId: "test",
+      routes: [
+        {
+          route: "/blog/:slug",
+          status: "rendered",
+          router: "app",
+          path: "/blog/post-a",
+          revalidate: 60,
+        },
+        {
+          route: "/blog/:slug",
+          status: "rendered",
+          router: "app",
+          path: "/blog/[slug]",
+          revalidate: 60,
+          fallback: true,
+        },
+      ],
+    };
+
+    mkdir(tmpDir, "dist/server");
+    writeFile(tmpDir, "dist/server/index.js", sourceCode);
+    writeFile(tmpDir, "dist/server/vinext-prerender.json", JSON.stringify(manifest));
+    injectPregeneratedConcretePaths(tmpDir);
+
+    const code = fs.readFileSync(path.join(tmpDir, "dist/server/index.js"), "utf-8");
+    const match = code.match(/globalThis\.__VINEXT_PREGENERATED_CONCRETE_PATHS = (\[.*?\]);/);
+    expect(match).not.toBeNull();
+    const table: unknown = JSON.parse(match![1]);
+    expect(table).toEqual([["/blog/:slug", ["/blog/post-a"]]]);
+  });
+
+  it("hydrates the concrete-path registry when the generated Worker entry is imported", async () => {
+    const registryModuleUrl = pathToFileURL(
+      path.resolve("packages/vinext/src/server/pregenerated-concrete-paths.ts"),
+    ).href;
+    const sourceCode = [
+      `import { getRenderedConcreteUrlPathsForRoute, initPregeneratedPathsFromGlobals } from ${JSON.stringify(registryModuleUrl)};`,
+      "initPregeneratedPathsFromGlobals();",
+      'export const renderedPaths = [...(getRenderedConcreteUrlPathsForRoute("/blog/:slug") ?? [])];',
+      'export default { fetch(request) { return new Response("ok"); } };',
+      "",
+    ].join("\n");
+    const manifest = {
+      buildId: "test",
+      routes: [
+        {
+          route: "/blog/:slug",
+          status: "rendered",
+          router: "app",
+          path: "/blog/post-a",
+          revalidate: 60,
+        },
+      ],
+    };
+
+    clearPregeneratedConcretePaths();
+    mkdir(tmpDir, "dist/server");
+    writeFile(tmpDir, "dist/server/index.js", sourceCode);
+    writeFile(tmpDir, "dist/server/vinext-prerender.json", JSON.stringify(manifest));
+    injectPregeneratedConcretePaths(tmpDir);
+
+    const entryUrl = pathToFileURL(path.join(tmpDir, "dist/server/index.js")).href;
+    const workerEntry: unknown = await import(`${entryUrl}?t=${Date.now()}`);
+
+    expect(workerEntry).toMatchObject({
+      renderedPaths: ["/blog/post-a"],
+    });
+  });
+
+  it("corrupt manifest strips prior injection", () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const priorInjection = [
+      "/* __VINEXT_PREGENERATED_CONCRETE_PATHS_START__ */",
+      'globalThis.__VINEXT_PREGENERATED_CONCRETE_PATHS = [["/",["/"]]];',
+      "/* __VINEXT_PREGENERATED_CONCRETE_PATHS_END__ */",
+      'export default { fetch(request) { return new Response("ok"); } };',
+      "",
+    ].join("\n");
+
+    mkdir(tmpDir, "dist/server");
+    writeFile(tmpDir, "dist/server/index.js", priorInjection);
+    writeFile(tmpDir, "dist/server/vinext-prerender.json", "{invalid json}");
+
+    injectPregeneratedConcretePaths(tmpDir);
+
+    const after = fs.readFileSync(path.join(tmpDir, "dist/server/index.js"), "utf-8");
+    expect(after).not.toContain("__VINEXT_PREGENERATED_CONCRETE_PATHS");
+    expect(after).toContain('export default { fetch(request) { return new Response("ok"); } }');
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining("[vinext] Failed to read prerender manifest"),
+      expect.any(SyntaxError),
+    );
+    warnSpy.mockRestore();
   });
 });

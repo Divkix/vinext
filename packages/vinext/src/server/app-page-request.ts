@@ -38,6 +38,7 @@ type ResolveAppPageGenerateStaticParamsSourcesOptions = {
 
 type BuildAppPageElementOptions<TElement> = {
   buildPageElement: () => Promise<TElement>;
+  probePageSpecialError?: () => Promise<AppPageSpecialError | null>;
   renderErrorBoundaryPage: (error: unknown) => Promise<Response | null>;
   renderSpecialError: (specialError: AppPageSpecialError) => Promise<Response>;
   resolveSpecialError: (error: unknown) => AppPageSpecialError | null;
@@ -55,6 +56,7 @@ type AppPageInterceptMatch<TPage = unknown> = {
   slotId?: string | null;
   slotKey: string;
   sourceRouteIndex: number;
+  sourcePageSegments?: readonly string[] | null;
 };
 
 type ResolveAppPageInterceptMatchOptions<TRoute, TPage, TInterceptOpts> = {
@@ -461,7 +463,9 @@ export async function buildAppPageElement<TElement>(
       response: null,
     };
   } catch (error) {
-    const specialError = options.resolveSpecialError(error);
+    const buildSpecialError = options.resolveSpecialError(error);
+    const pageSpecialError = buildSpecialError ? await options.probePageSpecialError?.() : null;
+    const specialError = pageSpecialError ?? buildSpecialError;
     if (specialError) {
       return {
         element: null,

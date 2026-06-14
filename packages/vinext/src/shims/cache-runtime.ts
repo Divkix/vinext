@@ -47,6 +47,7 @@ import {
   runWithUnifiedStateMutation,
 } from "./unified-request-context.js";
 import { markDynamicUsage } from "./headers.js";
+import { trackPprFallbackShellCacheTask } from "./ppr-fallback-shell.js";
 
 // ---------------------------------------------------------------------------
 // Constants for nested-dynamic cache life detection
@@ -208,8 +209,6 @@ type ProbeModules = {
   getUseCacheProbe: typeof import("./use-cache-probe-globals.js").getUseCacheProbe;
 };
 
-// Lazy singleton for dev-only probe modules — eliminates microtask
-// overhead on every "use cache" call after the first.
 let _probeModules: ProbeModules | undefined;
 let _probeModulesPromise: Promise<ProbeModules> | undefined;
 
@@ -374,17 +373,6 @@ function resolveCacheLife(configs: CacheLifeConfig[]): CacheLifeConfig {
   return result;
 }
 
-// ---------------------------------------------------------------------------
-// Encode probe arguments for transport to the isolated runner
-// ---------------------------------------------------------------------------
-
-/**
- * Convert an `encodeReply` result (string | FormData) into a serializable
- * wire-format that the probe runner can decode via `decodeReply`.
- * This mirrors Next.js `EncodedArgumentsForProbe`: string replies are passed
- * verbatim, FormData entries are sent as base64-encoded blobs so they survive
- * JSON serialization.
- */
 type EncodedEntry = [string, string] | [string, { kind: "blob"; bytes: string; type: string }];
 
 async function encodedArgumentsToProbe(encoded: string | FormData): Promise<EncodedArgsForProbe> {
@@ -522,294 +510,259 @@ export function registerCachedFunction<TArgs extends unknown[], TResult>(
   // it's scoped to a single request and doesn't persist across HMR.
   const isDev = typeof process !== "undefined" && process.env.NODE_ENV === "development";
 
-  const cachedFn = async (...args: TArgs): Promise<TResult> => {
-    const rsc = await getRscModule();
-    const keySeed = getUseCacheKeySeed();
+  const cachedFn = (...args: TArgs): Promise<TResult> =>
+    trackPprFallbackShellCacheTask(async (): Promise<TResult> => {
+      const rsc = await getRscModule();
+      const keySeed = getUseCacheKeySeed();
 
-    // Build the cache key. Use encodeReply (RSC protocol) when available —
-    // it correctly handles React elements as temporary references (excluded
-    // from key). Falls back to stableStringify when RSC is unavailable.
-    let cacheKey: string;
-    try {
-      const processedArgs =
-        args.length > 0
-          ? unwrapThenableObjectArray(args, { omitAppPageSearchParamsFromFirstArg })
-          : [];
-      if (rsc && args.length > 0) {
-        // Temporary references let encodeReply handle non-serializable values
-        // (like React elements in args) by excluding them from the key.
-        const tempRefs = rsc.createClientTemporaryReferenceSet();
-        // Unwrap Promise-augmented objects before encoding.
-        // Next.js 16 params/searchParams are created via
-        // Object.assign(Promise.resolve(obj), obj) — a Promise with own
-        // enumerable properties. encodeReply treats Promises as temporary
-        // references (excluded from the key), which means different param
-        // values (e.g., section:"sports" vs section:"electronics") produce
-        // identical cache keys. We must extract the plain data so the actual
-        // values are included in the cache key.
-        const encoded = await rsc.encodeReply(processedArgs, {
-          temporaryReferences: tempRefs,
-        });
-        cacheKey = buildUseCacheKey(id, keySeed, await replyToCacheKey(encoded));
-      } else {
-        const argsKey = processedArgs.length > 0 ? stableStringify(processedArgs) : undefined;
-        cacheKey = buildUseCacheKey(id, keySeed, argsKey);
-      }
-    } catch {
-      // Non-serializable arguments — run without caching
-      return fn(...args);
-    }
-
-    // "use cache: private" uses per-request in-memory cache
-    if (cacheVariant === "private") {
-      const parentCtx = cacheContextStorage.getStore();
-      if (parentCtx && parentCtx.variant !== "private") {
-        throwPrivateUseCacheInsidePublicUseCacheError();
-      }
-
-      if (typeof process !== "undefined" && process.env.VINEXT_PRERENDER === "1") {
-        // Next.js treats "use cache: private" as dynamic during prerendering:
-        // it is excluded from the static artifact and resolved per request.
-        // https://github.com/vercel/next.js/blob/canary/packages/next/src/server/use-cache/use-cache-wrapper.ts
-        markDynamicUsage();
-      }
-
-      const privateCache = _getPrivateState()._privateCache!;
-      const privateHit = privateCache.get(cacheKey);
-      if (privateHit !== undefined) {
-        // The private cache is heterogeneous across cached functions; the key
-        // includes this function's stable id, so a hit belongs to this TResult.
-        return privateHit as TResult;
-      }
-
-      const result = await executeWithContext(fn, args, cacheVariant);
-      privateCache.set(cacheKey, result);
-      return result;
-    }
-
-    // In dev mode, always execute fresh — skip shared cache lookup/storage.
-    // This ensures HMR changes are reflected immediately.
-    if (isDev) {
-      const USE_CACHE_TIMEOUT_MS = 54_000;
-      const fillDeadlineAt = performance.now() + USE_CACHE_TIMEOUT_MS;
-
-      // Request-scoped guard: only schedule a probe from the outer
-      // request (_probeDepth === 0), not from inside a probe re-execution
-      // itself. This mirrors Next.js useCacheProbeMode and skips all dev
-      // timeout/probe machinery inside the isolated probe runner.
-      const requestCtx = getRequestContext();
-      if ((requestCtx._probeDepth ?? 0) > 0) {
-        return executeWithContext(fn, args, cacheVariant);
-      }
-
-      let probeModules = _probeModules;
-      if (!probeModules) {
-        probeModules = await getProbeModules();
-      }
-      const { UseCacheTimeoutError, UseCacheDeadlockError, getUseCacheProbe } = probeModules;
-
-      let probeTimer: ReturnType<typeof setTimeout> | undefined;
-      let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
-      let probePromise: Promise<never> | null = null;
-      const probe = getUseCacheProbe();
-
-      if (probe) {
-        const headers = requestCtx.headersContext?.headers;
-        const navCtx = requestCtx.serverContext;
-        const requestSnapshot = {
-          headers: headers ? Array.from(headers.entries()) : [],
-          urlPathname: navCtx?.pathname ?? "/",
-          urlSearch: navCtx?.searchParams?.toString() ?? "",
-          rootParams: Object.fromEntries(
-            Object.entries(requestCtx.rootParams ?? {}).map(([k, v]) => [
-              k,
-              typeof v === "string" || Array.isArray(v) ? v : undefined,
-            ]),
-          ) as Record<string, string | string[] | undefined>,
-        };
-
-        // Encode probe args via the same RSC encodeReply used for cache-key
-        // generation so Promise-thenable params/searchParams survive the round
-        // trip (avoids false-positive deadlocks from empty `{}` JSON.stringify).
-        let encodedArgsForProbe: EncodedArgsForProbe | null = null;
-        try {
-          if (rsc) {
-            const tempRefs = rsc.createClientTemporaryReferenceSet();
-            const processedArgs = args.length > 0 ? (unwrapThenableObjects(args) as unknown[]) : [];
-            const encoded = await rsc.encodeReply(processedArgs, {
-              temporaryReferences: tempRefs,
-            });
-            encodedArgsForProbe = await encodedArgumentsToProbe(encoded);
-          } else {
-            // RSC not available in test environments — JSON fallback
-            encodedArgsForProbe = {
-              kind: "string",
-              data: JSON.stringify(args.length > 0 ? args : []),
-            };
-          }
-        } catch {
-          // Failed to encode probe args — skip probe scheduling rather than
-          // send empty/wrong args and risk false-positive deadlock.
-        }
-
-        if (encodedArgsForProbe) {
-          probePromise = new Promise<never>((_, reject) => {
-            // TODO: Next.js tracks RSC stream chunk timestamps and only fires
-            // the probe after 10s of stream *idleness*. vinext uses a flat
-            // 10s timeout that fires regardless of progress, which can produce
-            // false-positive UseCacheDeadlockError for slow-but-streaming
-            // cache functions. Switch to idle-stream monitoring for parity.
-            // https://github.com/vercel/next.js/blob/canary/packages/next/src/server/use-cache/use-cache-probe.ts
-            probeTimer = setTimeout(() => {
-              const probeInternalTimeoutMs = fillDeadlineAt - performance.now() - 1_000;
-              if (probeInternalTimeoutMs <= 0) return;
-
-              probe({
-                id,
-                encodedArguments: encodedArgsForProbe!,
-                request: requestSnapshot,
-                timeoutMs: probeInternalTimeoutMs,
-              }).then(
-                (completed) => {
-                  if (completed) {
-                    reject(new UseCacheDeadlockError());
-                  } else if (typeof console !== "undefined") {
-                    console.warn(
-                      `[vinext] "use cache" fill for ${id} has been idle for 10s. ` +
-                        `Probe was also inconclusive — will hard-timeout at 54s.`,
-                    );
-                  }
-                },
-                () => {},
-              );
-            }, 10_000);
-          });
-          // Swallow rejection when execution wins the race.
-          probePromise.catch(() => {});
-        }
-      }
-
-      // The 54s timeout applies to every shared "use cache" fill in dev,
-      // regardless of whether a probe is installed (i.e. it fires even in
-      // Pages Router dev or when the probe pool failed to init). This is a
-      // behavioral change vs. the original `return executeWithContext(...)` dev
-      // path, but it matches Next.js's dev cache timeout and is intentional.
-      const timeoutPromise = new Promise<never>((_, reject) => {
-        timeoutTimer = setTimeout(() => reject(new UseCacheTimeoutError()), USE_CACHE_TIMEOUT_MS);
-        if (typeof (timeoutTimer as NodeJS.Timeout).unref === "function") {
-          (timeoutTimer as NodeJS.Timeout).unref();
-        }
-      });
-      // Swallow rejection when execution wins the race.
-      timeoutPromise.catch(() => {});
-
-      const executionPromise = executeWithContext(fn, args, cacheVariant);
-
-      const promises: Promise<unknown>[] = [executionPromise];
-      if (probePromise) promises.push(probePromise);
-      promises.push(timeoutPromise);
-
-      return (Promise.race(promises) as Promise<TResult>).finally(() => {
-        if (probeTimer !== undefined) clearTimeout(probeTimer);
-        if (timeoutTimer !== undefined) clearTimeout(timeoutTimer);
-      });
-    }
-
-    // Shared cache ("use cache" / "use cache: remote")
-    const handler = getDataCacheHandler();
-
-    // Check cache — deserialize via RSC stream when available, JSON otherwise.
-    // Pass soft tags so that revalidatePath() / revalidateTag() invalidation
-    // applies to "use cache" entries even when the entry carries no hard tags.
-    // The soft tags are path-derived implicit tags set by the enclosing route
-    // handler or page dispatch — see setCurrentFetchSoftTags in fetch-cache.ts.
-    const softTags = getCurrentFetchSoftTags();
-    const existing = await handler.get(cacheKey, { kind: "FETCH", softTags });
-    if (existing?.value && existing.value.kind === "FETCH" && existing.cacheState !== "stale") {
+      // Build the cache key. Use encodeReply (RSC protocol) when available —
+      // it correctly handles React elements as temporary references (excluded
+      // from key). Falls back to stableStringify when RSC is unavailable.
+      let cacheKey: string;
       try {
-        // Surface the cached entry's tags to the surrounding request so the
-        // enclosing page / route-handler ISR entry carries them even on a data
-        // cache HIT — otherwise `revalidateTag()` could not evict the rendered
-        // output that embeds this cached value (issue #1453).
-        propagateCacheTagsToRequest(existing.value.tags);
-        if (rsc && existing.value.data.headers[VINEXT_RSC_MARKER_HEADER] === "1") {
-          // RSC-serialized entry: base64 → bytes → stream → deserialize
-          const bytes = base64ToUint8(existing.value.data.body);
-          const stream = uint8ToStream(bytes);
-          const result = await rsc.createFromReadableStream<TResult>(stream);
+        const processedArgs =
+          args.length > 0
+            ? unwrapThenableObjectArray(args, { omitAppPageSearchParamsFromFirstArg })
+            : [];
+        if (rsc && args.length > 0) {
+          // Temporary references let encodeReply handle non-serializable values
+          // (like React elements in args) by excluding them from the key.
+          const tempRefs = rsc.createClientTemporaryReferenceSet();
+          // Unwrap Promise-augmented objects before encoding.
+          // Next.js 16 params/searchParams are created via
+          // Object.assign(Promise.resolve(obj), obj) — a Promise with own
+          // enumerable properties. encodeReply treats Promises as temporary
+          // references (excluded from the key), which means different param
+          // values (e.g., section:"sports" vs section:"electronics") produce
+          // identical cache keys. We must extract the plain data so the actual
+          // values are included in the cache key.
+          const encoded = await rsc.encodeReply(processedArgs, {
+            temporaryReferences: tempRefs,
+          });
+          cacheKey = buildUseCacheKey(id, keySeed, await replyToCacheKey(encoded));
+        } else {
+          const argsKey = processedArgs.length > 0 ? stableStringify(processedArgs) : undefined;
+          cacheKey = buildUseCacheKey(id, keySeed, argsKey);
+        }
+      } catch {
+        // Non-serializable arguments — run without caching
+        return fn(...args);
+      }
+
+      // "use cache: private" uses per-request in-memory cache
+      if (cacheVariant === "private") {
+        const parentCtx = cacheContextStorage.getStore();
+        if (parentCtx && parentCtx.variant !== "private") {
+          throwPrivateUseCacheInsidePublicUseCacheError();
+        }
+
+        if (typeof process !== "undefined" && process.env.VINEXT_PRERENDER === "1") {
+          // Next.js treats "use cache: private" as dynamic during prerendering:
+          // it is excluded from the static artifact and resolved per request.
+          // https://github.com/vercel/next.js/blob/canary/packages/next/src/server/use-cache/use-cache-wrapper.ts
+          markDynamicUsage();
+        }
+
+        const privateCache = _getPrivateState()._privateCache!;
+        const privateHit = privateCache.get(cacheKey);
+        if (privateHit !== undefined) {
+          // The private cache is heterogeneous across cached functions; the key
+          // includes this function's stable id, so a hit belongs to this TResult.
+          return privateHit as TResult;
+        }
+
+        const result = await executeWithContext(fn, args, cacheVariant);
+        privateCache.set(cacheKey, result);
+        return result;
+      }
+
+      // In dev mode, always execute fresh — skip shared cache lookup/storage.
+      // This ensures HMR changes are reflected immediately.
+      if (isDev) {
+        const useCacheTimeoutMs = 54_000;
+        const fillDeadlineAt = performance.now() + useCacheTimeoutMs;
+        const requestCtx = getRequestContext();
+        if ((requestCtx._probeDepth ?? 0) > 0) {
+          return executeWithContext(fn, args, cacheVariant);
+        }
+
+        const probeModules = _probeModules ?? (await getProbeModules());
+        const { UseCacheTimeoutError, UseCacheDeadlockError, getUseCacheProbe } = probeModules;
+        let probeTimer: ReturnType<typeof setTimeout> | undefined;
+        let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
+        let probePromise: Promise<never> | null = null;
+        const probe = getUseCacheProbe();
+
+        if (probe) {
+          const headers = requestCtx.headersContext?.headers;
+          const navCtx = requestCtx.serverContext;
+          const requestSnapshot = {
+            headers: headers ? Array.from(headers.entries()) : [],
+            urlPathname: navCtx?.pathname ?? "/",
+            urlSearch: navCtx?.searchParams?.toString() ?? "",
+            rootParams: Object.fromEntries(
+              Object.entries(requestCtx.rootParams ?? {}).map(([key, value]) => [
+                key,
+                typeof value === "string" || Array.isArray(value) ? value : undefined,
+              ]),
+            ) as Record<string, string | string[] | undefined>,
+          };
+
+          let encodedArgsForProbe: EncodedArgsForProbe | null = null;
+          try {
+            if (rsc) {
+              const tempRefs = rsc.createClientTemporaryReferenceSet();
+              const processedArgs =
+                args.length > 0
+                  ? unwrapThenableObjectArray(args, { omitAppPageSearchParamsFromFirstArg })
+                  : [];
+              const encoded = await rsc.encodeReply(processedArgs, {
+                temporaryReferences: tempRefs,
+              });
+              encodedArgsForProbe = await encodedArgumentsToProbe(encoded);
+            } else {
+              encodedArgsForProbe = { kind: "string", data: JSON.stringify(args) };
+            }
+          } catch {
+            // Skip probing when arguments cannot be faithfully reconstructed.
+          }
+
+          if (encodedArgsForProbe) {
+            probePromise = new Promise<never>((_, reject) => {
+              probeTimer = setTimeout(() => {
+                const probeInternalTimeoutMs = fillDeadlineAt - performance.now() - 1_000;
+                if (probeInternalTimeoutMs <= 0) return;
+
+                probe({
+                  id,
+                  encodedArguments: encodedArgsForProbe,
+                  request: requestSnapshot,
+                  timeoutMs: probeInternalTimeoutMs,
+                }).then(
+                  (completed) => {
+                    if (completed) reject(new UseCacheDeadlockError());
+                  },
+                  () => {},
+                );
+              }, 10_000);
+            });
+            probePromise.catch(() => {});
+          }
+        }
+
+        const timeoutPromise = new Promise<never>((_, reject) => {
+          timeoutTimer = setTimeout(() => reject(new UseCacheTimeoutError()), useCacheTimeoutMs);
+          if (typeof (timeoutTimer as NodeJS.Timeout).unref === "function") {
+            (timeoutTimer as NodeJS.Timeout).unref();
+          }
+        });
+        timeoutPromise.catch(() => {});
+
+        const executionPromise = executeWithContext(fn, args, cacheVariant);
+        const promises: Promise<unknown>[] = [executionPromise, timeoutPromise];
+        if (probePromise) promises.push(probePromise);
+
+        return (Promise.race(promises) as Promise<TResult>).finally(() => {
+          if (probeTimer !== undefined) clearTimeout(probeTimer);
+          if (timeoutTimer !== undefined) clearTimeout(timeoutTimer);
+        });
+      }
+
+      // Shared cache ("use cache" / "use cache: remote")
+      const handler = getDataCacheHandler();
+
+      // Check cache — deserialize via RSC stream when available, JSON otherwise.
+      // Pass soft tags so that revalidatePath() / revalidateTag() invalidation
+      // applies to "use cache" entries even when the entry carries no hard tags.
+      // The soft tags are path-derived implicit tags set by the enclosing route
+      // handler or page dispatch — see setCurrentFetchSoftTags in fetch-cache.ts.
+      const softTags = getCurrentFetchSoftTags();
+      const existing = await handler.get(cacheKey, { kind: "FETCH", softTags });
+      if (existing?.value && existing.value.kind === "FETCH" && existing.cacheState !== "stale") {
+        try {
+          // Surface the cached entry's tags to the surrounding request so the
+          // enclosing page / route-handler ISR entry carries them even on a data
+          // cache HIT — otherwise `revalidateTag()` could not evict the rendered
+          // output that embeds this cached value (issue #1453).
+          propagateCacheTagsToRequest(existing.value.tags);
+          if (rsc && existing.value.data.headers[VINEXT_RSC_MARKER_HEADER] === "1") {
+            // RSC-serialized entry: base64 → bytes → stream → deserialize
+            const bytes = base64ToUint8(existing.value.data.body);
+            const stream = uint8ToStream(bytes);
+            const result = await rsc.createFromReadableStream<TResult>(stream);
+            recordRequestScopedCacheControl(existing.cacheControl);
+            return result;
+          }
+          // JSON-serialized entry (legacy or no RSC available)
+          const result = JSON.parse(existing.value.data.body);
           recordRequestScopedCacheControl(existing.cacheControl);
           return result;
+        } catch {
+          // Corrupted entry, fall through to re-execute
         }
-        // JSON-serialized entry (legacy or no RSC available)
-        const result = JSON.parse(existing.value.data.body);
-        recordRequestScopedCacheControl(existing.cacheControl);
-        return result;
-      } catch {
-        // Corrupted entry, fall through to re-execute
-      }
-    }
-
-    // Cache miss (or stale) — execute with context
-    const { result, ctx, effectiveLife } = await runCachedFunctionWithContext(
-      fn,
-      args,
-      cacheVariant,
-    );
-
-    recordRequestScopedCacheLife(effectiveLife);
-    // Bubble the cache scope's tags up to the surrounding request so the
-    // enclosing page / route-handler ISR entry is tagged for on-demand
-    // revalidation (issue #1453). `ctx.tags` already includes any nested
-    // child cache's tags via `runCachedFunctionWithContext`.
-    propagateCacheTagsToRequest(ctx.tags);
-    const revalidateSeconds =
-      effectiveLife.revalidate ?? cacheLifeProfiles.default.revalidate ?? 900;
-
-    // Store in cache — use RSC stream serialization when available (handles
-    // React elements, client refs, Promises, etc.), JSON otherwise.
-    try {
-      let body: string;
-      const headers: Record<string, string> = {};
-
-      if (rsc) {
-        // RSC serialization: result → stream → bytes → base64.
-        // No temporaryReferences — cached values must be self-contained
-        // since they're persisted across requests.
-        const stream = rsc.renderToReadableStream(result);
-        const bytes = await collectStream(stream);
-        body = uint8ToBase64(bytes);
-        headers[VINEXT_RSC_MARKER_HEADER] = "1";
-      } else {
-        // JSON fallback
-        body = JSON.stringify(result);
-        if (body === undefined) return result;
       }
 
-      const cacheValue = {
-        kind: "FETCH",
-        data: {
-          headers,
-          body,
-          url: cacheKey,
-        },
-        tags: ctx.tags,
-        revalidate: revalidateSeconds,
-      } satisfies CachedFetchValue;
+      // Cache miss (or stale) — execute with context
+      const { result, ctx, effectiveLife } = await runCachedFunctionWithContext(
+        fn,
+        args,
+        cacheVariant,
+      );
 
-      await handler.set(cacheKey, cacheValue, {
-        fetchCache: true,
-        tags: ctx.tags,
-        cacheControl: {
+      recordRequestScopedCacheLife(effectiveLife);
+      // Bubble the cache scope's tags up to the surrounding request so the
+      // enclosing page / route-handler ISR entry is tagged for on-demand
+      // revalidation (issue #1453). `ctx.tags` already includes any nested
+      // child cache's tags via `runCachedFunctionWithContext`.
+      propagateCacheTagsToRequest(ctx.tags);
+      const revalidateSeconds =
+        effectiveLife.revalidate ?? cacheLifeProfiles.default.revalidate ?? 900;
+
+      // Store in cache — use RSC stream serialization when available (handles
+      // React elements, client refs, Promises, etc.), JSON otherwise.
+      try {
+        let body: string;
+        const headers: Record<string, string> = {};
+
+        if (rsc) {
+          // RSC serialization: result → stream → bytes → base64.
+          // No temporaryReferences — cached values must be self-contained
+          // since they're persisted across requests.
+          const stream = rsc.renderToReadableStream(result);
+          const bytes = await collectStream(stream);
+          body = uint8ToBase64(bytes);
+          headers[VINEXT_RSC_MARKER_HEADER] = "1";
+        } else {
+          // JSON fallback
+          body = JSON.stringify(result);
+          if (body === undefined) return result;
+        }
+
+        const cacheValue = {
+          kind: "FETCH",
+          data: {
+            headers,
+            body,
+            url: cacheKey,
+          },
+          tags: ctx.tags,
           revalidate: revalidateSeconds,
-          expire: effectiveLife.expire,
-        },
-      });
-    } catch {
-      // Result not serializable — skip caching, still return the result
-    }
+        } satisfies CachedFetchValue;
 
-    return result;
-  };
+        await handler.set(cacheKey, cacheValue, {
+          fetchCache: true,
+          tags: ctx.tags,
+          cacheControl: {
+            revalidate: revalidateSeconds,
+            expire: effectiveLife.expire,
+          },
+        });
+      } catch {
+        // Result not serializable — skip caching, still return the result
+      }
+
+      return result;
+    }, cacheVariant);
 
   // Preserve the original function's arity on the wrapper. The wrapper is
   // declared as `(...args)` (arity 0), which hides the original signature.
