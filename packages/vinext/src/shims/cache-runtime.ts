@@ -510,7 +510,11 @@ export function registerCachedFunction<TArgs extends unknown[], TResult>(
   options: RegisterCachedFunctionOptions = {},
 ): (...args: TArgs) => Promise<TResult> {
   const cacheVariant = variant ?? "";
-  const omitAppPageSearchParamsFromFirstArg = options.appPageDefaultExport === true;
+  // Public cached pages intentionally omit searchParams because accessing them
+  // is invalid dynamic usage. Private cached pages allow searchParams, so they
+  // must remain in both the request-scoped key and isolated probe arguments.
+  const omitAppPageSearchParamsFromFirstArg =
+    options.appPageDefaultExport === true && cacheVariant !== "private";
 
   // In dev mode, skip the shared cache so code changes are immediately
   // visible after HMR. Without this, the MemoryCacheHandler returns stale

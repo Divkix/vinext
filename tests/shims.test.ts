@@ -5347,6 +5347,45 @@ describe('"use cache" runtime', () => {
     expect(r3).toEqual({ count: 2 });
   });
 
+  it("includes private cached page searchParams in the request-scoped key", async () => {
+    const { registerCachedFunction } =
+      await import("../packages/vinext/src/shims/cache-runtime.js");
+    const { makeThenableParams } = await import("../packages/vinext/src/shims/thenable-params.js");
+    const { createRequestContext, runWithRequestContext } =
+      await import("../packages/vinext/src/shims/unified-request-context.js");
+
+    let callCount = 0;
+    const cached = registerCachedFunction(
+      async (props: {
+        params: Promise<{ slug: string }>;
+        searchParams: Promise<{ q: string }>;
+      }) => {
+        callCount++;
+        return { q: (await props.searchParams).q };
+      },
+      "/fixture/app/private/page.tsx:default",
+      "private",
+      { appPageDefaultExport: true },
+    );
+
+    await runWithRequestContext(createRequestContext(), async () => {
+      await expect(
+        cached({
+          params: makeThenableParams({ slug: "same" }),
+          searchParams: makeThenableParams({ q: "first" }),
+        }),
+      ).resolves.toEqual({ q: "first" });
+      await expect(
+        cached({
+          params: makeThenableParams({ slug: "same" }),
+          searchParams: makeThenableParams({ q: "second" }),
+        }),
+      ).resolves.toEqual({ q: "second" });
+    });
+
+    expect(callCount).toBe(2);
+  });
+
   it("private variant marks prerender output dynamic", async () => {
     const { registerCachedFunction } =
       await import("../packages/vinext/src/shims/cache-runtime.js");
