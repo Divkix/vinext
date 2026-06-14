@@ -25,6 +25,7 @@ import type { EncodedArgsForProbe } from "vinext/shims/use-cache-probe-globals";
 import { UseCacheTimeoutError } from "vinext/shims/use-cache-errors";
 
 let _probeEnvironment: DevEnvironmentLike | DevEnvironment | null = null;
+const _activeProbeRunners = new Set<ModuleRunner>();
 
 /**
  * Initialize the probe pool with the Vite dev environment.
@@ -33,10 +34,13 @@ let _probeEnvironment: DevEnvironmentLike | DevEnvironment | null = null;
  * and re-called after each HMR teardown cycle.
  */
 export function initUseCacheProbePool(environment: DevEnvironmentLike | DevEnvironment): void {
-  if (_probeEnvironment) {
+  if (_probeEnvironment === environment) {
     // Guard against double-init within the same cycle (e.g., if
     // initUseCacheProbePool is called without a preceding teardown).
     return;
+  }
+  if (_probeEnvironment) {
+    tearDownUseCacheProbePool();
   }
   _probeEnvironment = environment;
 
@@ -51,6 +55,7 @@ export function initUseCacheProbePool(environment: DevEnvironmentLike | DevEnvir
     // createDirectRunner creates a fresh ModuleRunner with its own isolated
     // EvaluatedModules instance, which is exactly what we need for probes.
     const runner = createDirectRunner(env);
+    _activeProbeRunners.add(runner);
     const { id, kind, encodedArguments, request, timeoutMs } = msg;
 
     // Internal timeout so the probe aborts before the outer render timeout.
@@ -135,6 +140,7 @@ export function initUseCacheProbePool(environment: DevEnvironmentLike | DevEnvir
       return false;
     } finally {
       if (probeTimeoutTimer !== undefined) clearTimeout(probeTimeoutTimer);
+      _activeProbeRunners.delete(runner);
       runner.close().catch(() => {});
     }
   });
@@ -147,6 +153,10 @@ export function initUseCacheProbePool(environment: DevEnvironmentLike | DevEnvir
 export function tearDownUseCacheProbePool(): void {
   _probeEnvironment = null;
   setUseCacheProbe(undefined);
+  for (const runner of _activeProbeRunners) {
+    runner.close().catch(() => {});
+  }
+  _activeProbeRunners.clear();
 }
 
 /**

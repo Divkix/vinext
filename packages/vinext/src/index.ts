@@ -3077,6 +3077,10 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
           invalidateAppRouteCache();
           invalidateRscEntryModule();
           invalidateRootParamsModule();
+          await resetUseCacheProbePool();
+        }
+
+        async function resetUseCacheProbePool() {
           const { tearDownUseCacheProbePool, initUseCacheProbePool } = await getProbePoolModule();
           // Tear down the use-cache probe pool so the next probe starts with
           // fresh code after HMR invalidation.
@@ -3086,6 +3090,12 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
           if (rscEnv) {
             initUseCacheProbePool(rscEnv);
           }
+        }
+
+        function tearDownUseCacheProbePoolOnServerClose() {
+          void getProbePoolModule().then(({ tearDownUseCacheProbePool }) => {
+            tearDownUseCacheProbePool();
+          });
         }
 
         let appRouteTypeGeneration: Promise<void> | null = null;
@@ -3154,6 +3164,17 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
             regenerateAppRouteTypes();
           }
         });
+        server.watcher.on("change", (filePath: string) => {
+          if (
+            hasAppDir &&
+            isInsideDirectory(appDir, filePath) &&
+            fileMatcher.extensionRegex.test(filePath)
+          ) {
+            void resetUseCacheProbePool();
+          }
+        });
+        server.watcher.once("close", tearDownUseCacheProbePoolOnServerClose);
+        server.httpServer?.once("close", tearDownUseCacheProbePoolOnServerClose);
 
         // ── Dev request origin check ─────────────────────────────────────
         // Registered directly (not in the returned function) so it runs
