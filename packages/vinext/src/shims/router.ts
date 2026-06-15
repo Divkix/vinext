@@ -364,6 +364,8 @@ export type NextRouter = {
 type UrlObject = {
   pathname?: string;
   query?: UrlQuery;
+  search?: string;
+  hash?: string;
 };
 
 type TransitionOptions = {
@@ -481,10 +483,30 @@ function getPagesRouterRuntimeComponents(): PagesRouterRuntimeComponents {
 
 function resolveUrl(url: string | UrlObject): string {
   if (typeof url === "string") return url;
-  let result = url.pathname ?? "/";
-  if (url.query) {
-    const params = urlQueryToSearchParams(url.query);
+  const hasQuery = url.query !== undefined && Object.keys(url.query).length > 0;
+  const hasSearch = typeof url.search === "string" && url.search.length > 0;
+  const hasHash = typeof url.hash === "string" && url.hash.length > 0;
+  const inheritsVisiblePath = url.pathname === undefined && (hasQuery || hasSearch || hasHash);
+  let result =
+    url.pathname ??
+    (typeof window !== "undefined"
+      ? inheritsVisiblePath
+        ? stripBasePath(window.location.pathname, __basePath)
+        : (window.__NEXT_DATA__?.page ?? stripBasePath(window.location.pathname, __basePath))
+      : "/");
+  if (hasSearch) {
+    const search = url.search!.startsWith("?") ? url.search! : `?${url.search}`;
+    const hashIndex = search.indexOf("#");
+    result +=
+      hashIndex === -1 ? search : `${search.slice(0, hashIndex)}%23${search.slice(hashIndex + 1)}`;
+  } else if (hasQuery) {
+    const params = urlQueryToSearchParams(url.query!);
     result = appendSearchParamsToUrl(result, params);
+  } else if (hasHash && typeof window !== "undefined") {
+    result += window.location.search;
+  }
+  if (hasHash) {
+    result += url.hash!.startsWith("#") ? url.hash : `#${url.hash}`;
   }
   return result;
 }
@@ -502,8 +524,9 @@ function resolveNavigationTarget(
   url: string | UrlObject,
   as: string | undefined,
   locale: string | undefined,
+  replaceExistingLocale = false,
 ): string {
-  return applyNavigationLocale(as ?? resolveUrl(url), locale);
+  return applyNavigationLocale(as ?? resolveUrl(url), locale, replaceExistingLocale);
 }
 
 function getCurrentUrlLocale(): string | undefined {
@@ -588,21 +611,41 @@ function getDomainLocalePath(url: string, locale: string): string | undefined {
  * Apply locale prefix to a URL for client-side navigation.
  * Same logic as Link's applyLocaleToHref but reads from window globals.
  */
-export function applyNavigationLocale(url: string, locale?: string): string {
+export function applyNavigationLocale(
+  url: string,
+  locale?: string,
+  replaceExistingLocale = false,
+): string {
   if (!locale || typeof window === "undefined") return url;
   // Absolute and protocol-relative URLs must not be prefixed — locale
   // only applies to local paths.
   if (isAbsoluteOrProtocolRelativeUrl(url)) {
     return url;
   }
-  if (getLocalePathPrefix(url, window.__VINEXT_LOCALES__)) {
+  if (!replaceExistingLocale && getLocalePathPrefix(url, window.__VINEXT_LOCALES__)) {
     return url;
   }
+  const normalizedUrl = replaceExistingLocale ? removeNavigationLocalePrefix(url) : url;
 
-  const domainLocalePath = getDomainLocalePath(url, locale);
+  const domainLocalePath = getDomainLocalePath(normalizedUrl, locale);
   if (domainLocalePath) return domainLocalePath;
 
-  return addLocalePrefix(url, locale, window.__VINEXT_DEFAULT_LOCALE__ ?? "");
+  return addLocalePrefix(normalizedUrl, locale, window.__VINEXT_DEFAULT_LOCALE__ ?? "");
+}
+
+function removeNavigationLocalePrefix(url: string): string {
+  const locales = window.__VINEXT_LOCALES__;
+  if (!locales?.length) return url;
+
+  try {
+    const parsed = new URL(url, "http://vinext.local");
+    const locale = getLocalePathPrefix(parsed.pathname, locales);
+    if (!locale) return url;
+    const pathname = parsed.pathname.slice(locale.length + 1) || "/";
+    return `${pathname}${parsed.search}${parsed.hash}`;
+  } catch {
+    return url;
+  }
 }
 
 function isDefaultLocaleRootNavigation(url: string, locale: string | undefined): boolean {
@@ -1148,8 +1191,30 @@ function getPathnameAndQuery(): {
   }
   const query = { ...searchQuery, ...routeQuery };
   // asPath uses the resolved browser path, not the route pattern
-  const asPath = resolvedPath + window.location.search + window.location.hash;
+  const asPath =
+    getCurrentHistoryAsPath() ?? resolvedPath + window.location.search + window.location.hash;
   return { pathname, query, asPath };
+}
+
+function getCurrentHistoryAsPath(): string | null {
+  const state = window.history?.state;
+  if (!isNextRouterState(state) || typeof state.as !== "string") return null;
+
+  try {
+    const browserUrl = new URL(window.location.href);
+    const stateUrl = new URL(
+      toBrowserNavigationHref(state.as, window.location.href, __basePath),
+      window.location.href,
+    );
+    if (stateUrl.pathname !== browserUrl.pathname || stateUrl.search !== browserUrl.search) {
+      return null;
+    }
+    const stateAs = stripHash(state.as);
+    const visibleAs = `${stripBasePath(window.location.pathname, __basePath)}${window.location.search}`;
+    return `${stateAs || visibleAs}${window.location.hash}`;
+  } catch {
+    return null;
+  }
 }
 
 export function getPagesNavigationIsReadyFromSerializedState(
@@ -2215,7 +2280,15 @@ async function performNavigation(
   }
 
   const navigationLocale = resolveTransitionLocale(options?.locale);
-  let resolved = resolveNavigationTarget(url, as, navigationLocale);
+  const replaceInheritedLocale =
+    as === undefined &&
+    options?.locale !== undefined &&
+    typeof url !== "string" &&
+    url.pathname === undefined &&
+    ((url.query !== undefined && Object.keys(url.query).length > 0) ||
+      (typeof url.search === "string" && url.search.length > 0) ||
+      (typeof url.hash === "string" && url.hash.length > 0));
+  let resolved = resolveNavigationTarget(url, as, navigationLocale, replaceInheritedLocale);
 
   // External URLs — delegate to browser (unless same-origin)
   if (isExternalUrl(resolved)) {
