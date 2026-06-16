@@ -18,7 +18,10 @@ import {
   processMiddlewareHeaders,
   VINEXT_INTERNAL_HEADERS,
 } from "../packages/vinext/src/server/request-pipeline.js";
-import { VINEXT_PRERENDER_ROUTE_PARAMS_HEADER } from "../packages/vinext/src/server/headers.js";
+import {
+  VINEXT_PRERENDER_ROUTE_PARAMS_HEADER,
+  VINEXT_IMPLICIT_TAGS_HEADER,
+} from "../packages/vinext/src/server/headers.js";
 import { buildRequestHeadersFromMiddlewareResponse } from "../packages/vinext/src/server/middleware-request-headers.js";
 
 // ── guardProtocolRelativeUrl ────────────────────────────────────────────
@@ -785,14 +788,22 @@ describe("filterInternalHeaders", () => {
   it("strips vinext-only internal headers without extending Next.js INTERNAL_HEADERS", () => {
     const headers = new Headers({
       [VINEXT_PRERENDER_ROUTE_PARAMS_HEADER]: "forged",
+      // #1984: x-vinext-implicit-tags is a response-only signal; a forged inbound
+      // value must be stripped too.
+      [VINEXT_IMPLICIT_TAGS_HEADER]: "forged",
       "user-agent": "test",
     });
 
     const result = filterInternalHeaders(headers);
 
     expect(INTERNAL_HEADERS).not.toContain(VINEXT_PRERENDER_ROUTE_PARAMS_HEADER);
-    expect(VINEXT_INTERNAL_HEADERS).toEqual([VINEXT_PRERENDER_ROUTE_PARAMS_HEADER]);
+    expect(INTERNAL_HEADERS).not.toContain(VINEXT_IMPLICIT_TAGS_HEADER);
+    expect(VINEXT_INTERNAL_HEADERS).toEqual([
+      VINEXT_PRERENDER_ROUTE_PARAMS_HEADER,
+      VINEXT_IMPLICIT_TAGS_HEADER,
+    ]);
     expect(result.has(VINEXT_PRERENDER_ROUTE_PARAMS_HEADER)).toBe(false);
+    expect(result.has(VINEXT_IMPLICIT_TAGS_HEADER)).toBe(false);
     expect(result.get("user-agent")).toBe("test");
   });
 

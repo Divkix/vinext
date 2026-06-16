@@ -129,6 +129,14 @@ export type PrerenderRouteResult =
       router: "app" | "pages";
       /** Set to true when this is a PPR fallback shell. */
       fallback?: boolean;
+      /**
+       * Raw filesystem route segments (incl. route groups + dynamic brackets),
+       * mirroring `AppRoute.routeSegments`. App Router only; omitted for Pages
+       * Router and for the root route (empty segments). Persisted into
+       * `vinext-prerender.json` so cache seeding can build the SAME implicit tag
+       * set the live render emits (#1984).
+       */
+      routeSegments?: string[];
     }
   | {
       route: string;
@@ -1107,6 +1115,12 @@ export async function prerenderApp({
       urlPath: string;
       /** The file-system route pattern this URL was expanded from (e.g. `/blog/:slug`). */
       routePattern: string;
+      /**
+       * Raw filesystem route segments (incl. route groups + dynamic brackets),
+       * carried so the rendered manifest entry can record the same segments the
+       * live render uses for implicit tags (#1984).
+       */
+      routeSegments: string[];
       prerenderRouteParams: PrerenderRouteParamsPayload | null;
       revalidate: number | false;
       isSpeculative: boolean; // 'unknown' route — mark skipped if render fails
@@ -1261,6 +1275,7 @@ export async function prerenderApp({
             urlsToRender.push({
               urlPath,
               routePattern: route.pattern,
+              routeSegments: route.routeSegments,
               prerenderRouteParams: encodePrerenderRouteParams(route.pattern, params),
               revalidate,
               isSpeculative: false,
@@ -1280,6 +1295,7 @@ export async function prerenderApp({
                 urlsToRender.push({
                   urlPath: fallbackShell.pathname,
                   routePattern: route.pattern,
+                  routeSegments: route.routeSegments,
                   prerenderRouteParams: encodePrerenderRouteParams(
                     route.pattern,
                     fallbackShell.params,
@@ -1311,6 +1327,7 @@ export async function prerenderApp({
         urlsToRender.push({
           urlPath: route.pattern,
           routePattern: route.pattern,
+          routeSegments: route.routeSegments,
           prerenderRouteParams: null,
           revalidate: false,
           isSpeculative: true,
@@ -1320,6 +1337,7 @@ export async function prerenderApp({
         urlsToRender.push({
           urlPath: route.pattern,
           routePattern: route.pattern,
+          routeSegments: route.routeSegments,
           prerenderRouteParams: null,
           revalidate,
           isSpeculative: false,
@@ -1338,6 +1356,7 @@ export async function prerenderApp({
     async function renderUrl({
       urlPath,
       routePattern,
+      routeSegments,
       prerenderRouteParams,
       revalidate,
       isSpeculative,
@@ -1489,6 +1508,10 @@ export async function prerenderApp({
           router: "app",
           ...(urlPath !== routePattern ? { path: urlPath } : {}),
           ...(isFallback ? { fallback: true } : {}),
+          // #1984: record the route's filesystem segments so cache seeding can
+          // derive the same bracketed implicit tags the live render emits.
+          // Omitted when empty (root route) — seed-cache falls back correctly.
+          ...(routeSegments.length > 0 ? { routeSegments } : {}),
         };
       } catch (e) {
         if (isSpeculative) {
@@ -1642,6 +1665,9 @@ export function writePrerenderIndex(
         router: r.router,
         ...(r.path ? { path: r.path } : {}),
         ...(r.fallback ? { fallback: true } : {}),
+        ...(r.routeSegments && r.routeSegments.length > 0
+          ? { routeSegments: r.routeSegments }
+          : {}),
       };
     }
     if (r.status === "skipped") {

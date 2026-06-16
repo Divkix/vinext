@@ -93,6 +93,7 @@ import type { AppPageSsrHandler } from "./app-page-stream.js";
 import type { ClientReuseManifestParseResult } from "./client-reuse-manifest.js";
 import { createStaticGenerationHeadersContext } from "./app-static-generation.js";
 import { buildAppPageTags } from "./implicit-tags.js";
+import { VINEXT_IMPLICIT_TAGS_HEADER, VINEXT_TPR_USER_AGENT } from "./headers.js";
 import type { ISRCacheEntry } from "./isr-cache.js";
 import {
   createAppLayoutParamAccessTracker,
@@ -660,6 +661,31 @@ async function dispatchAppPageInner<TRoute extends AppPageDispatchRoute>(
   setCurrentFetchCacheMode(options.fetchCache ?? null);
   setCurrentForceDynamicFetchDefault(isForceDynamic);
 
+  // #1984: TPR drives this prod server over HTTP to pre-render popular pages for
+  // KV. So its uploaded entries are reachable by the same tag-based invalidation
+  // as live ISR, surface the page's implicit tag set (the exact set the live
+  // render emits — including bracketed `_N_T_/posts/[slug]/page` pattern tags)
+  // as an internal-only response header the TPR uploader reads back verbatim.
+  // Gated strictly to the TPR User-Agent so it never reaches real clients, and
+  // applied to BOTH the cache-HIT and fresh-render responses below (a HIT of a
+  // build-seeded entry carries no tags on the response otherwise). On a HIT no
+  // fetches run so getCollectedFetchTags() is empty, matching the seeded entry's
+  // own path/route tag set.
+  const decorateInternalImplicitTags = (response: Response): Response => {
+    if (options.request.headers.get("user-agent") !== VINEXT_TPR_USER_AGENT) {
+      return response;
+    }
+    const tags = buildAppPageTags(
+      options.cleanPathname,
+      getCollectedFetchTags(),
+      route.routeSegments,
+    );
+    if (tags.length > 0) {
+      response.headers.set(VINEXT_IMPLICIT_TAGS_HEADER, tags.map(encodeURIComponent).join(","));
+    }
+    return response;
+  };
+
   if (options.hasPageModule && !options.hasPageDefaultExport) {
     options.clearRequestContext();
     return new Response("Page has no default export", { status: 500 });
@@ -834,7 +860,7 @@ async function dispatchAppPageInner<TRoute extends AppPageDispatchRoute>(
       },
     });
     if (cachedPageResponse) {
-      return cachedPageResponse;
+      return decorateInternalImplicitTags(cachedPageResponse);
     }
   }
 
@@ -1020,7 +1046,7 @@ async function dispatchAppPageInner<TRoute extends AppPageDispatchRoute>(
   const pprFallbackShellSignal = activeFallbackShellState?.abortController.signal;
   const pprFallbackShellReactSignal = activeFallbackShellState?.reactAbortController.signal;
 
-  return renderAppPageLifecycle({
+  const lifecycleResponse = await renderAppPageLifecycle({
     basePath: options.basePath,
     clientTraceMetadata: options.clientTraceMetadata,
     reactMaxHeadersLength: options.reactMaxHeadersLength,
@@ -1148,6 +1174,8 @@ async function dispatchAppPageInner<TRoute extends AppPageDispatchRoute>(
       getRequestExecutionContext()?.waitUntil(cachePromise);
     },
   });
+
+  return decorateInternalImplicitTags(lifecycleResponse);
 }
 
 /**
