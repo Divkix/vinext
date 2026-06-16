@@ -9,7 +9,7 @@ import { VINEXT_RSC_REDIRECT_HEADER } from "./headers.js";
 import { applyEdgeRuntimeHeader } from "./app-page-response.js";
 import { mergeMiddlewareResponseHeaders } from "./middleware-response-headers.js";
 import { parseNextHttpErrorDigest, parseNextRedirectDigest } from "./next-error-digest.js";
-import { renderSsrErrorMetaTags } from "./app-ssr-error-meta.js";
+import { renderRedirectRefreshMetaTag } from "./app-ssr-error-meta.js";
 import { addBasePathToPathname } from "../utils/base-path.js";
 import { isPromiseLike } from "../utils/promise.js";
 import { runWithConnectionProbe } from "vinext/shims/headers";
@@ -298,7 +298,8 @@ function sameOriginPathOrAbsolute(location: string, requestUrl: string): string 
 }
 
 function buildMetadataRedirectHtmlResponse(options: {
-  digest: string;
+  url: string;
+  statusCode: number;
   getAndClearPendingCookies?: () => string[];
   isEdgeRuntime?: boolean;
   middlewareContext?: { headers: Headers | null };
@@ -314,7 +315,10 @@ function buildMetadataRedirectHtmlResponse(options: {
     headers.append("Set-Cookie", cookie);
   }
 
-  const errorMetaTags = renderSsrErrorMetaTags([{ digest: options.digest }]);
+  // Render the refresh tag straight from the already-resolved redirect URL.
+  // Re-deriving it from a NEXT_REDIRECT digest would double-decode percent
+  // escapes and truncate URLs containing ';'. See renderRedirectRefreshMetaTag.
+  const errorMetaTags = renderRedirectRefreshMetaTag(options.url, options.statusCode);
   // Intentional divergence from Next.js: Next.js inserts the redirect meta tag
   // into the otherwise fully-rendered streamed document, whereas we emit a
   // minimal stub (refresh meta tag, empty body). For a redirect this is
@@ -350,7 +354,8 @@ export async function buildAppPageSpecialErrorResponse(
       options.serveStreamingMetadata !== false
     ) {
       return buildMetadataRedirectHtmlResponse({
-        digest,
+        url: digestUrl,
+        statusCode: options.specialError.statusCode,
         getAndClearPendingCookies: options.getAndClearPendingCookies,
         isEdgeRuntime: options.isEdgeRuntime,
         middlewareContext: options.middlewareContext,
