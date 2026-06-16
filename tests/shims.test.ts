@@ -17806,10 +17806,11 @@ describe("next/image enhancements", () => {
       height: 600,
       priority: true,
     });
-    // Local images now route through the optimization endpoint
+    // Local images now route through the optimization endpoint. With no `sizes`,
+    // the fallback src uses the largest x-descriptor candidate (800*2 → 1920).
     expect(result.props.src).toContain("/_next/image");
     expect(result.props.src).toContain("url=%2Fphoto.jpg");
-    expect(result.props.src).toContain("w=800");
+    expect(result.props.src).toContain("w=1920");
     expect(result.props.alt).toBe("Test");
     expect(result.props.width).toBe(800);
     expect(result.props.height).toBe(600);
@@ -17834,9 +17835,11 @@ describe("next/image enhancements", () => {
       src: { src: "/imported.jpg", width: 1200, height: 800, blurDataURL: "data:..." },
       alt: "Imported",
     });
+    // No `sizes` → fallback src uses the largest x-descriptor candidate.
+    // [1200, 2400] quantized up → [1200, 3840] (2400 > 2048, so it clamps to 3840).
     expect(result.props.src).toContain("/_next/image");
     expect(result.props.src).toContain("url=%2Fimported.jpg");
-    expect(result.props.src).toContain("w=1200");
+    expect(result.props.src).toContain("w=3840");
     expect(result.props.width).toBe(1200);
     expect(result.props.height).toBe(800);
   });

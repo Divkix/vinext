@@ -65,8 +65,10 @@ describe("Image SSR rendering", () => {
       }),
     );
     expect(html).toContain('alt="a nice image"');
-    // Local images are routed through the optimization endpoint
-    expect(html).toContain(`src="${optUrlHtml("/test.png", 100)}"`);
+    // Local images are routed through the optimization endpoint. With no `sizes`
+    // and a numeric width, the fallback src uses the largest x-descriptor
+    // candidate (width*2 → 256), matching Next.js (src = loader(widths[last])).
+    expect(html).toContain(`src="${optUrlHtml("/test.png", 256)}"`);
     expect(html).toContain('width="100"');
     expect(html).toContain('height="100"');
     expect(html).toContain('decoding="async"');
@@ -90,7 +92,10 @@ describe("Image SSR rendering", () => {
     expect(html).toContain('<link rel="preload"');
     expect(html).toContain('as="image"');
     expect(html).toContain('fetchPriority="high"');
-    expect(html).toContain(`imageSrcSet="${optUrlHtml("/hero.png", 640)} 640w`);
+    // No `sizes` → x-descriptor srcSet (width 800 → [828, 1920]).
+    expect(html).toContain(
+      `imageSrcSet="${optUrlHtml("/hero.png", 828)} 1x, ${optUrlHtml("/hero.png", 1920)} 2x"`,
+    );
     expect(html).not.toContain(`href="${optUrlHtml("/hero.png", 800)}"`);
     expect(html).toContain('loading="eager"');
     expect(html).toContain('fetchPriority="high"');
@@ -109,7 +114,9 @@ describe("Image SSR rendering", () => {
     );
     expect(html).toContain('<link rel="preload"');
     expect(html).toContain('as="image"');
-    expect(html).toContain(`imageSrcSet="${optUrlHtml("/hero-preload.png", 640)} 640w`);
+    expect(html).toContain(
+      `imageSrcSet="${optUrlHtml("/hero-preload.png", 828)} 1x, ${optUrlHtml("/hero-preload.png", 1920)} 2x"`,
+    );
     expect(html).not.toContain('loading="lazy"');
     expect(html).not.toContain('fetchPriority="high"');
   });
@@ -214,7 +221,8 @@ describe("Image SSR rendering", () => {
         placeholder: "blur",
       }),
     );
-    expect(html).toContain(`src="${optUrlHtml("/_next/static/media/test.abc123.png", 800)}"`);
+    // No `sizes` → fallback src uses the largest x-descriptor candidate (800*2 → 1920).
+    expect(html).toContain(`src="${optUrlHtml("/_next/static/media/test.abc123.png", 1920)}"`);
 
     expect(html).toContain('width="800"');
     expect(html).toContain('height="600"');
@@ -287,17 +295,17 @@ describe("Image srcSet generation", () => {
         height: 400,
       }),
     );
-    // RESPONSIVE_WIDTHS = [640, 750, 828, 1080, 1200, 1920, 2048, 3840]
-    // Filter: widths <= 500 * 2 = 1000 → [640, 750, 828]
+    // No `sizes` + numeric width → x-descriptor srcSet (mirrors Next.js getWidths).
+    // allSizes = [16,32,48,64,96,128,256,384,640,750,828,1080,1200,1920,2048,3840]
+    // [500, 1000] quantized up → [640, 1080], emitted as 1x / 2x.
     expect(html).toContain("srcSet");
-    expect(html).toContain(`${optUrlHtml("/photo.png", 640)} 640w`);
-    expect(html).toContain(`${optUrlHtml("/photo.png", 750)} 750w`);
-    expect(html).toContain(`${optUrlHtml("/photo.png", 828)} 828w`);
-    // Should not include widths > 1000
-    expect(html).not.toContain("1080w");
+    expect(html).toContain(`${optUrlHtml("/photo.png", 640)} 1x`);
+    expect(html).toContain(`${optUrlHtml("/photo.png", 1080)} 2x`);
+    // No w-descriptors when there is no `sizes` prop.
+    expect(html).not.toContain("640w");
   });
 
-  it("generates srcSet with all widths for large images", () => {
+  it("generates an x-descriptor srcSet for large images", () => {
     const html = ReactDOMServer.renderToString(
       React.createElement(Image, {
         alt: "test",
@@ -306,12 +314,12 @@ describe("Image srcSet generation", () => {
         height: 1500,
       }),
     );
-    // widths <= 4000: all of them
-    expect(html).toContain(`${optUrlHtml("/large.png", 640)} 640w`);
-    expect(html).toContain(`${optUrlHtml("/large.png", 3840)} 3840w`);
+    // [2000, 4000] quantized up → [2048, 3840] (4000 clamps to the largest size).
+    expect(html).toContain(`${optUrlHtml("/large.png", 2048)} 1x`);
+    expect(html).toContain(`${optUrlHtml("/large.png", 3840)} 2x`);
   });
 
-  it("generates fallback srcSet for very small images", () => {
+  it("generates an x-descriptor srcSet for very small images", () => {
     const html = ReactDOMServer.renderToString(
       React.createElement(Image, {
         alt: "tiny",
@@ -320,9 +328,9 @@ describe("Image srcSet generation", () => {
         height: 16,
       }),
     );
-    // widths <= 32: none of RESPONSIVE_WIDTHS qualify
-    // Falls back to single: optimized icon.png at 16w
-    expect(html).toContain(`${optUrlHtml("/icon.png", 16)} 16w`);
+    // [16, 32] map onto the small imageSizes → 16 (1x) / 32 (2x).
+    expect(html).toContain(`${optUrlHtml("/icon.png", 16)} 1x`);
+    expect(html).toContain(`${optUrlHtml("/icon.png", 32)} 2x`);
   });
 
   it("does not generate srcSet for fill mode", () => {
@@ -335,6 +343,30 @@ describe("Image srcSet generation", () => {
     );
     // Fill mode: no srcSet (srcSet is only for local non-fill images with width)
     expect(html).not.toContain("srcSet");
+  });
+
+  // Regression for issue #1966 — port of Next.js
+  // test/unit/next-image-get-img-props.test.ts (width:100, height:200, no sizes).
+  // A fixed-size image with no `sizes` must emit a 1x/2x x-descriptor srcSet and
+  // leave `sizes` undefined. A w-descriptor srcSet with no `sizes` defaults to
+  // sizes=100vw per the HTML spec, which over-fetches a viewport-sized image.
+  it("emits a 1x/2x x-descriptor srcSet and no sizes for fixed images (#1966)", () => {
+    const html = ReactDOMServer.renderToString(
+      React.createElement(Image, {
+        alt: "fixed",
+        src: "/fixed.png",
+        width: 100,
+        height: 200,
+      }),
+    );
+    // [100, 200] quantized up against allSizes → [128, 256], emitted as 1x / 2x.
+    expect(html).toContain(
+      `srcSet="${optUrlHtml("/fixed.png", 128)} 1x, ${optUrlHtml("/fixed.png", 256)} 2x"`,
+    );
+    // Fallback src uses the largest candidate (256) — always an allowed width.
+    expect(html).toContain(`src="${optUrlHtml("/fixed.png", 256)}"`);
+    // No `sizes` attribute (it must NOT default to 100vw for fixed images).
+    expect(html).not.toContain("sizes=");
   });
 });
 
@@ -350,7 +382,8 @@ describe("getImageProps", () => {
     });
 
     expect(props.alt).toBe("a nice desc");
-    expect(props.src).toBe(optUrl("/test.png", 100));
+    // No `sizes` → src is the largest x-descriptor candidate (width*2 → 256).
+    expect(props.src).toBe(optUrl("/test.png", 256));
     expect(props.width).toBe(100);
     expect(props.height).toBe(200);
     expect(props.loading).toBe("lazy");
@@ -453,7 +486,8 @@ describe("getImageProps", () => {
       src: staticImage,
     });
 
-    expect(props.src).toBe(optUrl("/static/photo.png", 1920));
+    // No `sizes` → src is the largest x-descriptor candidate ([1920, 3840] → 3840).
+    expect(props.src).toBe(optUrl("/static/photo.png", 3840));
     expect(props.width).toBe(1920);
     expect(props.height).toBe(1080);
   });
@@ -477,10 +511,8 @@ describe("getImageProps", () => {
       height: 600,
     });
 
-    expect(props.srcSet).toBeDefined();
-    expect(props.srcSet).toContain("/_next/image");
-    expect(props.srcSet).toContain("photo.png");
-    expect(props.srcSet).toContain("w");
+    // No `sizes` + numeric width → x-descriptor srcSet ([800, 1600] → [828, 1920]).
+    expect(props.srcSet).toBe(`${optUrl("/photo.png", 828)} 1x, ${optUrl("/photo.png", 1920)} 2x`);
   });
 
   it("handles loading=eager prop", () => {

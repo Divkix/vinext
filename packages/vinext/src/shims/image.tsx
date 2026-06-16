@@ -54,6 +54,13 @@ const __imageDeviceSizes: number[] = (() => {
     return [640, 750, 828, 1080, 1200, 1920, 2048, 3840];
   }
 })();
+const __imageSizes: number[] = (() => {
+  try {
+    return JSON.parse(process.env.__VINEXT_IMAGE_SIZES ?? "[16,32,48,64,96,128,256,384]");
+  } catch {
+    return [16, 32, 48, 64, 96, 128, 256, 384];
+  }
+})();
 /**
  * Whether dangerouslyAllowSVG is enabled in next.config.js.
  * When false (default), .svg sources auto-skip the optimization endpoint
@@ -272,6 +279,14 @@ function resolveImageSource(v: {
 const RESPONSIVE_WIDTHS = __imageDeviceSizes;
 
 /**
+ * All allowed image widths (deviceSizes ∪ imageSizes), sorted ascending.
+ * Mirrors Next.js's `ImageConfigComplete.allSizes`. Used to quantize the
+ * `x`-descriptor widths for fixed-size images so they land on a size the
+ * optimization endpoint actually accepts.
+ */
+const ALL_SIZES = [...__imageDeviceSizes, ...__imageSizes].sort((a, b) => a - b);
+
+/**
  * Build a `/_next/image` optimization URL.
  *
  * In production (Cloudflare Workers), the worker intercepts this path and uses
@@ -300,17 +315,53 @@ function preloadImageResource(input: {
 }
 
 /**
- * Generate a srcSet string for responsive images.
+ * Pick the concrete widths and descriptor kind for a fixed-size image,
+ * mirroring Next.js's `getWidths` (get-img-props.ts).
  *
- * Each width points to the `/_next/image` optimization endpoint so the
- * server can resize and transcode the image. Only includes widths that are
- * <= 2x the original image width to avoid pointless upscaling.
+ * - With a `sizes` prop, the browser selects from the rendered size, so we emit
+ *   a `w`-descriptor srcSet of device widths (<= 2x the intrinsic width).
+ * - Without `sizes`, a `w`-descriptor srcSet would default to `sizes=100vw` per
+ *   the HTML spec and over-fetch a viewport-sized image. Instead we emit an
+ *   `x`-descriptor srcSet: `[width, width*2]` quantized up to the nearest
+ *   allowed size, so high-DPR screens get the 2x image and everyone else the 1x.
  */
-function generateSrcSet(src: string, originalWidth: number, quality: number = 75): string {
-  const widths = RESPONSIVE_WIDTHS.filter((w) => w <= originalWidth * 2);
-  if (widths.length === 0)
-    return `${imageOptimizationUrl(src, originalWidth, quality)} ${originalWidth}w`;
-  return widths.map((w) => `${imageOptimizationUrl(src, w, quality)} ${w}w`).join(", ");
+function getImageWidths(
+  originalWidth: number,
+  sizes?: string,
+): { widths: number[]; kind: "w" | "x" } {
+  if (sizes) {
+    const widths = RESPONSIVE_WIDTHS.filter((w) => w <= originalWidth * 2);
+    return { widths: widths.length ? widths : [originalWidth], kind: "w" };
+  }
+  const largest = ALL_SIZES[ALL_SIZES.length - 1];
+  const widths = [
+    ...new Set(
+      [originalWidth, originalWidth * 2].map((w) => ALL_SIZES.find((p) => p >= w) ?? largest),
+    ),
+  ];
+  return { widths, kind: "x" };
+}
+
+/**
+ * Build the `srcSet` and the fallback `src` for a fixed-size local image.
+ *
+ * Every width points to the `/_next/image` optimization endpoint. The fallback
+ * `src` uses the largest candidate (Next.js sets `src = loader(widths[last])`)
+ * so it is always an allowed width — the declared width may not be.
+ */
+function buildResponsiveSrc(
+  src: string,
+  originalWidth: number,
+  quality: number = 75,
+  sizes?: string,
+): { srcSet: string; src: string } {
+  const { widths, kind } = getImageWidths(originalWidth, sizes);
+  const srcSet = widths
+    .map(
+      (w, i) => `${imageOptimizationUrl(src, w, quality)} ${kind === "w" ? `${w}w` : `${i + 1}x`}`,
+    )
+    .join(", ");
+  return { srcSet, src: imageOptimizationUrl(src, widths[widths.length - 1], quality) };
 }
 
 const Image = forwardRef<HTMLImageElement, ImageProps>(function Image(
@@ -607,24 +658,32 @@ const Image = forwardRef<HTMLImageElement, ImageProps>(function Image(
   const isSvg = isSvgUrl(src);
   const skipOptimization = _unoptimized === true || (isSvg && !__dangerouslyAllowSVG);
 
-  // Build srcSet for responsive local images (common breakpoints).
-  // Each entry points to /_next/image with the appropriate width.
-  const srcSet =
+  // Build srcSet + optimized src for fixed-size local images, mirroring Next.js
+  // (x-descriptor when no `sizes`, w-descriptor when `sizes` is present). Both
+  // the srcSet and the fallback src come from the same computed widths so the
+  // src lands on an allowed width.
+  const fixedOptimized =
     imgWidth && !fill && !skipOptimization
-      ? generateSrcSet(src, imgWidth, imgQuality)
-      : imgWidth && !fill
-        ? RESPONSIVE_WIDTHS.filter((w) => w <= imgWidth * 2)
-            .map((w) => `${src} ${w}w`)
-            .join(", ") || `${src} ${imgWidth}w`
-        : undefined;
+      ? buildResponsiveSrc(src, imgWidth, imgQuality, sizes)
+      : null;
+  const srcSet = fixedOptimized
+    ? fixedOptimized.srcSet
+    : imgWidth && !fill
+      ? RESPONSIVE_WIDTHS.filter((w) => w <= imgWidth * 2)
+          .map((w) => `${src} ${w}w`)
+          .join(", ") || `${src} ${imgWidth}w`
+      : undefined;
 
-  // The main `src` also goes through the optimization endpoint. Use the
-  // declared width (or the first responsive width as fallback).
+  // The main `src` also goes through the optimization endpoint. For fixed-size
+  // images use the largest srcSet candidate (Next.js parity); otherwise fall
+  // back to the declared width (or the first responsive width).
   const optimizedSrc = skipOptimization
     ? src
-    : imgWidth
-      ? imageOptimizationUrl(src, imgWidth, imgQuality)
-      : imageOptimizationUrl(src, RESPONSIVE_WIDTHS[0], imgQuality);
+    : fixedOptimized
+      ? fixedOptimized.src
+      : imgWidth
+        ? imageOptimizationUrl(src, imgWidth, imgQuality)
+        : imageOptimizationUrl(src, RESPONSIVE_WIDTHS[0], imgQuality);
 
   // Blur placeholder: show a low-quality background while the image loads.
   // Sanitize blurDataURL to prevent CSS injection via crafted data URLs.
@@ -742,17 +801,22 @@ export function getImageProps(props: ImageProps): {
     blockedInProd ||
     !!loader ||
     isRemoteUrl(resolvedSrc);
+  // For fixed-size local images, compute srcSet + the largest-candidate src
+  // together (Next.js parity), so the fallback src lands on an allowed width.
+  const fixedOptimized =
+    imgWidth && !fill && !isRemoteUrl(resolvedSrc) && !loader && !skipOpt
+      ? buildResponsiveSrc(resolvedSrc, imgWidth, imgQuality, sizes)
+      : null;
   const optimizedSrc = skipOpt
     ? resolvedSrc
-    : imgWidth
-      ? imageOptimizationUrl(resolvedSrc, imgWidth, imgQuality)
-      : imageOptimizationUrl(resolvedSrc, RESPONSIVE_WIDTHS[0], imgQuality);
+    : fixedOptimized
+      ? fixedOptimized.src
+      : imgWidth
+        ? imageOptimizationUrl(resolvedSrc, imgWidth, imgQuality)
+        : imageOptimizationUrl(resolvedSrc, RESPONSIVE_WIDTHS[0], imgQuality);
 
   // Build srcSet for local images — each width points to /_next/image
-  const srcSet =
-    imgWidth && !fill && !isRemoteUrl(resolvedSrc) && !loader && !skipOpt
-      ? generateSrcSet(resolvedSrc, imgWidth, imgQuality)
-      : undefined;
+  const srcSet = fixedOptimized ? fixedOptimized.srcSet : undefined;
 
   // Blur placeholder styles — sanitize to prevent CSS injection
   const sanitizedBlurURL = imgBlurDataURL ? sanitizeBlurDataURL(imgBlurDataURL) : undefined;
