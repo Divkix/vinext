@@ -56,7 +56,7 @@ import {
   resolvePagesI18nRequest,
 } from "./pages-i18n.js";
 import { buildDefaultPagesNotFoundResponse } from "./pages-default-404.js";
-import { buildPagesReadinessNextData } from "./pages-readiness.js";
+import { buildPagesReadinessNextData, computePagesNextDataQuery } from "./pages-readiness.js";
 import { resolvePagesPageMethodResponse } from "./pages-page-method.js";
 import { createPagesDevModuleUrl } from "./pages-dev-module-url.js";
 import { isSerializableProps } from "./pages-serializable-props.js";
@@ -1234,7 +1234,13 @@ export function createSSRHandler(
                         {
                           props: freshRenderProps,
                           page: patternToNextFormat(route.pattern),
-                          query: params,
+                          query: computePagesNextDataQuery({
+                            query,
+                            params,
+                            isFallback: false,
+                            autoExport: freshPagesNextData.autoExport,
+                            gsp: freshPagesNextData.gsp,
+                          }),
                           buildId: process.env.__VINEXT_BUILD_ID,
                           isFallback: false,
                           locale: locale ?? currentDefaultLocale,
@@ -1657,7 +1663,13 @@ hydrate();
           {
             props: renderProps,
             page: patternToNextFormat(route.pattern),
-            query: params,
+            query: computePagesNextDataQuery({
+              query,
+              params,
+              isFallback: isFallbackRender,
+              autoExport: serializedPagesNextData.autoExport,
+              gsp: serializedPagesNextData.gsp,
+            }),
             buildId: process.env.__VINEXT_BUILD_ID,
             isFallback: isFallbackRender,
             locale: locale ?? currentDefaultLocale,
