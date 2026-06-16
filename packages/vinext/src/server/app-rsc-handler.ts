@@ -129,6 +129,8 @@ function applyMiddlewareContextToResponse(
 type DispatchMatchedPageOptions<TRoute> = {
   clientReuseManifest: ClientReuseManifestParseResult;
   cleanPathname: string;
+  /** Raw (still-encoded) counterpart of cleanPathname for single-decode of slot params (#1963). */
+  rawCleanPathname: string;
   displayPathname: string;
   formState: ReactFormState | null;
   actionError?: unknown;
@@ -213,6 +215,8 @@ type ProgressiveActionFormStateResult =
 type HandleServerActionRequestOptions = {
   actionId: string | null;
   cleanPathname: string;
+  /** Raw (still-encoded) counterpart of cleanPathname for single-decode of action params (#1963). */
+  rawCleanPathname: string;
   contentType: string;
   interceptionContext: string | null;
   isRscRequest: boolean;
@@ -293,7 +297,7 @@ type CreateAppRscHandlerOptions<TRoute extends AppRscHandlerRoute> = {
   isMiddlewareProxy: boolean;
   loadPrerenderPagesRoutes?: () => Promise<unknown>;
   makeThenableParams: MakeThenableParams;
-  matchRoute: (pathname: string) => AppRscRouteMatch<TRoute> | null;
+  matchRoute: (pathname: string, rawPathname?: string) => AppRscRouteMatch<TRoute> | null;
   metadataRoutes: MetadataRoutes;
   middlewareModule: MiddlewareModule | null;
   publicFiles: ReadonlySet<string>;
@@ -470,6 +474,11 @@ async function handleAppRscRequest<TRoute extends AppRscHandlerRoute>(
     clientReuseManifest,
   } = normalized;
   let { pathname, cleanPathname } = normalized;
+  // Raw (still-encoded) counterpart of cleanPathname, kept in sync through the
+  // rewrite reassignments below so route/page params can be decoded exactly once
+  // (#1963). After a rewrite the destination is already a resolved (decoded)
+  // pathname, so raw == clean there — matching the legacy behavior for rewrites.
+  let rawCleanPathname = normalized.rawCleanPathname;
   let resolvedUrl = cleanPathname + url.search;
   const originalResolvedUrl = resolvedUrl;
   const getResolvedSearchParams = () => new URL(resolvedUrl, url).searchParams;
@@ -591,6 +600,7 @@ async function handleAppRscRequest<TRoute extends AppRscHandlerRoute>(
     }
 
     cleanPathname = middlewareResult.cleanPathname;
+    rawCleanPathname = cleanPathname;
     didMiddlewareRewrite = cleanPathname !== normalized.cleanPathname;
     if (middlewareResult.search !== null) {
       url.search = middlewareResult.search;
@@ -627,6 +637,7 @@ async function handleAppRscRequest<TRoute extends AppRscHandlerRoute>(
     if (beforeFilesRewrite) {
       resolvedUrl = mergeRewriteQuery(resolvedUrl, beforeFilesRewrite);
       cleanPathname = pathnameForResolvedUrl(resolvedUrl);
+      rawCleanPathname = cleanPathname;
     }
   }
 
@@ -648,6 +659,7 @@ async function handleAppRscRequest<TRoute extends AppRscHandlerRoute>(
   const metadataRouteResponse = await handleMetadataRouteRequest({
     metadataRoutes: options.metadataRoutes,
     cleanPathname,
+    rawCleanPathname,
     makeThenableParams: options.makeThenableParams,
   });
   if (metadataRouteResponse) {
@@ -698,7 +710,7 @@ async function handleAppRscRequest<TRoute extends AppRscHandlerRoute>(
   // page renders, so there is no stale-value risk for ordinary page renders.
   // For action requests we intentionally do not re-run rewrites — actions
   // are always processed against the cleanPathname they were posted to.
-  const preActionMatch = options.matchRoute(cleanPathname);
+  const preActionMatch = options.matchRoute(cleanPathname, rawCleanPathname);
   if (preActionMatch) {
     setRootParams(pickRootParams(preActionMatch.params, preActionMatch.route.rootParamNames));
   }
@@ -727,6 +739,7 @@ async function handleAppRscRequest<TRoute extends AppRscHandlerRoute>(
   const serverActionResponse = await options.handleServerActionRequest({
     actionId,
     cleanPathname,
+    rawCleanPathname,
     contentType,
     interceptionContext: interceptionContextHeader,
     isRscRequest,
@@ -792,7 +805,8 @@ async function handleAppRscRequest<TRoute extends AppRscHandlerRoute>(
       if (!afterFilesRewrite) continue;
       resolvedUrl = mergeRewriteQuery(resolvedUrl, afterFilesRewrite);
       cleanPathname = pathnameForResolvedUrl(resolvedUrl);
-      match = options.matchRoute(cleanPathname);
+      rawCleanPathname = cleanPathname;
+      match = options.matchRoute(cleanPathname, rawCleanPathname);
       const rewrittenStaticPagesResponse = await renderPagesForMatchKind("static");
       if (rewrittenStaticPagesResponse) {
         options.clearRequestContext();
@@ -834,7 +848,8 @@ async function handleAppRscRequest<TRoute extends AppRscHandlerRoute>(
       if (!fallbackRewrite) continue;
       resolvedUrl = mergeRewriteQuery(resolvedUrl, fallbackRewrite);
       cleanPathname = pathnameForResolvedUrl(resolvedUrl);
-      match = options.matchRoute(cleanPathname);
+      rawCleanPathname = cleanPathname;
+      match = options.matchRoute(cleanPathname, rawCleanPathname);
       const rewrittenStaticPagesResponse = await renderPagesForMatchKind("static");
       if (rewrittenStaticPagesResponse) {
         options.clearRequestContext();
@@ -955,6 +970,7 @@ async function handleAppRscRequest<TRoute extends AppRscHandlerRoute>(
   const pageResponse = await options.dispatchMatchedPage({
     clientReuseManifest,
     cleanPathname,
+    rawCleanPathname,
     displayPathname: canonicalPathname,
     formState,
     actionError,

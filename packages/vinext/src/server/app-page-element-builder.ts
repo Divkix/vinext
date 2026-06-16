@@ -76,6 +76,12 @@ export type BuildPageElementsOptions<
   route: AppPageBuildRoute<TModule, TErrorModule>;
   params: AppPageParams;
   routePath: string;
+  /**
+   * Raw (still-encoded) counterpart of `routePath`. Slot param VALUES are
+   * captured from it and decoded exactly once (#1963). Defaults to `routePath`
+   * (legacy double-decode) when the raw form is unavailable.
+   */
+  rawRoutePath?: string;
   displayPathname?: string;
   pageRequest: AppPagePageRequest<TModule>;
   /** Root-level global-error.tsx module. Present when the app defines this file. */
@@ -146,6 +152,7 @@ export async function buildPageElements<
     route,
     params,
     routePath,
+    rawRoutePath = routePath,
     displayPathname = routePath,
     pageRequest,
     globalErrorModule,
@@ -267,7 +274,7 @@ export async function buildPageElements<
 
   const mountedSlotIds = mountedSlotsHeader ? new Set(mountedSlotsHeader.split(" ")) : null;
 
-  const slotOverrides = buildSlotOverrides(route, params, routePath, opts);
+  const slotOverrides = buildSlotOverrides(route, params, routePath, opts, rawRoutePath);
   const metadataPlacement =
     hasDynamicMetadata &&
     shouldServeStreamingMetadata(
@@ -360,6 +367,7 @@ function buildSlotOverrides<TModule extends AppPageModule, TErrorModule extends 
   routeParams: AppPageParams,
   routePath: string,
   opts?: AppPageInterceptOptions<TModule> | null,
+  rawRoutePath: string = routePath,
 ): Readonly<Record<string, AppPageSlotOverride<TModule>>> | null {
   const overrides: Record<string, AppPageSlotOverride<TModule>> = {};
 
@@ -376,7 +384,7 @@ function buildSlotOverrides<TModule extends AppPageModule, TErrorModule extends 
     };
   }
 
-  const slotParamOverrides = resolveSlotParamOverrides(route, routePath);
+  const slotParamOverrides = resolveSlotParamOverrides(route, routePath, rawRoutePath);
   for (const [slotKey, params] of Object.entries(slotParamOverrides ?? {})) {
     const existing = overrides[slotKey];
     overrides[slotKey] = existing ? { ...existing, params } : { params };
@@ -388,11 +396,13 @@ function buildSlotOverrides<TModule extends AppPageModule, TErrorModule extends 
 function resolveSlotParamOverrides(
   route: AppPageNavigationParamRoute,
   routePath: string,
+  rawRoutePath: string = routePath,
 ): Readonly<Record<string, AppPageParams>> | null {
   const overrides: Record<string, AppPageParams> = {};
   const slots = route.slots;
   if (slots) {
     let urlParts: string[] | null = null;
+    let rawUrlParts: string[] | null = null;
     const routeParamSet = collectParamNameSet(route.params);
     for (const [slotKey, slot] of Object.entries(slots)) {
       const patternParts = slot.slotPatternParts;
@@ -406,8 +416,10 @@ function resolveSlotParamOverrides(
 
       if (urlParts === null) {
         urlParts = routePath.split("/").filter(Boolean);
+        // Index-aligned raw segments so slot params decode exactly once (#1963).
+        rawUrlParts = rawRoutePath.split("/").filter(Boolean);
       }
-      const matched = matchRoutePattern(urlParts, patternParts);
+      const matched = matchRoutePattern(urlParts, patternParts, rawUrlParts ?? urlParts);
       if (!matched) continue;
 
       overrides[slotKey] = matched;
@@ -437,9 +449,10 @@ export function resolveAppPageNavigationParams(
   routeParams: AppPageParams,
   routePath: string,
   opts?: AppPageNavigationParamInterceptOptions | null,
+  rawRoutePath: string = routePath,
 ): AppPageParams {
   const navigationParams: AppPageParams = { ...routeParams };
-  const slotParamOverrides = resolveSlotParamOverrides(route, routePath);
+  const slotParamOverrides = resolveSlotParamOverrides(route, routePath, rawRoutePath);
 
   for (const [slotKey, slot] of Object.entries(route.slots ?? {})) {
     const isInterceptedSlot =

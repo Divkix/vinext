@@ -542,8 +542,9 @@ export function isValidMetadataImageId(id: string): boolean {
 export function matchMetadataRoutePattern(
   urlParts: string[],
   patternParts: string[],
+  rawParts: string[] = urlParts,
 ): Record<string, string | string[]> | null {
-  return matchRoutePattern(urlParts, patternParts);
+  return matchRoutePattern(urlParts, patternParts, rawParts);
 }
 
 function metadataRouteSuffix(parentSegments: string[], metaType: string): string {

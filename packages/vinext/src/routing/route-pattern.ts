@@ -91,6 +91,7 @@ export function fillRoutePatternSegments(
 export function matchRoutePattern(
   urlParts: readonly string[],
   patternParts: readonly string[],
+  rawParts: readonly string[] = urlParts,
 ): RoutePatternParams | null {
   const params: RoutePatternParams = Object.create(null);
 
@@ -104,7 +105,8 @@ export function matchRoutePattern(
       const paramName = patternPart.slice(1, -1);
       const minLength = patternPart.endsWith("+") ? 1 : 0;
       for (let endIndex = urlIndex + minLength; endIndex <= urlParts.length; endIndex++) {
-        const value = urlParts.slice(urlIndex, endIndex);
+        // Capture RAW segments so each is decoded exactly once (see #1963).
+        const value = rawParts.slice(urlIndex, endIndex);
         if (value.length > 0) {
           params[paramName] = value;
         } else {
@@ -123,7 +125,8 @@ export function matchRoutePattern(
         return false;
       }
       const paramName = patternPart.slice(1);
-      params[paramName] = urlParts[urlIndex];
+      // Capture the RAW segment; decodeMatchedParams decodes it once.
+      params[paramName] = rawParts[urlIndex];
       if (matchFrom(urlIndex + 1, patternIndex + 1)) {
         return true;
       }

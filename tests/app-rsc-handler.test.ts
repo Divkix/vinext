@@ -1182,7 +1182,7 @@ describe("createAppRscHandler", () => {
 
     expect(response.status).toBe(200);
     expect(await response.text()).toBe("rewritten");
-    expect(matchRoute).toHaveBeenLastCalledWith("/about");
+    expect(matchRoute).toHaveBeenLastCalledWith("/about", "/about");
     expect(dispatchMatchedPage).toHaveBeenCalledWith(
       expect.objectContaining({ cleanPathname: "/about" }),
     );
@@ -1790,8 +1790,9 @@ describe("createAppRscHandler", () => {
       const response = await handler(new Request("https://example.test/docs/legacy/500"), null);
 
       expect(response.status).toBe(200);
-      expect(matchRoute).toHaveBeenCalledWith("/about");
-      expect(matchRoute).not.toHaveBeenCalledWith("/about#500");
+      // matchRoute receives (decodedPathname, rawPathname) — see #1963.
+      expect(matchRoute).toHaveBeenCalledWith("/about", "/about");
+      expect(matchRoute).not.toHaveBeenCalledWith("/about#500", "/about#500");
     },
   );
 

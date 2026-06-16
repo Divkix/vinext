@@ -533,5 +533,20 @@ describe("buildRouteTrie + trieMatch", () => {
       const trie = buildRouteTrie([r("/files/:name")]);
       expect(trieMatch(trie, ["files", "a%252Fb"])!.params).toEqual({ name: "a%2Fb" });
     });
+
+    it("decodes non-delimiter double-encoded values exactly once (#1963)", () => {
+      // Regression for the double-decode bug: %2520→%20 (not a space), %2541→%41
+      // (not "A"), caf%25C3%25A9→caf%C3%A9 (not "café"). These match Next.js'
+      // single decodeURIComponent pass.
+      const trie = buildRouteTrie([r("/blog/:id")]);
+      expect(trieMatch(trie, ["blog", "a%2520b"])!.params).toEqual({ id: "a%20b" });
+      expect(trieMatch(trie, ["blog", "%2541"])!.params).toEqual({ id: "%41" });
+      expect(trieMatch(trie, ["blog", "caf%25C3%25A9"])!.params).toEqual({ id: "caf%C3%A9" });
+
+      const catchAll = buildRouteTrie([r("/docs/:rest+")]);
+      expect(trieMatch(catchAll, ["docs", "x%2520y", "z%2541"])!.params).toEqual({
+        rest: ["x%20y", "z%41"],
+      });
+    });
   });
 });

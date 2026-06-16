@@ -182,6 +182,31 @@ describe("matchRoute - URL matching", () => {
     expect(result!.params).toEqual({ id: "42" });
   });
 
+  it("decodes dynamic and catch-all params exactly once (#1963)", () => {
+    // Pages Router shares matchRouteWithTrie with App matchAppRoute. Non-delimiter
+    // double-encoded values must decode once: %2520→%20, %2541→%41.
+    const idRoute = {
+      pattern: "/posts/:id",
+      patternParts: ["posts", ":id"],
+      filePath: "/tmp/pages/posts/[id].tsx",
+      isDynamic: true,
+      params: ["id"],
+    } as Route;
+    const slugRoute = {
+      pattern: "/docs/:slug+",
+      patternParts: ["docs", ":slug+"],
+      filePath: "/tmp/pages/docs/[...slug].tsx",
+      isDynamic: true,
+      params: ["slug"],
+    } as Route;
+
+    expect(matchRoute("/posts/a%2520b", [idRoute])!.params).toEqual({ id: "a%20b" });
+    expect(matchRoute("/posts/%2541", [idRoute])!.params).toEqual({ id: "%41" });
+    expect(matchRoute("/docs/x%2520y/z%2541", [slugRoute])!.params).toEqual({
+      slug: ["x%20y", "z%41"],
+    });
+  });
+
   it("preserves encoded slashes within a single static segment", () => {
     const encodedRoute = {
       pattern: "/a%2Fb",

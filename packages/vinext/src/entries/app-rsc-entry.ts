@@ -524,8 +524,8 @@ const __fallbackRenderer = __createAppFallbackRenderer({
   },
 });
 
-function matchRoute(url) {
-  return __routeMatcher.matchRoute(url);
+function matchRoute(url, rawUrl = url) {
+  return __routeMatcher.matchRoute(url, rawUrl);
 }
 
 /**
@@ -536,13 +536,14 @@ function findIntercept(pathname, sourcePathname = null) {
   return __routeMatcher.findIntercept(pathname, sourcePathname);
 }
 
-async function buildPageElements(route, params, routePath, pageRequest, layoutParamAccess, displayPathname = routePath) {
+async function buildPageElements(route, params, routePath, pageRequest, layoutParamAccess, displayPathname = routePath, rawRoutePath = routePath) {
   // Hydrate lazy page/route-handler modules before any synchronous read.
   await __ensureRouteLoaded(route);
   return __buildPageElements({
     route,
     params,
     routePath,
+    rawRoutePath,
     displayPathname,
     pageRequest,
     globalErrorModule: ${globalErrorVar ? globalErrorVar : "null"},
@@ -637,6 +638,7 @@ export default __createAppRscHandler({
   dispatchMatchedPage({
     clientReuseManifest,
     cleanPathname,
+    rawCleanPathname,
     displayPathname,
     formState,
     actionError,
@@ -686,7 +688,7 @@ export default __createAppRscHandler({
           request,
           mountedSlotsHeader,
           renderMode,
-        }, layoutParamAccess, displayPathname);
+        }, layoutParamAccess, displayPathname, rawCleanPathname);
       },
       clientReuseManifest,
       cleanPathname,
@@ -914,6 +916,7 @@ export default __createAppRscHandler({
   async handleServerActionRequest({
     actionId,
     cleanPathname,
+    rawCleanPathname,
     contentType,
     interceptionContext,
     isRscRequest,
@@ -922,7 +925,7 @@ export default __createAppRscHandler({
     request,
     searchParams,
   }) {
-    const __actionMatch = matchRoute(cleanPathname);
+    const __actionMatch = matchRoute(cleanPathname, rawCleanPathname);
     if (__actionMatch) await __ensureRouteLoaded(__actionMatch.route);
     const __actionIsEdgeRuntime = __actionMatch
       ? __isEdgeRuntime(__resolveAppPageSegmentConfig({ layouts: __actionMatch.route.layouts, page: __actionMatch.route.page }).runtime)
@@ -937,6 +940,7 @@ export default __createAppRscHandler({
         route: actionRoute,
         params: actionParams,
         cleanPathname: actionCleanPathname,
+        rawCleanPathname: actionRawCleanPathname = actionCleanPathname,
         interceptOpts,
         searchParams: actionSearchParams,
         isRscRequest: actionIsRscRequest,
@@ -951,9 +955,10 @@ export default __createAppRscHandler({
           request: actionRequest,
           mountedSlotsHeader: actionMountedSlotsHeader,
           renderMode: actionRenderMode,
-        });
+        }, undefined, actionCleanPathname, actionRawCleanPathname);
       },
       cleanPathname,
+      rawCleanPathname,
       clearRequestContext() {
         __clearRequestContext();
       },
@@ -989,8 +994,8 @@ export default __createAppRscHandler({
       },
       isRscRequest,
       loadServerAction,
-      matchRoute(pathnameToMatch) {
-        return matchRoute(pathnameToMatch);
+      matchRoute(pathnameToMatch, rawPathnameToMatch) {
+        return matchRoute(pathnameToMatch, rawPathnameToMatch);
       },
       maxActionBodySize: __MAX_ACTION_BODY_SIZE,
       maxActionBodySizeLabel: __MAX_ACTION_BODY_SIZE_LABEL,

@@ -96,6 +96,17 @@ describe("matchRoutePattern param decoding", () => {
   it("applies exactly one decodeURIComponent pass (double-encoded stays single-encoded)", () => {
     expect(matchRoutePattern(["files", "a%252Fb"], ["files", ":name"])).toEqual({ name: "a%2Fb" });
   });
+
+  it("decodes non-delimiter double-encoded values exactly once (#1963)", () => {
+    expect(matchRoutePattern(["blog", "a%2520b"], ["blog", ":id"])).toEqual({ id: "a%20b" });
+    expect(matchRoutePattern(["blog", "%2541"], ["blog", ":id"])).toEqual({ id: "%41" });
+    expect(matchRoutePattern(["blog", "caf%25C3%25A9"], ["blog", ":id"])).toEqual({
+      id: "caf%C3%A9",
+    });
+    expect(matchRoutePattern(["docs", "x%2520y", "z%2541"], ["docs", ":rest+"])).toEqual({
+      rest: ["x%20y", "z%41"],
+    });
+  });
 });
 
 // Helper extracted from packages/vinext/src/build/prerender.ts,

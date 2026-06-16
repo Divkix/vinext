@@ -124,23 +124,28 @@ export function buildRouteTrie<R extends { patternParts: string[] }>(routes: R[]
 /**
  * Match a URL against the trie.
  *
- * Returns decoded param values — `decodeURIComponent` is applied to
- * individual param entries so that `%2F` → `/`, `%23` → `#`, etc.
- * Segment boundaries (the original `/` splits) are preserved by the
- * upstream normalization layer; this step only decodes the captured
- * param strings the caller sees.
+ * Returns decoded param values — `decodeURIComponent` is applied once to
+ * individual param entries so that `%2F` → `/`, `%23` → `#`, etc. Param
+ * VALUES are captured from `rawParts` (the original still-encoded segments)
+ * so that a value is decoded exactly once, matching Next.js' single decode
+ * (see #1963). STATIC matching still happens against `urlParts` (the
+ * normalized segments), so encoded static routes (e.g. `/%5Fsites`) match.
  *
- * Mirrors Next.js route-matcher.ts:25-27.
+ * `rawParts` must be index-aligned with `urlParts`; when omitted it defaults
+ * to `urlParts` (the legacy behavior, used by callers that already pass raw
+ * segments). Mirrors Next.js route-matcher.ts:25-27.
  *
  * @param root - Trie root built by `buildRouteTrie`
- * @param urlParts - Pre-split URL segments (no empty strings)
+ * @param urlParts - Pre-split, normalized URL segments (no empty strings)
+ * @param rawParts - Index-aligned raw (encoded) segments for param capture
  * @returns Match result with route and extracted params, or null
  */
 export function trieMatch<R>(
   root: TrieNode<R>,
   urlParts: string[],
+  rawParts: string[] = urlParts,
 ): { route: R; params: Record<string, string | string[]> } | null {
-  const result = match(root, urlParts, 0, []);
+  const result = match(root, urlParts, rawParts, 0, []);
   if (result) {
     decodeMatchedParams(result.params);
   }
@@ -150,6 +155,7 @@ export function trieMatch<R>(
 function match<R>(
   node: TrieNode<R>,
   urlParts: string[],
+  rawParts: string[],
   index: number,
   entries: Array<[string, string | string[]]>,
 ): { route: R; params: Record<string, string | string[]> } | null {
@@ -173,38 +179,40 @@ function match<R>(
 
   const segment = urlParts[index];
 
-  // 1. Try static child (highest priority)
+  // 1. Try static child (highest priority). Static matching uses the
+  // normalized segment so encoded static routes (`/%5Fsites`) match.
   const staticChild = node.staticChildren.get(segment);
   if (staticChild) {
-    const result = match(staticChild, urlParts, index + 1, entries);
+    const result = match(staticChild, urlParts, rawParts, index + 1, entries);
     if (result !== null) {
       return result;
     }
   }
 
-  // 2. Try dynamic child (single segment)
+  // 2. Try dynamic child (single segment). Capture the RAW segment so the
+  // value is decoded exactly once by decodeMatchedParams.
   if (node.dynamicChild !== null) {
-    entries.push([node.dynamicChild.paramName, segment]);
-    const result = match(node.dynamicChild.node, urlParts, index + 1, entries);
+    entries.push([node.dynamicChild.paramName, rawParts[index]]);
+    const result = match(node.dynamicChild.node, urlParts, rawParts, index + 1, entries);
     if (result !== null) {
       return result;
     }
     entries.pop();
   }
 
-  // 3. Try catch-all (1+ remaining segments)
+  // 3. Try catch-all (1+ remaining segments) — capture RAW segments.
   if (node.catchAllChild !== null) {
-    const remaining = urlParts.slice(index);
+    const remaining = rawParts.slice(index);
     const params = buildParams(entries);
     params[node.catchAllChild.paramName] = remaining;
     return { route: node.catchAllChild.route, params };
   }
 
-  // 4. Try optional catch-all (0+ remaining segments).
+  // 4. Try optional catch-all (0+ remaining segments) — capture RAW segments.
   // At this point index < urlParts.length, so remaining always has ≥1 segment.
   if (node.optionalCatchAllChild !== null) {
     const params = buildParams(entries);
-    params[node.optionalCatchAllChild.paramName] = urlParts.slice(index);
+    params[node.optionalCatchAllChild.paramName] = rawParts.slice(index);
     return { route: node.optionalCatchAllChild.route, params };
   }
 

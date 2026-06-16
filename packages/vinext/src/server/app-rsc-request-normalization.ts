@@ -1,4 +1,4 @@
-import { normalizePath } from "./normalize-path.js";
+import { normalizePathWithRaw } from "./normalize-path.js";
 import { normalizePathnameForRouteMatchStrict } from "../routing/utils.js";
 import { guardProtocolRelativeUrl } from "./request-pipeline.js";
 import { hasBasePath, stripBasePath } from "../utils/base-path.js";
@@ -32,6 +32,14 @@ export type NormalizedRscRequest = {
   pathname: string;
   /** Pathname with `.rsc` suffix removed. Used for route matching and navigation context. */
   cleanPathname: string;
+  /**
+   * Index-aligned raw (still percent-encoded) counterpart of `cleanPathname`.
+   * Same surviving segments as `cleanPathname`, but each segment is left in its
+   * original encoded form so dynamic route params can be decoded exactly once at
+   * match time (see #1963). Use `cleanPathname` for matching/display, this for
+   * capturing param VALUES.
+   */
+  rawCleanPathname: string;
   /** True when the request targets a canonical `.rsc` payload URL. */
   isRscRequest: boolean;
   /** Sanitized X-Vinext-Interception-Context header (null bytes stripped). null when absent. */
@@ -96,18 +104,31 @@ export function normalizeRscRequest(
     return badRequestResponse();
   }
 
-  // Step 4: Collapse double-slashes and resolve . / .. segments.
-  let pathname = normalizePath(decoded);
+  // Step 4: Collapse double-slashes and resolve . / .. segments. Compute an
+  // index-aligned raw (still-encoded) pathname alongside, so param values can be
+  // decoded exactly once at match time (#1963). `pathname` is byte-identical to
+  // `normalizePath(decoded)`.
+  let { pathname, rawPathname } = normalizePathWithRaw(decoded, url.pathname);
 
   // Step 5: basePath check and strip.
   // Skipped when basePath is empty (no basePath configured).
   // /__vinext/ prefix bypasses the check for internal prerender endpoints
   // that must be reachable regardless of basePath configuration.
   if (basePath) {
-    if (!hasBasePath(pathname, basePath) && !pathname.startsWith("/__vinext/")) {
+    const inBasePath = hasBasePath(pathname, basePath);
+    if (!inBasePath && !pathname.startsWith("/__vinext/")) {
       return notFoundResponse();
     }
-    pathname = stripBasePath(pathname, basePath);
+    if (inBasePath) {
+      pathname = stripBasePath(pathname, basePath);
+      // Strip the same number of leading segments from the raw pathname so the
+      // two stay index-aligned (basePath segments are config, but may be
+      // percent-encoded in the request, so strip by segment count not length).
+      rawPathname = stripLeadingPathSegments(
+        rawPathname,
+        basePath.split("/").filter(Boolean).length,
+      );
+    }
   }
 
   // Steps 6-7: RSC detection and cleanPathname.
@@ -116,6 +137,7 @@ export function normalizeRscRequest(
     (request.headers.get(RSC_HEADER) === "1" &&
       url.searchParams.has(VINEXT_RSC_CACHE_BUSTING_SEARCH_PARAM));
   const cleanPathname = stripRscSuffix(pathname);
+  const rawCleanPathname = stripRscSuffix(rawPathname);
 
   // Step 8: Validate and sanitize X-Vinext-Interception-Context.
   //
@@ -144,9 +166,31 @@ export function normalizeRscRequest(
     url,
     pathname,
     cleanPathname,
+    rawCleanPathname,
     isRscRequest,
     interceptionContextHeader,
     mountedSlotsHeader,
     renderMode,
   };
+}
+
+/**
+ * Remove `count` leading path segments from a "/"-prefixed pathname, preserving
+ * everything after them verbatim (including a trailing slash). Used to strip the
+ * basePath prefix from the raw pathname by segment count — keeping it aligned
+ * with the (length-based) basePath strip on the decoded pathname even when a
+ * basePath segment is percent-encoded in the request. Returns "/" when the
+ * segments consume the whole path.
+ */
+function stripLeadingPathSegments(pathname: string, count: number): string {
+  if (count <= 0) return pathname;
+  // pathname starts with "/", so each segment boundary is the next "/".
+  let pos = 0;
+  for (let removed = 0; removed < count; removed++) {
+    const next = pathname.indexOf("/", pos + 1);
+    if (next === -1) return "/"; // path ends within the stripped prefix
+    pos = next;
+  }
+  const rest = pathname.slice(pos);
+  return rest === "" ? "/" : rest;
 }

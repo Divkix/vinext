@@ -106,3 +106,62 @@ export function normalizePath(pathname: string): string {
 
   return "/" + resolved.join("/");
 }
+
+/**
+ * Variant of {@link normalizePath} that also produces an index-aligned RAW
+ * (still percent-encoded) pathname.
+ *
+ * `decoded` is the per-segment strict-decoded pathname; `raw` is the original
+ * encoded pathname (same `/` structure, so the two split into the same number
+ * of segments). The returned `pathname` is byte-identical to
+ * `normalizePath(decoded)`; `rawPathname` keeps the surviving segments in their
+ * raw encoded form. `.`/`..`/empty resolution is driven by the DECODED segment
+ * value, so encoded dots (`%2E`) collapse exactly as they do in `normalizePath`.
+ *
+ * Used by the App RSC request boundary so dynamic route params can later be
+ * decoded exactly once from the raw segments (see #1963), while routing and
+ * security checks keep operating on the decoded pathname.
+ *
+ * This MUST mirror `normalizePath` above (including the canonical fast path).
+ */
+export function normalizePathWithRaw(
+  decoded: string,
+  raw: string,
+): { pathname: string; rawPathname: string } {
+  // Fast path mirrors normalizePath: a canonical decoded path has nothing to
+  // collapse, so the raw path is returned unchanged (and stays aligned).
+  if (
+    decoded === "/" ||
+    (decoded.length > 1 &&
+      decoded[0] === "/" &&
+      !decoded.includes("//") &&
+      !decoded.includes("/./") &&
+      !decoded.includes("/../") &&
+      !decoded.endsWith("/.") &&
+      !decoded.endsWith("/.."))
+  ) {
+    return { pathname: decoded, rawPathname: raw };
+  }
+
+  const decodedSegments = decoded.split("/");
+  const rawSegments = raw.split("/");
+  const resolvedDecoded: string[] = [];
+  const resolvedRaw: string[] = [];
+
+  for (let i = 0; i < decodedSegments.length; i++) {
+    const segment = decodedSegments[i];
+    if (segment === "" || segment === ".") continue;
+    if (segment === "..") {
+      resolvedDecoded.pop();
+      resolvedRaw.pop();
+      continue;
+    }
+    resolvedDecoded.push(segment);
+    resolvedRaw.push(rawSegments[i] ?? segment);
+  }
+
+  return {
+    pathname: "/" + resolvedDecoded.join("/"),
+    rawPathname: "/" + resolvedRaw.join("/"),
+  };
+}

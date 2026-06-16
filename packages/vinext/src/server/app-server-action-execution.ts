@@ -156,6 +156,8 @@ type AppServerActionIntercept<TPage = unknown> = {
 
 type BuildServerActionPageElementOptions<TRoute extends AppServerActionRoute, TInterceptOpts> = {
   cleanPathname: string;
+  /** Raw (still-encoded) counterpart of cleanPathname for single-decode of slot params (#1963). */
+  rawCleanPathname?: string;
   interceptOpts: TInterceptOpts | undefined;
   isRscRequest: boolean;
   mountedSlotsHeader: string | null;
@@ -229,6 +231,12 @@ export type HandleServerActionRscRequestOptions<
     options: BuildServerActionPageElementOptions<TRoute, TInterceptOpts>,
   ) => TElement;
   cleanPathname: string;
+  /**
+   * Raw (still-encoded) counterpart of cleanPathname; action route/slot params
+   * decode once from it (#1963). Falls back to `cleanPathname` (legacy
+   * double-decode) when omitted.
+   */
+  rawCleanPathname?: string;
   clearRequestContext: () => void;
   contentType: string;
   createNotFoundElement: (routeId: string) => TElement;
@@ -257,7 +265,7 @@ export type HandleServerActionRscRequestOptions<
   isEdgeRuntime?: boolean;
   isRscRequest: boolean;
   loadServerAction: (actionId: string) => Promise<unknown>;
-  matchRoute: (pathname: string) => AppServerActionMatch<TRoute> | null;
+  matchRoute: (pathname: string, rawPathname?: string) => AppServerActionMatch<TRoute> | null;
   maxActionBodySize: number;
   /** Verbatim `serverActions.bodySizeLimit` config string (e.g. "2mb") for the body-exceeded error. */
   maxActionBodySizeLabel: string;
@@ -1200,7 +1208,7 @@ export async function handleServerActionRscRequest<
           headers: withoutRscBodyHeaders(redirectHeaders),
         });
       }
-      const currentMatch = options.matchRoute(options.cleanPathname);
+      const currentMatch = options.matchRoute(options.cleanPathname, options.rawCleanPathname);
       // Hydrate the current route before resolving its runtime below.
       if (currentMatch) await options.ensureRouteLoaded?.(currentMatch.route);
 
@@ -1231,6 +1239,8 @@ export async function handleServerActionRscRequest<
       setCurrentFetchSoftTags(buildServerActionPageTags(targetMatch.route, targetPathname));
       const element = options.buildPageElement({
         cleanPathname: targetPathname,
+        // targetPathname comes from redirectTarget.pathname (URL.pathname) — already raw.
+        rawCleanPathname: targetPathname,
         interceptOpts: undefined,
         isRscRequest: true,
         mountedSlotsHeader: null,
@@ -1316,7 +1326,7 @@ export async function handleServerActionRscRequest<
       );
     }
 
-    const match = options.matchRoute(options.cleanPathname);
+    const match = options.matchRoute(options.cleanPathname, options.rawCleanPathname);
     let element: TElement;
     let errorPattern = match ? match.route.pattern : options.cleanPathname;
     if (match) {
@@ -1343,6 +1353,7 @@ export async function handleServerActionRscRequest<
         actionRerenderTarget.navigationParams,
         options.cleanPathname,
         actionRerenderTarget.interceptOpts as Parameters<typeof resolveAppPageNavigationParams>[3],
+        options.rawCleanPathname,
       );
       options.setNavigationContext({
         pathname: options.cleanPathname,
@@ -1362,6 +1373,7 @@ export async function handleServerActionRscRequest<
       );
       element = options.buildPageElement({
         cleanPathname: options.cleanPathname,
+        rawCleanPathname: options.rawCleanPathname,
         interceptOpts: actionRerenderTarget.interceptOpts,
         isRscRequest: options.isRscRequest,
         mountedSlotsHeader: options.mountedSlotsHeader,

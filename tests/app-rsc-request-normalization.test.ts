@@ -579,6 +579,40 @@ describe("normalizeRscRequest — compound scenarios", () => {
   });
 });
 
+// ── rawCleanPathname (single-decode param capture, #1963) ────────────────────
+
+describe("normalizeRscRequest — rawCleanPathname", () => {
+  it("keeps the raw still-encoded counterpart of cleanPathname", () => {
+    const result = normalized(normalizeRscRequest(req("/blog/a%2520b"), ""));
+    // cleanPathname decodes once (delimiter-preserving); rawCleanPathname keeps
+    // the original encoding so a later single decode yields a%20b, not "a b".
+    expect(result.cleanPathname).toBe("/blog/a%20b");
+    expect(result.rawCleanPathname).toBe("/blog/a%2520b");
+  });
+
+  it("resolves encoded ../ traversal identically (and stays aligned) for both", () => {
+    // %2E%2E decodes to ".." and must be resolved by normalizePath for BOTH the
+    // decoded and the raw pathname — the segment lists stay index-aligned and the
+    // path-traversal protection is preserved.
+    const result = normalized(normalizeRscRequest(req("/foo/%2E%2E/bar/x%2520y"), ""));
+    expect(result.cleanPathname).toBe("/bar/x%20y");
+    expect(result.rawCleanPathname).toBe("/bar/x%2520y");
+  });
+
+  it("strips basePath by segment and preserves a trailing slash on the raw pathname", () => {
+    const result = normalized(normalizeRscRequest(req("/docs/blog/a%2520b/"), "/docs"));
+    expect(result.cleanPathname).toBe("/blog/a%20b/");
+    expect(result.rawCleanPathname).toBe("/blog/a%2520b/");
+  });
+
+  it("strips the .rsc suffix from rawCleanPathname too", () => {
+    const result = normalized(normalizeRscRequest(req("/blog/a%2520b.rsc"), ""));
+    expect(result.isRscRequest).toBe(true);
+    expect(result.cleanPathname).toBe("/blog/a%20b");
+    expect(result.rawCleanPathname).toBe("/blog/a%2520b");
+  });
+});
+
 // ── normalizeMountedSlotsHeader (standalone) ─────────────────────────────────
 
 describe("normalizeMountedSlotsHeader", () => {

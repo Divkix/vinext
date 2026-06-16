@@ -22,6 +22,12 @@ type MetadataRuntimeRoute = MetadataFileRoute & {
 type MetadataRouteRequestOptions = {
   metadataRoutes: readonly MetadataRuntimeRoute[];
   cleanPathname: string;
+  /**
+   * Raw (still-encoded) counterpart of cleanPathname; param values are captured
+   * from it and decoded once (#1963). Falls back to `cleanPathname` (legacy
+   * double-decode) when omitted.
+   */
+  rawCleanPathname?: string;
   makeThenableParams: MakeThenableParams;
 };
 
@@ -130,11 +136,17 @@ function matchMetadataRoute(
   cleanPathname: string,
   functions: MetadataRouteFunctions,
   getUrlParts: () => string[],
+  getRawUrlParts: () => string[],
 ): MatchedMetadataRoute | null {
   if (route.patternParts) {
     const urlParts = getUrlParts();
+    const rawUrlParts = getRawUrlParts();
     if (functions.hasGeneratedImageMetadata && urlParts.length > 0) {
-      const params = matchMetadataRoutePattern(urlParts.slice(0, -1), route.patternParts);
+      const params = matchMetadataRoutePattern(
+        urlParts.slice(0, -1),
+        route.patternParts,
+        rawUrlParts.slice(0, -1),
+      );
       if (params) {
         return {
           params,
@@ -143,7 +155,7 @@ function matchMetadataRoute(
       }
     }
 
-    const params = matchMetadataRoutePattern(urlParts, route.patternParts);
+    const params = matchMetadataRoutePattern(urlParts, route.patternParts, rawUrlParts);
     return params ? { params, imageId: null } : null;
   }
 
@@ -371,6 +383,12 @@ export async function handleMetadataRouteRequest(
   // common case of zero dynamic metadata routes never splits at all.
   let urlParts: string[] | undefined;
   const getUrlParts = () => (urlParts ??= options.cleanPathname.split("/").filter(Boolean));
+  // Index-aligned raw segments for single-decode param capture (#1963).
+  let rawUrlParts: string[] | undefined;
+  const getRawUrlParts = () =>
+    (rawUrlParts ??= (options.rawCleanPathname ?? options.cleanPathname)
+      .split("/")
+      .filter(Boolean));
 
   for (const route of options.metadataRoutes) {
     const functions = getMetadataRouteFunctions(route);
@@ -391,7 +409,13 @@ export async function handleMetadataRouteRequest(
       }
     }
 
-    const match = matchMetadataRoute(route, options.cleanPathname, functions, getUrlParts);
+    const match = matchMetadataRoute(
+      route,
+      options.cleanPathname,
+      functions,
+      getUrlParts,
+      getRawUrlParts,
+    );
     if (!match) {
       continue;
     }

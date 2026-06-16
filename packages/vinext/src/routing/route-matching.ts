@@ -7,7 +7,7 @@
  * per-routes-array trie cache. This module factors that out so each router
  * just calls `matchRouteWithTrie(url, routes)`.
  */
-import { normalizePathnameForRouteMatch } from "./utils.js";
+import { splitPathnameForRouteMatchWithRaw } from "./utils.js";
 import { buildRouteTrie, trieMatch, type TrieNode } from "./route-trie.js";
 
 // Trie cache — keyed by route array identity (same array = same trie).
@@ -48,11 +48,11 @@ export function matchRouteWithTrie<R extends { patternParts: string[] }>(
 ): { route: R; params: Record<string, string | string[]> } | null {
   // Normalize: strip query string and trailing slash
   const pathname = url.split("?")[0];
-  let normalizedUrl = pathname === "/" ? "/" : pathname.replace(/\/$/, "");
-  normalizedUrl = normalizePathnameForRouteMatch(normalizedUrl);
+  const strippedUrl = pathname === "/" ? "/" : pathname.replace(/\/$/, "");
 
-  // Split URL once, look up via trie
-  const urlParts = normalizedUrl.split("/").filter(Boolean);
+  // Split into normalized parts (for matching) and index-aligned raw parts
+  // (for single-decode param capture; see #1963), then look up via the trie.
+  const { parts, rawParts } = splitPathnameForRouteMatchWithRaw(strippedUrl);
   const trie = getOrBuildTrie(cache, routes);
-  return trieMatch(trie, urlParts);
+  return trieMatch(trie, parts, rawParts);
 }

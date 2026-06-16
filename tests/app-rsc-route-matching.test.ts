@@ -80,6 +80,24 @@ describe("App RSC route matching", () => {
     });
   });
 
+  it("decodes dynamic and catch-all params exactly once (#1963)", () => {
+    // Non-delimiter double-encoded values must decode once (Next.js parity):
+    // %2520→%20, %2541→%41, caf%25C3%25A9→caf%C3%A9 — NOT a space / "A" / "café".
+    const matcher = createAppRscRouteMatcher([
+      route("/blog/:id", ["blog", ":id"]),
+      route("/docs/:path+", ["docs", ":path+"]),
+    ]);
+
+    expect(matcher.matchRoute("/blog/a%2520b")).toMatchObject({ params: { id: "a%20b" } });
+    expect(matcher.matchRoute("/blog/%2541")).toMatchObject({ params: { id: "%41" } });
+    expect(matcher.matchRoute("/blog/caf%25C3%25A9")).toMatchObject({
+      params: { id: "caf%C3%A9" },
+    });
+    expect(matcher.matchRoute("/docs/x%2520y/z%2541")).toMatchObject({
+      params: { path: ["x%20y", "z%41"] },
+    });
+  });
+
   it("matches standalone route patterns for dynamic metadata routes", () => {
     expect(
       matchAppRscRoutePattern(["blog", "hello", "sitemap.xml"], ["blog", ":slug", "sitemap.xml"]),

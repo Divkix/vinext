@@ -7559,7 +7559,8 @@ describe("double-encoded path handling in middleware", () => {
       },
     ]);
     expect(code).toContain("createAppRscRouteMatcher as __createAppRscRouteMatcher");
-    expect(code).toContain("return __routeMatcher.matchRoute(url);");
+    // matchRoute forwards the raw (still-encoded) pathname for single-decode capture (#1963).
+    expect(code).toContain("return __routeMatcher.matchRoute(url, rawUrl);");
 
     const routeMatchingSource = await readFile(
       new URL("../packages/vinext/src/server/app-rsc-route-matching.ts", import.meta.url),

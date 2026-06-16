@@ -207,6 +207,35 @@ export function splitPathnameForRouteMatch(pathname: string): string[] {
 }
 
 /**
+ * Like {@link splitPathnameForRouteMatch}, but also returns the index-aligned
+ * RAW (un-normalized, still percent-encoded) segments.
+ *
+ * `parts[i]` is the normalized segment used for route matching (identical to
+ * `splitPathnameForRouteMatch(pathname)[i]`); `rawParts[i]` is the original
+ * encoded segment that produced it. Dynamic/catch-all param VALUES are captured
+ * from `rawParts` and decoded exactly once (matching Next.js' single decode),
+ * while STATIC traversal keeps matching on the normalized `parts`. See #1963.
+ *
+ * Alignment is guaranteed structurally: `decodeRouteSegment` never turns a
+ * non-empty segment into an empty one and never introduces a `/`, so an empty
+ * segment is dropped from both arrays at exactly the same positions.
+ */
+export function splitPathnameForRouteMatchWithRaw(pathname: string): {
+  parts: string[];
+  rawParts: string[];
+} {
+  const parts: string[] = [];
+  const rawParts: string[] = [];
+  for (const rawSegment of pathname.split("/")) {
+    const normalized = decodeRouteSegment(rawSegment);
+    if (normalized === "") continue; // mirrors the `.filter(Boolean)` drop
+    parts.push(normalized);
+    rawParts.push(rawSegment);
+  }
+  return { parts, rawParts };
+}
+
+/**
  * Strict pathname normalization for live request handling.
  * Throws on malformed percent-encoding so callers can return 400.
  */

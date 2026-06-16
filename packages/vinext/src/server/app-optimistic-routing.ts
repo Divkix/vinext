@@ -1,7 +1,11 @@
 import { createElement, isValidElement, Suspense } from "react";
 import { isUnknownRecord } from "../utils/record.js";
 import { stripBasePath } from "../utils/base-path.js";
-import { buildParams, decodeMatchedParams, splitPathnameForRouteMatch } from "../routing/utils.js";
+import {
+  buildParams,
+  decodeMatchedParams,
+  splitPathnameForRouteMatchWithRaw,
+} from "../routing/utils.js";
 import type { RouteManifest, RouteManifestRoute } from "../routing/app-route-graph.js";
 import { matchRoutePattern } from "../routing/route-pattern.js";
 import { stripRscCacheBustingSearchParam, stripRscSuffix } from "./app-rsc-cache-busting.js";
@@ -136,6 +140,7 @@ function getRouteTrie(routeManifest: RouteManifest): OptimisticRouteTrieNode {
 function matchNode(
   node: OptimisticRouteTrieNode,
   urlParts: readonly string[],
+  rawParts: readonly string[],
   index: number,
   entries: Array<[string, string | string[]]>,
 ): OptimisticRouteMatch | null {
@@ -158,33 +163,37 @@ function matchNode(
     // Static children are authoritative for optimistic routing. If a known
     // static subtree does not contain the remaining URL, do not fall through to
     // a catch-all sibling and render the wrong loading boundary.
-    return matchNode(staticChild, urlParts, index + 1, entries);
+    return matchNode(staticChild, urlParts, rawParts, index + 1, entries);
   }
 
   if (node.dynamicChild !== null) {
-    entries.push([node.dynamicChild.paramName, segment]);
-    const match = matchNode(node.dynamicChild.node, urlParts, index + 1, entries);
+    // Capture the RAW segment so the value is decoded exactly once (see #1963).
+    entries.push([node.dynamicChild.paramName, rawParts[index]]);
+    const match = matchNode(node.dynamicChild.node, urlParts, rawParts, index + 1, entries);
     if (match !== null) return match;
     entries.pop();
   }
 
   if (node.catchAllChild !== null) {
     const params = buildParams(entries);
-    params[node.catchAllChild.paramName] = urlParts.slice(index);
+    params[node.catchAllChild.paramName] = rawParts.slice(index);
     return { route: node.catchAllChild.route, params };
   }
 
   // At this point index < urlParts.length, so remaining always has ≥1 segment.
   if (node.optionalCatchAllChild !== null) {
     const params = buildParams(entries);
-    params[node.optionalCatchAllChild.paramName] = urlParts.slice(index);
+    params[node.optionalCatchAllChild.paramName] = rawParts.slice(index);
     return { route: node.optionalCatchAllChild.route, params };
   }
 
   return null;
 }
 
-function hrefToRouteParts(href: string, basePath: string): string[] | null {
+function hrefToRouteParts(
+  href: string,
+  basePath: string,
+): { parts: string[]; rawParts: string[] } | null {
   let url: URL;
   try {
     url = new URL(href, "https://vinext.local");
@@ -195,7 +204,7 @@ function hrefToRouteParts(href: string, basePath: string): string[] | null {
   stripRscCacheBustingSearchParam(url);
   const withoutRscSuffix = stripRscSuffix(url.pathname);
   const appPathname = stripBasePath(withoutRscSuffix, basePath);
-  return splitPathnameForRouteMatch(appPathname === "" ? "/" : appPathname);
+  return splitPathnameForRouteMatchWithRaw(appPathname === "" ? "/" : appPathname);
 }
 
 export function matchOptimisticRouteManifestRoute(options: {
@@ -203,10 +212,16 @@ export function matchOptimisticRouteManifestRoute(options: {
   href: string;
   routeManifest: RouteManifest;
 }): OptimisticRouteMatch | null {
-  const urlParts = hrefToRouteParts(options.href, options.basePath);
-  if (urlParts === null) return null;
+  const routeParts = hrefToRouteParts(options.href, options.basePath);
+  if (routeParts === null) return null;
 
-  const match = matchNode(getRouteTrie(options.routeManifest), urlParts, 0, []);
+  const match = matchNode(
+    getRouteTrie(options.routeManifest),
+    routeParts.parts,
+    routeParts.rawParts,
+    0,
+    [],
+  );
   if (match === null) return null;
 
   decodeMatchedParams(match.params);
@@ -226,6 +241,7 @@ function resolveOptimisticNavigationParams(options: {
   match: OptimisticRouteMatch;
   routeManifest: RouteManifest;
   urlParts: readonly string[];
+  rawParts: readonly string[];
 }): Record<string, string | string[]> {
   const navigationParams: Record<string, string | string[]> = { ...options.match.params };
 
@@ -242,13 +258,11 @@ function resolveOptimisticNavigationParams(options: {
       continue;
     }
 
-    // Slot params are decoded once (from urlParts via splitPathnameForRouteMatch),
-    // matching the server-side resolveSlotParamOverrides decode pass. Route params
-    // are decoded a second time via decodeMatchedParams(match.params) above — a
-    // pre-existing asymmetry that has no practical effect for normal segments but
-    // means an encoded catch-all (%25/%2F) could differ between route and slot
-    // params in the same payload. TODO: converge the decode passes.
-    const matched = matchRoutePattern(options.urlParts, patternParts);
+    // Both route params (matchNode + decodeMatchedParams above) and slot params
+    // (matchRoutePattern below) are captured from the RAW segments and decoded
+    // exactly once, so an encoded catch-all (%25/%2F) yields identical route and
+    // slot params in the same payload (see #1963).
+    const matched = matchRoutePattern(options.urlParts, patternParts, options.rawParts);
     if (matched) {
       mergeParams(navigationParams, matched);
     }
@@ -350,8 +364,8 @@ export function resolveOptimisticNavigationPayload(options: {
 }): OptimisticNavigationPayload | null {
   if (options.interceptionContext !== null) return null;
 
-  const urlParts = hrefToRouteParts(options.href, options.basePath);
-  if (urlParts === null) return null;
+  const routeParts = hrefToRouteParts(options.href, options.basePath);
+  if (routeParts === null) return null;
 
   const match = matchOptimisticRouteManifestRoute({
     basePath: options.basePath,
@@ -375,7 +389,8 @@ export function resolveOptimisticNavigationPayload(options: {
     params: resolveOptimisticNavigationParams({
       match,
       routeManifest: options.routeManifest,
-      urlParts,
+      urlParts: routeParts.parts,
+      rawParts: routeParts.rawParts,
     }),
     template,
   };

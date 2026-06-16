@@ -190,6 +190,21 @@ describe("App Router optimistic routing", () => {
     ).toBe("route:/blog/featured");
   });
 
+  it("decodes optimistic route params exactly once (#1963)", () => {
+    const routes = blogManifest();
+    // %2520 must decode to %20 (one pass), not a space.
+    expect(
+      matchOptimisticRouteManifestRoute({
+        basePath: "",
+        href: "/blog/a%2520b",
+        routeManifest: routes,
+      }),
+    ).toMatchObject({
+      params: { slug: "a%20b" },
+      route: { id: "route:/blog/:slug" },
+    });
+  });
+
   it("preserves dynamic route param key order", () => {
     const twoSegment = manifest([
       route({
