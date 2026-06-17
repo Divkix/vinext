@@ -278,19 +278,15 @@ import { createAppRscHandler } from "vinext/server/app-rsc-handler";
 import { registerConfiguredCacheAdapters as __registerConfiguredCacheAdapters } from "virtual:vinext-cache-adapters";
 import { decodePathParams as __decodePathParams } from ${JSON.stringify(normalizePathModulePath)};
 import { buildRequestHeadersFromMiddlewareResponse as __buildRequestHeadersFromMiddlewareResponse } from ${JSON.stringify(middlewareRequestHeadersPath)};
-import {
-  dispatchAppRouteHandler as __dispatchAppRouteHandler,
-} from ${JSON.stringify(appRouteHandlerDispatchPath)};
-import {
+${
+  hasPagesDir
+    ? `import {
   applyRouteHandlerMiddlewareContext as __applyRouteHandlerMiddlewareContext,
-} from ${JSON.stringify(appRouteHandlerResponsePath)};
-import {
-  handleProgressiveServerActionRequest as __handleProgressiveServerActionRequest,
-  handleServerActionRscRequest as __handleServerActionRscRequest,
-  isProgressiveServerActionRequest as __isProgressiveServerActionRequest,
-  readActionBodyWithLimit as __readBodyWithLimit,
-  readActionFormDataWithLimit as __readFormDataWithLimit,
-} from ${JSON.stringify(appServerActionExecutionPath)};
+} from ${JSON.stringify(appRouteHandlerResponsePath)};`
+    : ""
+}
+const __loadAppRouteHandlerDispatch = () => import(${JSON.stringify(appRouteHandlerDispatchPath)});
+const __loadAppServerActionExecution = () => import(${JSON.stringify(appServerActionExecutionPath)});
 import {
   sanitizeErrorForClient as __sanitizeErrorForClient,
 } from ${JSON.stringify(appRscErrorsPath)};
@@ -820,7 +816,7 @@ export default createAppRscHandler({
       renderMode,
     });
   },
-  dispatchMatchedRouteHandler({
+  async dispatchMatchedRouteHandler({
     cleanPathname,
     middlewareContext,
     params,
@@ -828,6 +824,8 @@ export default createAppRscHandler({
     route,
     searchParams,
   }) {
+    const { dispatchAppRouteHandler: __dispatchAppRouteHandler } =
+      await __loadAppRouteHandlerDispatch();
     return __dispatchAppRouteHandler({
       basePath: __basePath,
       cleanPathname,
@@ -861,13 +859,18 @@ export default createAppRscHandler({
   },`
       : ""
   }
-  handleProgressiveActionRequest({
+  async handleProgressiveActionRequest({
     actionId,
     cleanPathname,
     contentType,
     middlewareContext,
     request,
   }) {
+    const {
+      handleProgressiveServerActionRequest: __handleProgressiveServerActionRequest,
+      isProgressiveServerActionRequest: __isProgressiveServerActionRequest,
+      readActionFormDataWithLimit: __readFormDataWithLimit,
+    } = await __loadAppServerActionExecution();
     // A multipart form POST to a page is always a server-action attempt, so a
     // body that decodes to no action must surface as 404 action-not-found
     // (#1340). Route handlers run after this dispatch and accept raw multipart
@@ -921,6 +924,11 @@ export default createAppRscHandler({
     request,
     searchParams,
   }) {
+    const {
+      handleServerActionRscRequest: __handleServerActionRscRequest,
+      readActionBodyWithLimit: __readBodyWithLimit,
+      readActionFormDataWithLimit: __readFormDataWithLimit,
+    } = await __loadAppServerActionExecution();
     const __actionMatch = matchRoute(cleanPathname);
     if (__actionMatch) await __ensureRouteLoaded(__actionMatch.route);
     const __actionIsEdgeRuntime = __actionMatch
