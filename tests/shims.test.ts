@@ -6505,6 +6505,186 @@ describe('"use cache" runtime', () => {
       expect(thrown!.message).not.toContain("expire");
     });
   });
+
+  describe("dev cache parity (cloudflare/vinext#2110, Next.js PR #94784)", () => {
+    // Next.js PR #94784 (https://github.com/vercel/next.js/pull/94784) added a
+    // dev-only `TieredCacheHandler` to stop warm dev reloads from being treated
+    // as cold cache misses when `cacheMaxMemorySize: 0` installs a no-op stub or
+    // a custom handler's `get` is slow/remote. vinext is immune by design: dev
+    // `"use cache"` re-executes the function rather than reading the configured
+    // handler (see the `if (isDev)` branch in cache-runtime.ts), so the handler
+    // is never on the dev read path and no front/tiered handler is needed.
+    // These tests lock that divergence in.
+    const env = process.env as Record<string, string | undefined>;
+
+    it("dev: cacheMaxMemorySize: 0 still returns the real value (no cold miss)", async () => {
+      const previousNodeEnv = env.NODE_ENV;
+      env.NODE_ENV = "development";
+      try {
+        const { registerCachedFunction } =
+          await import("../packages/vinext/src/shims/cache-runtime.js");
+        const { setDataCacheHandler, MemoryCacheHandler } =
+          await import("../packages/vinext/src/shims/cache.js");
+        // The no-op-equivalent dev config: nothing is ever stored here.
+        setDataCacheHandler(new MemoryCacheHandler({ cacheMaxMemorySize: 0 }));
+
+        let callCount = 0;
+        const cached = registerCachedFunction(async () => {
+          callCount++;
+          return { value: "real" };
+        }, "test:dev-size-zero");
+
+        // The configured handler caches nothing, but dev re-executes and
+        // returns the actual value rather than an empty cold-miss render.
+        expect(await cached()).toEqual({ value: "real" });
+        expect(await cached()).toEqual({ value: "real" });
+        // Dev always executes fresh (HMR freshness), so the function runs each
+        // time — the point is the *value* is always correct.
+        expect(callCount).toBe(2);
+      } finally {
+        if (previousNodeEnv === undefined) delete env.NODE_ENV;
+        else env.NODE_ENV = previousNodeEnv;
+      }
+    });
+
+    it("dev: a slow/remote custom handler is never on the read path", async () => {
+      const previousNodeEnv = env.NODE_ENV;
+      env.NODE_ENV = "development";
+      try {
+        const { registerCachedFunction } =
+          await import("../packages/vinext/src/shims/cache-runtime.js");
+        const { setDataCacheHandler } = await import("../packages/vinext/src/shims/cache.js");
+
+        let getCalls = 0;
+        let setCalls = 0;
+        // A handler whose `get` is slow/remote — exactly the case that surfaces
+        // a cold miss in Next.js. vinext must never consult it in dev.
+        setDataCacheHandler({
+          async get() {
+            getCalls++;
+            await new Promise((resolve) => setTimeout(resolve, 50));
+            return null;
+          },
+          async set() {
+            setCalls++;
+          },
+          async revalidateTag() {},
+        });
+
+        let callCount = 0;
+        const cached = registerCachedFunction(async () => {
+          callCount++;
+          return { count: callCount };
+        }, "test:dev-slow-handler");
+
+        expect(await cached()).toEqual({ count: 1 });
+        expect(await cached()).toEqual({ count: 2 });
+        // The backing handler is never read or written on the dev path, so its
+        // latency cannot surface as a cold miss.
+        expect(getCalls).toBe(0);
+        expect(setCalls).toBe(0);
+      } finally {
+        if (previousNodeEnv === undefined) delete env.NODE_ENV;
+        else env.NODE_ENV = previousNodeEnv;
+      }
+    });
+
+    it('dev: "use cache: private" still caches per-request under cacheMaxMemorySize: 0', async () => {
+      const previousNodeEnv = env.NODE_ENV;
+      env.NODE_ENV = "development";
+      try {
+        const { registerCachedFunction, clearPrivateCache } =
+          await import("../packages/vinext/src/shims/cache-runtime.js");
+        const { setDataCacheHandler, MemoryCacheHandler } =
+          await import("../packages/vinext/src/shims/cache.js");
+        // In Next.js the dev private handler was sized from `cacheMaxMemorySize`
+        // and degraded to the no-op stub at 0. vinext's private cache is a
+        // per-request Map, never sized from `cacheMaxMemorySize`, so size-0 must
+        // not affect it.
+        setDataCacheHandler(new MemoryCacheHandler({ cacheMaxMemorySize: 0 }));
+
+        let callCount = 0;
+        const cached = registerCachedFunction(
+          async () => {
+            callCount++;
+            return { count: callCount };
+          },
+          "test:dev-private-size-zero",
+          "private",
+        );
+
+        // Same request — served from the per-request private cache.
+        expect(await cached()).toEqual({ count: 1 });
+        expect(await cached()).toEqual({ count: 1 });
+        expect(callCount).toBe(1);
+
+        // New request — re-executes.
+        clearPrivateCache();
+        expect(await cached()).toEqual({ count: 2 });
+        expect(callCount).toBe(2);
+      } finally {
+        if (previousNodeEnv === undefined) delete env.NODE_ENV;
+        else env.NODE_ENV = previousNodeEnv;
+      }
+    });
+
+    it("dev: revalidateTag still reaches the configured handler under cacheMaxMemorySize: 0", async () => {
+      const previousNodeEnv = env.NODE_ENV;
+      env.NODE_ENV = "development";
+      try {
+        const { setDataCacheHandler, revalidateTag } =
+          await import("../packages/vinext/src/shims/cache.js");
+
+        const invalidatedTags: string[] = [];
+        setDataCacheHandler({
+          async get() {
+            return null;
+          },
+          async set() {},
+          async revalidateTag(tags) {
+            for (const tag of Array.isArray(tags) ? tags : [tags]) {
+              invalidatedTags.push(tag);
+            }
+          },
+        });
+
+        await revalidateTag("dev-tag");
+        // Tag invalidation must continue to reach the configured handler in dev.
+        expect(invalidatedTags.length).toBeGreaterThan(0);
+      } finally {
+        if (previousNodeEnv === undefined) delete env.NODE_ENV;
+        else env.NODE_ENV = previousNodeEnv;
+      }
+    });
+
+    it("production: cacheMaxMemorySize: 0 caches nothing, so it re-executes (parity guard)", async () => {
+      const previousNodeEnv = env.NODE_ENV;
+      env.NODE_ENV = "production";
+      try {
+        const { registerCachedFunction } =
+          await import("../packages/vinext/src/shims/cache-runtime.js");
+        const { setDataCacheHandler, MemoryCacheHandler } =
+          await import("../packages/vinext/src/shims/cache.js");
+        setDataCacheHandler(new MemoryCacheHandler({ cacheMaxMemorySize: 0 }));
+
+        let callCount = 0;
+        const cached = registerCachedFunction(async () => {
+          callCount++;
+          return { count: callCount };
+        }, "test:prod-size-zero");
+
+        // Production reads the handler. Size-0 stores nothing, so every read is
+        // a miss and the function re-executes — production behavior is unchanged
+        // by the dev-parity reasoning above.
+        expect(await cached()).toEqual({ count: 1 });
+        expect(await cached()).toEqual({ count: 2 });
+        expect(callCount).toBe(2);
+      } finally {
+        if (previousNodeEnv === undefined) delete env.NODE_ENV;
+        else env.NODE_ENV = previousNodeEnv;
+      }
+    });
+  });
 });
 
 describe("replyToCacheKey deterministic hashing", () => {

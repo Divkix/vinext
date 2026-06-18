@@ -499,6 +499,18 @@ The ISR cache layer sits **above** `CacheHandler`, not inside it. `CacheHandler`
 
 The caching layer is pluggable. The default data cache handler is the in-memory `MemoryCacheHandler` in **all** runtimes (including Cloudflare Workers) when nothing is configured — KV is opt-in, not the default. Configure a backend declaratively via the `cache` option on the `vinext()` plugin (e.g. `cache: { data: kvDataAdapter({ binding: "VINEXT_KV_CACHE" }) }` from `@vinext/cloudflare/cache/kv-data-adapter`); the generated `virtual:vinext-cache-adapters` module registers it on the first request. The imperative `setDataCacheHandler()` / `setCdnCacheAdapter()` setters still work but are deprecated for consumers. The ISR logic works automatically with any backend.
 
+### Dev `"use cache"` Does Not Read the Handler (no `TieredCacheHandler` needed)
+
+Next.js PR [#94784](https://github.com/vercel/next.js/pull/94784) added a dev-only `TieredCacheHandler` (plus a size-0 replacement and a dev private handler) to fix warm dev reloads being treated as **cold cache misses** under Cache Components. Their bug: in dev, Next.js *reads* the configured cache handler during a staged render, and a read that doesn't resolve in a microtask (a `cacheMaxMemorySize: 0` no-op stub, or a slow/remote custom handler's `get`) is counted as a miss.
+
+**vinext is immune by design and does not port `TieredCacheHandler`.** vinext's dev `"use cache"` path never reads the handler: `registerCachedFunction` short-circuits in dev (`packages/vinext/src/shims/cache-runtime.ts`, the `if (isDev) return executeWithContext(...)` branch) and re-executes the function so HMR edits are reflected immediately. Consequently:
+
+- `cacheMaxMemorySize: 0` only configures the production/ISR `MemoryCacheHandler`; it is never on the dev `"use cache"` read path.
+- A slow or remote custom data handler is never consulted by dev `"use cache"`, so its latency cannot surface as a cold miss.
+- `"use cache: private"` uses a per-request `Map`, never sized from `cacheMaxMemorySize`, so it cannot degrade to a no-op stub.
+
+This is a **deliberate, verified divergence**, locked in by regression tests in `tests/shims.test.ts` (the `"use cache" runtime` describe block) and tracked by cloudflare/vinext#2110. If dev `"use cache"` is ever changed to read the handler (e.g. to cache expensive dev work), revisit whether a dev front/tiered handler is needed and keep `revalidateTag` reaching it.
+
 ### Next.js Request Execution Order
 
 This is critical to get right. Many security reports and bug fixes depend on understanding which steps run before vs after middleware. The Next.js documented execution order is (source: [Next.js middleware docs](https://nextjs.org/docs/app/building-your-application/routing/middleware#matching-paths), [rewrites docs](https://nextjs.org/docs/app/api-reference/config/next-config-js/rewrites)):

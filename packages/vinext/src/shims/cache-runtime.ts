@@ -516,6 +516,17 @@ export function registerCachedFunction<TArgs extends unknown[], TResult>(
 
       // In dev mode, always execute fresh — skip shared cache lookup/storage.
       // This ensures HMR changes are reflected immediately.
+      //
+      // Because dev re-executes rather than reading the configured handler,
+      // vinext does not exhibit the dev cold-cache-miss bug that Next.js PR
+      // #94784 fixes (warm reloads treated as cold misses when
+      // `cacheMaxMemorySize: 0` installs a no-op stub, or when a custom handler's
+      // `get` is slow/remote). The handler is never on the dev read path, so
+      // there is no slow read to surface as a miss and no `TieredCacheHandler`
+      // front is needed. See cloudflare/vinext#2110 and
+      // https://github.com/vercel/next.js/pull/94784. (`"use cache: private"`
+      // uses a per-request Map below, never sized from `cacheMaxMemorySize`, so
+      // it also cannot degrade to a no-op stub.)
       if (isDev) {
         return executeWithContext(fn, args, cacheVariant);
       }
