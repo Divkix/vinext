@@ -7,6 +7,7 @@
 import path from "node:path";
 import fs from "node:fs";
 import os from "node:os";
+import vm from "node:vm";
 import { describe, it, expect } from "vite-plus/test";
 import { generateBrowserEntry } from "../packages/vinext/src/entries/app-browser-entry.js";
 import { buildAppRscManifestCode } from "../packages/vinext/src/entries/app-rsc-manifest.js";
@@ -123,6 +124,17 @@ const minimalAppRoutes: AppRoute[] = [
 // ── App Router manifest construction ─────────────────────────────────
 
 describe("App Router generated manifest construction", () => {
+  it("embeds client rewrite rules in the App browser entry", () => {
+    const code = generateBrowserEntry([], null, [], {
+      afterFiles: [],
+      beforeFiles: [{ source: "/legacy", destination: "/about" }],
+      fallback: [],
+    });
+
+    expect(code).toContain('window.__VINEXT_CLIENT_REWRITES__ = {"afterFiles":[],"beforeFiles"');
+    expect(code).toContain('"source":"/legacy","destination":"/about"');
+  });
+
   it("embeds the Link auto-prefetch route manifest in the browser entry", () => {
     const code = generateBrowserEntry([
       ...minimalAppRoutes,
@@ -786,9 +798,22 @@ describe("App Router entry templates", () => {
   it("generateRscEntry delegates App Router request handling to the typed helper", () => {
     const code = generateRscEntry("/tmp/test/app", minimalAppRoutes, null, [], null, "", false);
 
-    expect(code).toContain("app-rsc-handler.js");
-    expect(code).toContain("export default __createAppRscHandler({");
+    expect(code).toContain('import { createAppRscHandler } from "vinext/server/app-rsc-handler";');
+    expect(code).toContain("export default createAppRscHandler({");
     expect(code).not.toContain("computeRscCacheBustingSearchParam(");
+  });
+
+  it("generateRscEntry defers route-handler and server-action runtimes", () => {
+    const code = generateRscEntry("/tmp/test/app", minimalAppRoutes, null, [], null, "", false);
+
+    expect(code).toContain('const __loadAppRouteHandlerDispatch = () => import("');
+    expect(code).toContain('const __loadAppServerActionExecution = () => import("');
+    expect(code).toContain("await __loadAppRouteHandlerDispatch()");
+    expect(code).toContain("await __loadAppServerActionExecution()");
+    expect(code).not.toMatch(/import \{\s*dispatchAppRouteHandler as __dispatchAppRouteHandler,/);
+    expect(code).not.toMatch(
+      /import \{\s*handleProgressiveServerActionRequest as __handleProgressiveServerActionRequest,/,
+    );
   });
 
   it("generateRscEntry passes page-slot dynamic stale time config into App page dispatch", () => {
@@ -846,6 +871,41 @@ describe("App Router entry templates", () => {
 // ── Pages Router entry template runtime bootstrap ─────────────────────
 
 describe("Pages Router entry template", () => {
+  it("reports trusted _next/data classification from URL normalization", async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "vinext-pages-data-entry-"));
+    const pagesDir = path.join(tmpDir, "pages");
+    const middlewarePath = path.join(tmpDir, "middleware.ts");
+
+    try {
+      fs.mkdirSync(pagesDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(pagesDir, "index.tsx"),
+        "export default function Page() { return null; }",
+      );
+      fs.writeFileSync(
+        middlewarePath,
+        'export function middleware() { return new Response(null, { headers: { "x-middleware-next": "1" } }); }',
+      );
+
+      const code = await generateServerEntry(
+        pagesDir,
+        await resolveNextConfig({
+          basePath: "/root",
+          generateBuildId: () => "test-build-id",
+        }),
+        createValidFileMatcher(),
+        middlewarePath,
+        null,
+      );
+
+      expect(code).toContain("export function normalizeDataRequest(request)");
+      expect(code).toContain("return __normalizePagesDataRequest(request, buildId)");
+      expect(code).not.toContain('request.headers.get("x-nextjs-data")');
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
   it("installs server globals before Pages Router user modules are imported", async () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "vinext-pages-entry-"));
     const pagesDir = path.join(tmpDir, "pages");
@@ -952,8 +1012,56 @@ describe("Pages Router entry template", () => {
     }
   });
 
-  it("keeps the Pages Router client tree shape stable after hydration", async () => {
-    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "vinext-pages-client-entry-hydrated-"));
+  it("hydrates _app with the full Pages props envelope", async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "vinext-pages-client-entry-props-"));
+    const pagesDir = path.join(tmpDir, "pages");
+
+    try {
+      fs.mkdirSync(pagesDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(pagesDir, "_app.tsx"),
+        "export default function App({ Component, pageProps }) { return <Component {...pageProps} />; }",
+      );
+      fs.writeFileSync(
+        path.join(pagesDir, "index.tsx"),
+        "export default function Page() { return null; }",
+      );
+
+      const code = await generateClientEntry(
+        pagesDir,
+        await resolveNextConfig({}),
+        createValidFileMatcher(),
+      );
+
+      expect(code).toContain(
+        'const props = nextData.props && typeof nextData.props === "object" ? nextData.props : {};',
+      );
+      expect(code).toContain("const rawPageProps = props.pageProps;");
+      expect(code).toContain(
+        'const pageProps = rawPageProps && typeof rawPageProps === "object" ? rawPageProps : {};',
+      );
+      expect(code).toContain("import Router, {");
+      expect(code).toContain("wrapWithRouterContext,");
+      expect(code).toContain("_initializePagesRouterReadyFromNextData,");
+      expect(code).toContain('} from "next/router";');
+      expect(code).toContain("_initializePagesRouterReadyFromNextData(nextData);");
+      expect(code).toContain("router: Router,");
+      expect(code).toContain("pageProps: rawPageProps,");
+      expect(code).toContain("element = wrapWithRouterContext(element, resolveHydrationCommit);");
+      expect(code).toContain("await hydrationCommitted;");
+      expect(code).toContain("if (nextData.isFallback) {");
+      expect(code).toContain("await Router.replace(");
+      expect(code).toContain("{ _h: 1, scroll: false },");
+      expect(code).not.toContain("function VinextHydrationMarker");
+      expect(code).not.toContain("React.createElement(VinextHydrationMarker");
+      expect(code).toContain("hydrateRoot(container, element, hydrateRootOptions)");
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("gracefully skips Pages Router initialization without __NEXT_DATA__", async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "vinext-pages-client-entry-no-data-"));
     const pagesDir = path.join(tmpDir, "pages");
 
     try {
@@ -968,11 +1076,23 @@ describe("Pages Router entry template", () => {
         await resolveNextConfig({}),
         createValidFileMatcher(),
       );
-
-      expect(code).not.toContain("function VinextHydrationMarker");
-      expect(code).not.toContain("React.createElement(VinextHydrationMarker");
-      expect(code).toContain("element = wrapWithRouterContext(element);");
-      expect(code).toContain("hydrateRoot(container, element, hydrateRootOptions)");
+      const initializationStart = code.indexOf(
+        'const nextDataElement = document.getElementById("__NEXT_DATA__");',
+      );
+      const initializationEnd = code.indexOf("  let hydrateRootOptions;", initializationStart);
+      const initializationCode = code.slice(initializationStart, initializationEnd);
+      const errors: string[] = [];
+      await expect(
+        vm.runInNewContext(`(async () => {${initializationCode}\n}\nawait hydrate();})()`, {
+          window: {},
+          document: { getElementById: () => null },
+          console: { error: (message: string) => errors.push(message) },
+          _initializePagesRouterReadyFromNextData: () => {
+            throw new Error("router readiness must not initialize without __NEXT_DATA__");
+          },
+        }),
+      ).resolves.toBeUndefined();
+      expect(errors).toEqual(["[vinext] No __NEXT_DATA__ found"]);
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }

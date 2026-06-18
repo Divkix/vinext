@@ -8,19 +8,18 @@ import { createFromReadableStream } from "@vitejs/plugin-rsc/ssr";
 import type { RenderToReadableStreamOptions } from "react-dom/server";
 import { renderToReadableStream, renderToStaticMarkup } from "react-dom/server.edge";
 import clientReferences from "virtual:vite-rsc/client-references";
-import type { NavigationContext } from "vinext/shims/navigation";
+import type { NavigationContext } from "vinext/shims/navigation-server";
 import {
   ServerInsertedHTMLContext,
-  appRouterInstance,
   clearServerInsertedHTML,
   getBfcacheIdMapContext,
+  registerServerInsertedHTMLCallback,
   renderServerInsertedHTML,
   setNavigationContext,
-  useServerInsertedHTML,
-} from "vinext/shims/navigation";
+} from "vinext/shims/navigation-server";
 import { runWithNavigationContext } from "vinext/shims/navigation-state";
 import { runWithRootParamsScope, type RootParams } from "vinext/shims/root-params";
-import { isOpenRedirectShaped } from "./request-pipeline.js";
+import { isOpenRedirectShaped } from "./open-redirect.js";
 import { notFoundResponse } from "./http-error-responses.js";
 import { withScriptNonce } from "vinext/shims/script-nonce-context";
 import {
@@ -33,23 +32,30 @@ import {
   escapeHtmlAttr,
   safeJsonStringify,
 } from "./html.js";
+import { renderBeforeInteractiveInlineScripts } from "./before-interactive-head.js";
 import {
   createNavigationRuntimeRscMetadataScript,
   createRscEmbedTransform,
   createTickBufferedTransform,
 } from "./app-ssr-stream.js";
-import { deferUntilStreamConsumed, type AppSsrRenderResult } from "./app-page-stream.js";
+import type { AppSsrRenderResult } from "./app-page-stream.js";
+import { deferUntilStreamConsumed } from "./defer-until-stream-consumed.js";
 import { createSsrErrorMetaRenderer } from "./app-ssr-error-meta.js";
 import { createInitialDevServerErrorScript } from "./dev-initial-server-error.js";
 import { getClientTraceMetadataHTML } from "./client-trace-metadata.js";
 import { AppElementsWire, type AppWireElements } from "./app-elements.js";
-import { createBfcacheSegmentStateKeyMap, createInitialBfcacheIdMap } from "./app-browser-state.js";
+import {
+  createBfcacheSegmentStateKeyMap,
+  createInitialBfcacheIdMap,
+} from "./app-bfcache-identity.js";
 import { BfcacheStateKeyMapContext, ElementsContext, Slot } from "vinext/shims/slot";
 import { AppRouterContext } from "vinext/shims/internal/app-router-context";
 import { createClientReferencePreloader } from "./app-client-reference-preloader.js";
 import { RSC_FORM_STATE_GLOBAL } from "./app-browser-hydration.js";
 import { isPprFallbackShellAbortError } from "vinext/shims/ppr-fallback-shell";
+import DefaultGlobalError from "vinext/shims/default-global-error";
 import { appendAssetDeploymentIdQuery } from "../utils/deployment-id.js";
+import { ssrAppRouterInstance } from "./app-ssr-router-instance.js";
 
 /**
  * `@types/react-dom` does not yet type `maxHeadersLength` (it pairs with the
@@ -146,6 +152,49 @@ async function loadStaticPrerender(): Promise<StaticPrerender> {
   throw new Error("[vinext] react-dom/static.edge did not expose prerender().");
 }
 
+function createUtf8Stream(html: string): ReadableStream<Uint8Array> {
+  const encoder = new TextEncoder();
+  return new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(encoder.encode(html));
+      controller.close();
+    },
+  });
+}
+
+function buildBootstrapModuleScript(bootstrapModuleUrl?: string, nonce?: string): string {
+  if (!bootstrapModuleUrl) return "";
+  return (
+    `<script type="module"${createNonceAttribute(nonce)} src="` +
+    escapeHtmlAttr(bootstrapModuleUrl) +
+    '" id="_R_" async=""></script>'
+  );
+}
+
+function renderSsrErrorDocumentShell(
+  bootstrapModuleUrl?: string,
+  nonce?: string,
+): ReadableStream<Uint8Array> {
+  const html = renderToStaticMarkup(
+    createReactElement(DefaultGlobalError, {
+      error: null,
+    }),
+  ).replace("<style>", '<style data-vinext-error-shell-style="">');
+  const bootstrapScript = buildBootstrapModuleScript(bootstrapModuleUrl, nonce);
+  if (!bootstrapScript) {
+    return createUtf8Stream(`<!DOCTYPE html>${html}`);
+  }
+
+  const documentClose = "</body></html>";
+  if (!html.endsWith(documentClose)) {
+    return createUtf8Stream(`<!DOCTYPE html>${html}${bootstrapScript}`);
+  }
+
+  return createUtf8Stream(
+    `<!DOCTYPE html>${html.slice(0, -documentClose.length)}${bootstrapScript}${documentClose}`,
+  );
+}
+
 const clientReferencePreloader = createClientReferencePreloader({
   getReferences() {
     return clientReferences;
@@ -189,54 +238,6 @@ function renderInsertedHtml(insertedElements: readonly unknown[]): string {
   }
 
   return insertedHTML;
-}
-
-/**
- * Render captured `<Script strategy="beforeInteractive">` inline scripts to
- * HTML, ready to splice immediately after `<head ...>` opens. Each entry has
- * already had its inline content escaped via `escapeInlineContent(..., "script")`
- * inside the Script shim, so this function only quotes the attributes that
- * actually go on the tag (id, nonce, plus the residual passthroughs).
- *
- * Keeping this function colocated with the rest of the head-injection
- * helpers makes it obvious where the boundary is: anything passed through
- * here is being concatenated directly into HTML; treat the inputs
- * accordingly.
- */
-// Conservative subset of the HTML attribute-name grammar. Must start with a
-// letter and contain only letters, digits, underscores, hyphens, or dots —
-// enough to round-trip data-* and standard attributes (`async`, `defer`,
-// `type`, `crossorigin`, etc.) without ever splicing a `"`/`>`/whitespace
-// into the unquoted *name* position where escaping wouldn't help.
-const VALID_ATTR_NAME = /^[a-zA-Z][\w.-]*$/;
-
-function renderBeforeInteractiveInlineScripts(
-  scripts: readonly BeforeInteractiveInlineScript[],
-): string {
-  if (scripts.length === 0) return "";
-  let html = "";
-  for (const script of scripts) {
-    let attrs = "";
-    if (script.id) {
-      attrs += ` id="${escapeHtmlAttr(script.id)}"`;
-    }
-    attrs += createNonceAttribute(script.nonce);
-    if (script.attributes) {
-      for (const [key, value] of Object.entries(script.attributes)) {
-        // Attribute *values* go through escapeHtmlAttr below. The *name*
-        // can't be escaped — a malformed key would break the tag — so we
-        // gate at the boundary instead of trying to neutralise it.
-        if (!VALID_ATTR_NAME.test(key)) continue;
-        if (value === true) {
-          attrs += ` ${key}`;
-        } else if (typeof value === "string") {
-          attrs += ` ${key}="${escapeHtmlAttr(value)}"`;
-        }
-      }
-    }
-    html += `<script${attrs}>${script.innerHTML}</script>`;
-  }
-  return html;
 }
 
 function renderFontHtml(
@@ -376,6 +377,7 @@ export async function handleSsr(
      *  to resolve before returning the HTML stream. Used for static prerender
      *  and ISR cache writes to avoid caching fallback content. */
     waitForAllReady?: boolean;
+    fallbackToErrorDocumentOnShellError?: boolean;
   },
 ): Promise<AppSsrRenderResult> {
   return runWithNavigationContext(async () => {
@@ -458,14 +460,14 @@ export async function handleSsr(
         const root = AppRouterContext
           ? createReactElement(
               AppRouterContext.Provider,
-              { value: appRouterInstance },
+              { value: ssrAppRouterInstance },
               flightRootElement,
             )
           : flightRootElement;
         const ssrTree = ServerInsertedHTMLContext
           ? createReactElement(
               ServerInsertedHTMLContext.Provider,
-              { value: useServerInsertedHTML },
+              { value: registerServerInsertedHTMLCallback },
               root,
             )
           : root;
@@ -584,6 +586,7 @@ export async function handleSsr(
         };
 
         let htmlStream: ReadableStream<Uint8Array>;
+        let shellErrorRecovered = false;
         if (pprFallbackShellSignal) {
           const prerender = await loadStaticPrerender();
           const htmlAbortController = new AbortController();
@@ -594,19 +597,29 @@ export async function handleSsr(
           setTimeout(() => htmlAbortController.abort(), 0);
           htmlStream = (await pendingHtml).prelude;
         } else {
-          const streamingHtmlStream = await renderToReadableStream(ssrRoot, {
-            ...renderOptions,
-          });
+          let streamingHtmlStream: Awaited<ReturnType<typeof renderToReadableStream>> | undefined;
+          try {
+            streamingHtmlStream = await renderToReadableStream(ssrRoot, {
+              ...renderOptions,
+            });
 
-          // When producing static output (prerender / ISR cache writes), wait for
-          // the full React tree to resolve before emitting bytes. This prevents
-          // Suspense fallback content from being serialized to the cache.
-          // Matches Next.js waitForAllReady forkpoint in renderToNodeFizzStream.
-          if (options?.waitForAllReady === true) {
-            await streamingHtmlStream.allReady;
+            if (options?.waitForAllReady === true) {
+              await streamingHtmlStream.allReady;
+            }
+
+            htmlStream = streamingHtmlStream;
+          } catch (error) {
+            void streamingHtmlStream?.cancel().catch(() => {});
+            if (
+              options?.fallbackToErrorDocumentOnShellError !== true ||
+              options?.waitForAllReady === true ||
+              typeof (error as { digest?: unknown } | null)?.digest === "string"
+            ) {
+              throw error;
+            }
+            shellErrorRecovered = true;
+            htmlStream = renderSsrErrorDocumentShell(bootstrapModuleUrl, options?.scriptNonce);
           }
-
-          htmlStream = streamingHtmlStream;
         }
 
         // Populated before any SSR request runs: at prod-server startup
@@ -693,6 +706,7 @@ export async function handleSsr(
           // this promise expecting it to be load-bearing in production.
           metadataReady: Promise.resolve(),
           capturedRscData: options?.capturedRscDataRef?.value ?? null,
+          shellErrorRecovered,
           linkHeader: reactLinkHeader,
         };
       } catch (error) {

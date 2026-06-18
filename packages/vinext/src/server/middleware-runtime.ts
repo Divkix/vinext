@@ -17,7 +17,12 @@ import { MatcherConfig, matchesMiddleware } from "./middleware-matcher.js";
 import { shouldKeepMiddlewareHeader } from "./middleware-request-headers.js";
 import { processMiddlewareHeaders } from "./request-pipeline.js";
 import { badRequestResponse, internalServerErrorResponse } from "./http-error-responses.js";
-import { addBasePathToPathname, hasBasePath, stripBasePath } from "../utils/base-path.js";
+import {
+  addBasePathToPathname,
+  hasBasePath,
+  removeTrailingSlash,
+  stripBasePath,
+} from "../utils/base-path.js";
 
 export type MiddlewareModule = Record<string, unknown>;
 
@@ -61,10 +66,9 @@ type ExecuteMiddlewareOptions = {
   i18nConfig?: NextI18nConfig | null;
   includeErrorDetails?: boolean;
   /**
-   * Whether the incoming request was a Next.js `_next/data` fetch (carried
-   * `x-nextjs-data: 1`). The header itself is stripped by `filterInternalHeaders`
-   * before the middleware request is constructed, so callers must capture this
-   * flag from the raw incoming headers and forward it explicitly.
+   * Whether the incoming request was recognized as a Next.js `_next/data`
+   * fetch. Internal headers are stripped before middleware runs, so adapters
+   * must derive and forward this from trusted URL normalization.
    */
   isDataRequest?: boolean;
   isProxy: boolean;
@@ -275,9 +279,10 @@ export async function executeMiddleware(
   // stripBasePath is a no-op. When it is auto-derived from the request URL and the
   // URL carries the basePath (because the adapter passed the original URL), we must
   // strip before matching so patterns like "/about" fire correctly.
-  const matchPathname = options.basePath
+  const basePathStrippedPathname = options.basePath
     ? stripBasePath(normalizedPathname, options.basePath)
     : normalizedPathname;
+  const matchPathname = basePathStrippedPathname;
 
   if (
     !matchesMiddleware(
@@ -298,7 +303,7 @@ export async function executeMiddleware(
     options.trailingSlash,
     hadBasePath,
   );
-  const fetchEvent = new NextFetchEvent({ page: matchPathname });
+  const fetchEvent = new NextFetchEvent({ page: removeTrailingSlash(matchPathname) });
 
   let response: Response | undefined | void;
   try {
@@ -314,6 +319,10 @@ export async function executeMiddleware(
       response: internalServerErrorResponse(message),
       waitUntilPromises,
     };
+  } finally {
+    if (process.env.NODE_ENV !== "development" && nextRequest.body) {
+      void nextRequest.body.cancel().catch(() => {});
+    }
   }
 
   const waitUntilPromises = drainFetchEvent(fetchEvent);
@@ -371,9 +380,8 @@ export async function executeMiddleware(
       // For `_next/data` requests, translate the HTTP redirect into the
       // `x-nextjs-redirect` soft-redirect protocol so the client router can
       // perform the navigation without tripping CORS on cross-origin targets.
-      // `x-nextjs-data` lives in INTERNAL_HEADERS and is stripped before the
-      // middleware request is constructed, so the flag is threaded in from the
-      // caller (which sees the raw incoming headers).
+      // Internal data headers are stripped before middleware runs, so this
+      // protocol is gated on trusted classification threaded by the caller.
       if (options.isDataRequest) {
         return {
           continue: false,

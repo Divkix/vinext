@@ -145,6 +145,149 @@ export default function middleware() {
   );
 }
 
+function writeGsspAppInitialPropsContextFixture(rootDir: string): void {
+  fs.mkdirSync(path.join(rootDir, "pages", "blog", "[post]"), { recursive: true });
+  fs.mkdirSync(path.join(rootDir, "pages", "rewrite-target"), { recursive: true });
+  const nmLink = path.join(rootDir, "node_modules");
+  if (!fs.existsSync(nmLink)) {
+    fs.symlinkSync(path.join(process.cwd(), "node_modules"), nmLink);
+  }
+  fs.writeFileSync(
+    path.join(rootDir, "next.config.js"),
+    `module.exports = {
+  generateBuildId: () => "test-build-id",
+  async rewrites() {
+    return [
+      { source: "/blog-post-1", destination: "/blog/post-1" },
+      { source: "/blog-post-2", destination: "/blog/post-2?hello=world" },
+      { source: "/blog-:param", destination: "/blog/post-3" },
+      { source: "/rewrite-source/:path+", destination: "/rewrite-target" },
+    ];
+  },
+};
+`,
+  );
+  fs.writeFileSync(
+    path.join(rootDir, "pages", "_app.jsx"),
+    `import App from "next/app";
+
+class MyApp extends App {
+  static async getInitialProps(ctx) {
+    const { req, query, pathname, asPath } = ctx.ctx;
+    let pageProps = {};
+
+    if (ctx.Component.getInitialProps) {
+      pageProps = await ctx.Component.getInitialProps(ctx.ctx);
+    }
+
+    return {
+      appProps: {
+        url: (req || {}).url,
+        query,
+        pathname,
+        asPath,
+      },
+      pageProps,
+    };
+  }
+
+  render() {
+    const { Component, pageProps, appProps, router } = this.props;
+    return <Component {...pageProps} appProps={appProps} appRouter={router} />;
+  }
+}
+
+export default MyApp;
+`,
+  );
+  fs.writeFileSync(
+    path.join(rootDir, "pages", "blog", "[post]", "index.jsx"),
+    `import { useRouter } from "next/router";
+
+export async function getServerSideProps({ params, resolvedUrl }) {
+  return {
+    props: {
+      params,
+      resolvedUrl,
+      post: params.post,
+    },
+  };
+}
+
+export default function BlogPost({ post, params, appProps, appRouter, resolvedUrl }) {
+  const router = useRouter();
+
+  return (
+    <>
+      <p>Post: {post}</p>
+      <div id="params">{JSON.stringify(params)}</div>
+      <div id="query">{JSON.stringify(router.query)}</div>
+      <div id="app-query">{JSON.stringify(appProps.query)}</div>
+      <div id="app-url">{appProps.url}</div>
+      <div id="app-router-pathname">{appRouter.pathname}</div>
+      <div id="resolved-url">{resolvedUrl}</div>
+      <div id="as-path">{router.asPath}</div>
+    </>
+  );
+}
+`,
+  );
+  fs.writeFileSync(
+    path.join(rootDir, "pages", "something.jsx"),
+    `import { useRouter } from "next/router";
+
+export async function getServerSideProps({ params, query, resolvedUrl }) {
+  return {
+    props: {
+      resolvedUrl,
+      world: "world",
+      query: query || {},
+      params: params || {},
+    },
+  };
+}
+
+export default function Something({ world, params, query, appProps, resolvedUrl }) {
+  const router = useRouter();
+
+  return (
+    <>
+      <p>hello: {world}</p>
+      <div id="params">{JSON.stringify(params)}</div>
+      <div id="initial-query">{JSON.stringify(query)}</div>
+      <div id="query">{JSON.stringify(router.query)}</div>
+      <div id="app-query">{JSON.stringify(appProps.query)}</div>
+      <div id="app-url">{appProps.url}</div>
+      <div id="resolved-url">{resolvedUrl}</div>
+      <div id="as-path">{router.asPath}</div>
+    </>
+  );
+}
+`,
+  );
+  fs.writeFileSync(
+    path.join(rootDir, "pages", "rewrite-target", "index.jsx"),
+    `import { useRouter } from "next/router";
+
+export async function getServerSideProps({ req }) {
+  return { props: { url: req.url } };
+}
+
+export default function RewriteTarget({ url }) {
+  const router = useRouter();
+
+  return (
+    <>
+      <h1>rewrite-target</h1>
+      <p id="as-path">{router.asPath}</p>
+      <p id="req-url">{url}</p>
+    </>
+  );
+}
+`,
+  );
+}
+
 async function buildPagesFixtureToOutDir(rootDir: string, outDir: string): Promise<void> {
   await build({
     root: rootDir,
@@ -426,7 +569,9 @@ describe("Pages Router integration", () => {
     );
 
     const html = await res.text();
-    expect(html).toContain('<script nonce="pages-response">window.__NEXT_DATA__ = ');
+    expect(html).toContain(
+      '<script id="__NEXT_DATA__" type="application/json" nonce="pages-response">',
+    );
   });
 
   it("does not serve cached Pages ISR HTML to CSP nonce requests", async () => {
@@ -451,7 +596,9 @@ describe("Pages Router integration", () => {
     expect(second.headers.get("cache-control")).toBe("no-store, must-revalidate");
     expect(second.headers.get("x-vinext-cache")).toBeNull();
     const secondHtml = await second.text();
-    expect(secondHtml).toContain('<script nonce="pages-isr">window.__NEXT_DATA__ = ');
+    expect(secondHtml).toContain(
+      '<script id="__NEXT_DATA__" type="application/json" nonce="pages-isr">',
+    );
   });
 
   it("renders the SSR page with getServerSideProps data", async () => {
@@ -578,7 +725,12 @@ describe("Pages Router integration", () => {
     expect(res.headers.get("content-type")).toContain("application/json");
     expect(res.headers.get("location")).toBeNull();
 
-    const body = (await res.json()) as { pageProps?: Record<string, unknown> };
+    const body = (await res.json()) as {
+      __N_SSP?: boolean;
+      appProps?: Record<string, unknown>;
+      pageProps?: Record<string, unknown>;
+    };
+    expect((body as { __N_SSP?: boolean }).__N_SSP).toBe(true);
     expect(body.pageProps?.__N_REDIRECT).toBe("/gssp-redirect-target");
     expect(body.pageProps?.__N_REDIRECT_STATUS).toBe(307);
   });
@@ -1361,6 +1513,111 @@ describe("Pages Router integration", () => {
     expect(html).toContain("Server-Side Rendered");
   });
 
+  // Ported from Next.js:
+  // test/e2e/getserversideprops/test/index.test.ts
+  // https://github.com/vercel/next.js/blob/canary/test/e2e/getserversideprops/test/index.test.ts
+  it("passes original req.url, query, asPath, and resolvedUrl through _app.getInitialProps on GSSP pages", async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "vinext-gssp-app-context-dev-"));
+    writeGsspAppInitialPropsContextFixture(tmpDir);
+
+    let tempServer: Awaited<ReturnType<typeof startFixtureServer>>["server"] | undefined;
+    try {
+      const started = await startFixtureServer(tmpDir);
+      tempServer = started.server;
+      const fixtureUrl = started.baseUrl;
+
+      const dynamicRes = await fetch(`${fixtureUrl}/blog/post-1`);
+      expect(dynamicRes.status).toBe(200);
+      const dynamicHtml = await dynamicRes.text();
+      const elementText = (html: string, id: string) => {
+        const match = html.match(new RegExp(`<[^>]+id="${id}"[^>]*>(.*?)</[^>]+>`));
+        expect(match).not.toBeNull();
+        return match?.[1]?.replaceAll("&quot;", '"') ?? "";
+      };
+      const expectElementText = (html: string, id: string, expected: string) => {
+        expect(elementText(html, id)).toBe(expected);
+      };
+      const expectElementJson = (html: string, id: string, expected: unknown) => {
+        expect(JSON.parse(elementText(html, id))).toEqual(expected);
+      };
+      expect(dynamicHtml).toMatch(/Post:\s*(<!--\s*-->)?\s*post-1/);
+      expectElementJson(dynamicHtml, "params", { post: "post-1" });
+      expectElementJson(dynamicHtml, "query", { post: "post-1" });
+      expectElementJson(dynamicHtml, "app-query", { post: "post-1" });
+      expectElementText(dynamicHtml, "app-url", "/blog/post-1");
+      expectElementText(dynamicHtml, "app-router-pathname", "/blog/[post]");
+      expectElementText(dynamicHtml, "resolved-url", "/blog/post-1");
+      expectElementText(dynamicHtml, "as-path", "/blog/post-1");
+      const dynamicNextDataMatch = dynamicHtml.match(
+        /<script id="__NEXT_DATA__" type="application\/json">([\s\S]*?)<\/script>/,
+      );
+      expect(dynamicNextDataMatch).toBeTruthy();
+      const dynamicNextData = JSON.parse(dynamicNextDataMatch![1]!);
+      expect(dynamicNextData.props.__N_SSP).toBe(true);
+      expect(dynamicNextData.props.appProps).toEqual({
+        url: "/blog/post-1",
+        query: { post: "post-1" },
+        asPath: "/blog/post-1",
+        pathname: "/blog/[post]",
+      });
+
+      const dataRes = await fetch(
+        `${fixtureUrl}/_next/data/test-build-id/blog/post-1.json?hello=world`,
+      );
+      expect(dataRes.status).toBe(200);
+      const data = await dataRes.json();
+      expect(data.pageProps.resolvedUrl).toEqual("/blog/post-1?hello=world");
+      expect(data.__N_SSP).toBe(true);
+      expect(data.appProps).toEqual({
+        url: "/_next/data/test-build-id/blog/post-1.json?hello=world",
+        query: { post: "post-1", hello: "world" },
+        asPath: "/blog/post-1?hello=world",
+        pathname: "/blog/[post]",
+      });
+
+      const queryRes = await fetch(`${fixtureUrl}/something?hello=world`);
+      expect(queryRes.status).toBe(200);
+      const queryHtml = await queryRes.text();
+      expect(queryHtml).toMatch(/hello:\s*(<!--\s*-->)?\s*world/);
+      expectElementJson(queryHtml, "params", {});
+      expectElementJson(queryHtml, "initial-query", { hello: "world" });
+      expectElementJson(queryHtml, "query", { hello: "world" });
+      expectElementJson(queryHtml, "app-query", { hello: "world" });
+      expectElementText(queryHtml, "app-url", "/something?hello=world");
+      expectElementText(queryHtml, "resolved-url", "/something?hello=world");
+      expectElementText(queryHtml, "as-path", "/something?hello=world");
+
+      const rewriteRes = await fetch(`${fixtureUrl}/blog-post-2`);
+      expect(rewriteRes.status).toBe(200);
+      const rewriteHtml = await rewriteRes.text();
+      expectElementText(rewriteHtml, "app-url", "/blog-post-2");
+      expectElementJson(rewriteHtml, "app-query", { post: "post-2", hello: "world" });
+      expectElementText(rewriteHtml, "resolved-url", "/blog/post-2");
+      expectElementText(rewriteHtml, "as-path", "/blog-post-2");
+
+      const rewriteParamRes = await fetch(`${fixtureUrl}/blog-post-3`);
+      expect(rewriteParamRes.status).toBe(200);
+      const rewriteParamHtml = await rewriteParamRes.text();
+      expectElementText(rewriteParamHtml, "app-url", "/blog-post-3");
+      expectElementJson(rewriteParamHtml, "app-query", {
+        post: "post-3",
+        param: "post-3",
+      });
+      expectElementText(rewriteParamHtml, "resolved-url", "/blog/post-3");
+      expectElementText(rewriteParamHtml, "as-path", "/blog-post-3");
+
+      const sourceRewriteRes = await fetch(`${fixtureUrl}/rewrite-source/foo`);
+      expect(sourceRewriteRes.status).toBe(200);
+      const sourceRewriteHtml = await sourceRewriteRes.text();
+      expect(sourceRewriteHtml).toContain("<h1>rewrite-target</h1>");
+      expect(sourceRewriteHtml).toContain('<p id="as-path">/rewrite-source/foo</p>');
+      expect(sourceRewriteHtml).toContain('<p id="req-url">/rewrite-source/foo</p>');
+    } finally {
+      await tempServer?.close();
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
   // Regression for cloudflare/vinext#1471: when a query value itself contains
   // a query string (e.g. `?href=/about?hello=world`), the embedded `?hello=world`
   // is part of the `href` value per RFC 3986 — only the first `?` separates the
@@ -1399,7 +1656,9 @@ describe("Pages Router integration", () => {
     expect(res.status).toBe(200);
     const html = await res.text();
     expect(html).toContain("SSR Query");
-    const nextDataMatch = html.match(/<script>window\.__NEXT_DATA__\s*=\s*({.*?})<\/script>/);
+    const nextDataMatch = html.match(
+      /<script id="__NEXT_DATA__" type="application\/json">([\s\S]*?)<\/script>/,
+    );
     expect(nextDataMatch).toBeTruthy();
     const nextData = JSON.parse(nextDataMatch![1]!);
     expect(nextData.props.pageProps.query).toMatchObject({ hello: "world" });
@@ -1410,7 +1669,9 @@ describe("Pages Router integration", () => {
     expect(res.status).toBe(200);
     const html = await res.text();
     expect(html).toMatch(/Post:\s*(<!--\s*-->)?\s*first/);
-    const nextDataMatch = html.match(/<script>window\.__NEXT_DATA__\s*=\s*({.*?})<\/script>/);
+    const nextDataMatch = html.match(
+      /<script id="__NEXT_DATA__" type="application\/json">([\s\S]*?)<\/script>/,
+    );
     expect(nextDataMatch).toBeTruthy();
     const nextData = JSON.parse(nextDataMatch![1]!);
     expect(nextData.props.pageProps.query).toMatchObject({ id: "first", hello: "world" });
@@ -1422,7 +1683,9 @@ describe("Pages Router integration", () => {
     const res = await fetch(`${baseUrl}/mw-rewrite-merge-query?hello=world&other=keep`);
     expect(res.status).toBe(200);
     const html = await res.text();
-    const nextDataMatch = html.match(/<script>window\.__NEXT_DATA__\s*=\s*({.*?})<\/script>/);
+    const nextDataMatch = html.match(
+      /<script id="__NEXT_DATA__" type="application\/json">([\s\S]*?)<\/script>/,
+    );
     expect(nextDataMatch).toBeTruthy();
     const nextData = JSON.parse(nextDataMatch![1]!);
     expect(nextData.props.pageProps.query).toMatchObject({
@@ -1436,7 +1699,9 @@ describe("Pages Router integration", () => {
     expect(res.status).toBe(200);
     const html = await res.text();
     expect(html).toContain("SSR Query");
-    const nextDataMatch = html.match(/<script>window\.__NEXT_DATA__\s*=\s*({.*?})<\/script>/);
+    const nextDataMatch = html.match(
+      /<script id="__NEXT_DATA__" type="application\/json">([\s\S]*?)<\/script>/,
+    );
     expect(nextDataMatch).toBeTruthy();
     const nextData = JSON.parse(nextDataMatch![1]!);
     expect(nextData.props.pageProps.query).toEqual({});
@@ -1452,7 +1717,9 @@ describe("Pages Router integration", () => {
     const res = await fetch(`${baseUrl}/mw-clear-query-params?a=1&b=2&foo=bar&allowed=kept`);
     expect(res.status).toBe(200);
     const html = await res.text();
-    const nextDataMatch = html.match(/<script>window\.__NEXT_DATA__\s*=\s*({.*?})<\/script>/);
+    const nextDataMatch = html.match(
+      /<script id="__NEXT_DATA__" type="application\/json">([\s\S]*?)<\/script>/,
+    );
     expect(nextDataMatch).toBeTruthy();
     const nextData = JSON.parse(nextDataMatch![1]!);
     expect(nextData.props.pageProps.query).toEqual({ allowed: "kept" });
@@ -1607,7 +1874,9 @@ describe("Pages Router integration", () => {
     expect(html).toContain("Loading product...");
     // The full-content branch must NOT render — getStaticProps was skipped.
     expect(html).not.toMatch(/Product ID:.*unknown/);
-    const match = html.match(/__NEXT_DATA__\s*=\s*(\{.*?\})\s*[;<]/);
+    const match = html.match(
+      /<script id="__NEXT_DATA__" type="application\/json">([\s\S]*?)<\/script>/,
+    );
     expect(match).toBeTruthy();
     const nextData = JSON.parse(match![1]);
     expect(nextData.isFallback).toBe(true);
@@ -1625,6 +1894,22 @@ describe("Pages Router integration", () => {
     expect(res.status).toBe(200);
     const json = await res.json();
     expect(json.pageProps).toMatchObject({ pid: "unknown" });
+  });
+
+  it("serves generated content after fallback data hydration", async () => {
+    const slug = `hydrated-${Math.random().toString(36).slice(2)}`;
+    const initialRes = await fetch(`${baseUrl}/products/${slug}`);
+    expect(await initialRes.text()).toContain("Loading product...");
+
+    const dataRes = await fetch(`${baseUrl}/_next/data/test-build-id/products/${slug}.json`, {
+      headers: { "x-nextjs-data": "1" },
+    });
+    expect(dataRes.status).toBe(200);
+
+    const finalRes = await fetch(`${baseUrl}/products/${slug}`);
+    const finalHtml = await finalRes.text();
+    expect(finalHtml).not.toContain("Loading product...");
+    expect(finalHtml).toMatch(new RegExp(`Product ID:.*${slug}`));
   });
 
   // Refs #1543: bot/crawler requests must bypass the `fallback: true` loading
@@ -1651,7 +1936,9 @@ describe("Pages Router integration", () => {
       // Bot should see the real rendered page, not the loading shell.
       expect(html, `UA: ${userAgent}`).not.toContain("Loading product...");
       expect(html, `UA: ${userAgent}`).toMatch(new RegExp(`Product ID:.*${slug}`));
-      const match = html.match(/__NEXT_DATA__\s*=\s*(\{.*?\})\s*[;<]/);
+      const match = html.match(
+        /<script id="__NEXT_DATA__" type="application\/json">([\s\S]*?)<\/script>/,
+      );
       expect(match, `UA: ${userAgent}`).toBeTruthy();
       const nextData = JSON.parse(match![1]);
       expect(nextData.isFallback, `UA: ${userAgent}`).toBe(false);
@@ -1671,7 +1958,9 @@ describe("Pages Router integration", () => {
     expect(res.status).toBe(200);
     const html = await res.text();
     expect(html).toContain("Loading product...");
-    const match = html.match(/__NEXT_DATA__\s*=\s*(\{.*?\})\s*[;<]/);
+    const match = html.match(
+      /<script id="__NEXT_DATA__" type="application\/json">([\s\S]*?)<\/script>/,
+    );
     expect(match).toBeTruthy();
     const nextData = JSON.parse(match![1]);
     expect(nextData.isFallback).toBe(true);
@@ -1680,7 +1969,9 @@ describe("Pages Router integration", () => {
   it("includes isFallback: false in __NEXT_DATA__", async () => {
     const res = await fetch(`${baseUrl}/products/widget`);
     const html = await res.text();
-    const match = html.match(/__NEXT_DATA__\s*=\s*(\{.*?\})\s*[;<]/);
+    const match = html.match(
+      /<script id="__NEXT_DATA__" type="application\/json">([\s\S]*?)<\/script>/,
+    );
     expect(match).toBeTruthy();
     const nextData = JSON.parse(match![1]);
     expect(nextData.isFallback).toBe(false);
@@ -1757,6 +2048,25 @@ describe("Pages Router integration", () => {
     // In dev the plugin now reads this from the resolved config so the
     // value matches the prod-server's embedded buildId.
     const BUILD_ID = "test-build-id";
+
+    // Ported from Next.js: test/e2e/middleware-general/test/index.test.ts
+    // https://github.com/vercel/next.js/blob/canary/test/e2e/middleware-general/test/index.test.ts
+    it("does not treat a normal URL as a data request from x-nextjs-data alone", async () => {
+      const res = await fetch(`${baseUrl}/old-page`, {
+        redirect: "manual",
+        headers: { "x-nextjs-data": "1" },
+      });
+      expect(res.status).toBe(307);
+      expect(res.headers.get("location")).toContain("/about");
+      expect(res.headers.get("x-nextjs-redirect")).toBeNull();
+    });
+
+    it("adds x-nextjs-rewrite for a real data URL rewritten by middleware", async () => {
+      const res = await fetch(`${baseUrl}/_next/data/${BUILD_ID}/rewritten.json`);
+      expect(res.status).toBe(200);
+      expect(res.headers.get("x-nextjs-rewrite")).toBe("/ssr");
+      expect(res.headers.get("x-middleware-rewrite")).toBeNull();
+    });
 
     it("returns { pageProps } JSON for a getServerSideProps page", async () => {
       const res = await fetch(`${baseUrl}/_next/data/${BUILD_ID}/ssr.json`);
@@ -1911,6 +2221,90 @@ describe("Pages Router integration", () => {
         expect(okRes.headers.get("x-nextjs-deployment-id")).toBeNull();
       });
     });
+  });
+});
+
+describe("Pages Router dev dot-path rewrite preflight", () => {
+  let server: ViteDevServer;
+  let baseUrl: string;
+  let tmpDir: string;
+
+  beforeAll(async () => {
+    tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "vinext-pages-dot-path-rewrite-"));
+    await fsp.mkdir(path.join(tmpDir, "pages"), { recursive: true });
+    await fsp.mkdir(path.join(tmpDir, "public"), { recursive: true });
+    await fsp.symlink(
+      path.resolve(import.meta.dirname, "../node_modules"),
+      path.join(tmpDir, "node_modules"),
+      "junction",
+    );
+    await fsp.writeFile(
+      path.join(tmpDir, "pages", "about.tsx"),
+      `export default function About() { return <div>rewritten download page</div>; }`,
+    );
+    await fsp.writeFile(path.join(tmpDir, "public", "unrelated.txt"), "unrelated asset");
+    await fsp.writeFile(
+      path.join(tmpDir, "next.config.mjs"),
+      `export default {
+  async rewrites() {
+    return {
+      beforeFiles: [{
+        source: "/download.txt",
+        has: [{ type: "header", key: "x-download-rewrite", value: "enabled" }],
+        destination: "/about",
+      }],
+      afterFiles: [],
+      fallback: [],
+    };
+  },
+};
+`,
+    );
+    await fsp.writeFile(
+      path.join(tmpDir, "middleware.ts"),
+      `import { NextResponse } from "next/server";
+
+export default function middleware(request) {
+  if (new URL(request.url).searchParams.has("rewrite")) {
+    const headers = new Headers(request.headers);
+    headers.set("x-download-rewrite", "enabled");
+    return NextResponse.next({ request: { headers } });
+  }
+  return NextResponse.next();
+}
+
+export const config = { matcher: "/download.txt" };
+`,
+    );
+
+    ({ server, baseUrl } = await startFixtureServer(tmpDir));
+  }, 30000);
+
+  afterAll(async () => {
+    await server?.close();
+    await fsp.rm(tmpDir, { recursive: true, force: true });
+  });
+
+  it("runs middleware before evaluating has conditions for dot-path rewrites", async () => {
+    const response = await fetch(`${baseUrl}/download.txt?rewrite`);
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toContain("text/html");
+    expect(await response.text()).toContain("rewritten download page");
+  });
+
+  it("does not apply the rewrite when the post-middleware condition is false", async () => {
+    const response = await fetch(`${baseUrl}/download.txt`);
+
+    expect(response.status).toBe(404);
+    expect(await response.text()).not.toContain("rewritten download page");
+  });
+
+  it("does not route unrelated dot-path assets through rewrite handling", async () => {
+    const response = await fetch(`${baseUrl}/unrelated.txt`);
+
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe("unrelated asset");
   });
 });
 
@@ -2115,8 +2509,18 @@ describe("Virtual server entry generation", () => {
       expect(code).toContain('"/docs/[...slug]"');
       // Should NOT contain Express-style :param patterns for any route
       expect(code).not.toMatch(/["']\/(posts|blog|articles|docs|products)\/:[\w]+["']/);
-      expect(code).not.toContain(":slug+");
-      expect(code).not.toContain(":slug*");
+      // Strip the `__VINEXT_PAGES_LINK_PREFETCH_ROUTES__` manifest before the
+      // next two assertions. The manifest is exempt because it carries the
+      // internal pattern shape (with `:slug+` / `:slug*`) so the client-side
+      // hybrid owner resolver can rebuild a pattern from `patternParts` to
+      // feed `routePrecedence`. The pageLoaders map (above) still uses
+      // Next.js bracket format for hydration keys.
+      const codeWithoutPrefetchManifest = code.replace(
+        /__VINEXT_PAGES_LINK_PREFETCH_ROUTES__\s*=\s*(\[[\s\S]*?\]);/,
+        "__VINEXT_PAGES_LINK_PREFETCH_ROUTES__ = /* stripped for test */;",
+      );
+      expect(codeWithoutPrefetchManifest).not.toContain(":slug+");
+      expect(codeWithoutPrefetchManifest).not.toContain(":slug*");
     } finally {
       await testServer.close();
     }
@@ -2148,7 +2552,7 @@ describe("Virtual server entry generation", () => {
 
       // Static import — module-level side effect installs window.next.router.
       expect(code).toMatch(
-        /^import\s+\{[^}]*\bwrapWithRouterContext\b[^}]*\}\s+from\s+["']next\/router["']/m,
+        /^import\s+Router,\s*\{[^}]*\bwrapWithRouterContext\b[^}]*\}\s+from\s+["']next\/router["']/m,
       );
 
       // Defense-in-depth: the original lazy `await import("next/router")`
@@ -2387,9 +2791,10 @@ describe("Plugin config", () => {
       { command: "serve", mode: "development" },
     );
 
-    expect(() =>
+    await expect(
       configPlugin.configResolved({
         command: "serve",
+        cacheDir: path.join(FIXTURE_DIR, "node_modules/.vite"),
         configFile: false,
         plugins: [
           { name: "vite:react-babel" },
@@ -2398,7 +2803,7 @@ describe("Plugin config", () => {
           { name: "vite:react-refresh" },
         ],
       }),
-    ).toThrow("Duplicate @vitejs/plugin-react detected");
+    ).rejects.toThrow("Duplicate @vitejs/plugin-react detected");
   });
 
   it("adds resolve.dedupe for React packages to prevent dual instance errors", async () => {
@@ -4415,7 +4820,9 @@ describe("Production server middleware (Pages Router)", () => {
     );
 
     const html = await res.text();
-    expect(html).toContain('<script nonce="pages-prod">window.__NEXT_DATA__ = ');
+    expect(html).toContain(
+      '<script id="__NEXT_DATA__" type="application/json" nonce="pages-prod">',
+    );
     expect(html).toMatch(/<script type="module" defer nonce="pages-prod" src="\/[^"]+"/);
     expect(html).toMatch(/<link rel="modulepreload" nonce="pages-prod" href="\/[^"]+"/);
   });
@@ -4461,7 +4868,9 @@ describe("Production server middleware (Pages Router)", () => {
     expect(second.headers.get("cache-control")).toBe("no-store, must-revalidate");
     expect(second.headers.get("x-vinext-cache")).toBeNull();
     const secondHtml = await second.text();
-    expect(secondHtml).toContain('<script nonce="pages-prod-isr">window.__NEXT_DATA__ = ');
+    expect(secondHtml).toContain(
+      '<script id="__NEXT_DATA__" type="application/json" nonce="pages-prod-isr">',
+    );
   });
 
   it("rewrites /rewritten to render /ssr content", async () => {
@@ -4483,7 +4892,9 @@ describe("Production server middleware (Pages Router)", () => {
     expect(html).toContain("Loading product...");
     // Full-data branch must not have rendered — getStaticProps was skipped.
     expect(html).not.toMatch(/Product ID:.*never-built/);
-    const match = html.match(/__NEXT_DATA__\s*=\s*(\{.*?\})\s*[;<]/);
+    const match = html.match(
+      /<script id="__NEXT_DATA__" type="application\/json">([\s\S]*?)<\/script>/,
+    );
     expect(match).toBeTruthy();
     const nextData = JSON.parse(match![1]);
     expect(nextData.isFallback).toBe(true);
@@ -4635,7 +5046,9 @@ describe("Production server middleware (Pages Router)", () => {
     const res = await fetch(`${prodUrl}/mw-rewrite-query?hello=world`);
     expect(res.status).toBe(200);
     const html = await res.text();
-    const nextDataMatch = html.match(/<script>window\.__NEXT_DATA__\s*=\s*({.*?})<\/script>/);
+    const nextDataMatch = html.match(
+      /<script id="__NEXT_DATA__" type="application\/json">([\s\S]*?)<\/script>/,
+    );
     expect(nextDataMatch).toBeTruthy();
     const nextData = JSON.parse(nextDataMatch![1]!);
     expect(nextData.props.pageProps.query).toMatchObject({ hello: "world" });
@@ -4645,7 +5058,9 @@ describe("Production server middleware (Pages Router)", () => {
     const res = await fetch(`${prodUrl}/mw-rewrite-dynamic-query?hello=world`);
     expect(res.status).toBe(200);
     const html = await res.text();
-    const nextDataMatch = html.match(/<script>window\.__NEXT_DATA__\s*=\s*({.*?})<\/script>/);
+    const nextDataMatch = html.match(
+      /<script id="__NEXT_DATA__" type="application\/json">([\s\S]*?)<\/script>/,
+    );
     expect(nextDataMatch).toBeTruthy();
     const nextData = JSON.parse(nextDataMatch![1]!);
     expect(nextData.props.pageProps.query).toMatchObject({ id: "first", hello: "world" });
@@ -4663,7 +5078,9 @@ describe("Production server middleware (Pages Router)", () => {
     const res = await fetch(`${prodUrl}/mw-clear-query-params?a=1&b=2&foo=bar&allowed=kept`);
     expect(res.status).toBe(200);
     const html = await res.text();
-    const nextDataMatch = html.match(/<script>window\.__NEXT_DATA__\s*=\s*({.*?})<\/script>/);
+    const nextDataMatch = html.match(
+      /<script id="__NEXT_DATA__" type="application\/json">([\s\S]*?)<\/script>/,
+    );
     expect(nextDataMatch).toBeTruthy();
     const nextData = JSON.parse(nextDataMatch![1]!);
     expect(nextData.props.pageProps.query).toEqual({ allowed: "kept" });
@@ -4951,6 +5368,25 @@ describe("Production server middleware (Pages Router)", () => {
     // pages-basic's next.config.mjs pins the build id to "test-build-id".
     const BUILD_ID = "test-build-id";
 
+    // Ported from Next.js: test/e2e/middleware-general/test/index.test.ts
+    // https://github.com/vercel/next.js/blob/canary/test/e2e/middleware-general/test/index.test.ts
+    it("does not treat a normal URL as a data request from x-nextjs-data alone", async () => {
+      const res = await fetch(`${prodUrl}/old-page`, {
+        redirect: "manual",
+        headers: { "x-nextjs-data": "1" },
+      });
+      expect(res.status).toBe(307);
+      expect(res.headers.get("location")).toContain("/about");
+      expect(res.headers.get("x-nextjs-redirect")).toBeNull();
+    });
+
+    it("adds x-nextjs-rewrite for a real data URL rewritten by middleware", async () => {
+      const res = await fetch(`${prodUrl}/_next/data/${BUILD_ID}/rewritten.json`);
+      expect(res.status).toBe(200);
+      expect(res.headers.get("x-nextjs-rewrite")).toBe("/ssr");
+      expect(res.headers.get("x-middleware-rewrite")).toBeNull();
+    });
+
     it("returns { pageProps } JSON for a getServerSideProps page", async () => {
       const res = await fetch(`${prodUrl}/_next/data/${BUILD_ID}/ssr.json`);
       expect(res.status).toBe(200);
@@ -4998,6 +5434,288 @@ describe("Production server middleware (Pages Router)", () => {
       expect(await res.json()).toEqual({});
     });
   });
+});
+
+describe("Pages _document renderPage enhancers", () => {
+  let fixtureRoot: string;
+  let devServer: ViteDevServer;
+  let devUrl: string;
+  let prodServer: import("node:http").Server;
+  let prodUrl: string;
+  let outDir: string;
+
+  const enhancerCases = [
+    ["withEnhancer=true", ["render-page-enhance-component"]],
+    ["withEnhanceComponent=true", ["render-page-enhance-component"]],
+    ["withEnhanceApp=true", ["render-page-enhance-app"]],
+    [
+      "withEnhanceComponent=true&withEnhanceApp=true",
+      ["render-page-enhance-component", "render-page-enhance-app"],
+    ],
+  ] as const;
+
+  function expectErrorDocument(
+    html: string,
+    expectedMessage: string | RegExp,
+    expectedQueryKey: string,
+  ): void {
+    expect(html).toContain('id="error-page"');
+    if (typeof expectedMessage === "string") {
+      expect(html).toContain(`id="error-message">${expectedMessage}`);
+    } else {
+      expect(html).toMatch(expectedMessage);
+    }
+    expect(html).toContain(`id="document-error-context">/_error|${expectedQueryKey}|`);
+    expect(html.match(/id="document-error-enhancer"/g)).toHaveLength(1);
+    expect(html.match(/data-error-document-style/g)).toHaveLength(1);
+    expect(html).toContain(".error-document{color:red}");
+    expect(html).toContain('id="error-render-count">1');
+    expect(html).not.toContain('id="page-content"');
+  }
+
+  beforeAll(async () => {
+    fixtureRoot = await fsp.mkdtemp(path.join(os.tmpdir(), "vinext-document-enhancers-"));
+    outDir = await fsp.mkdtemp(path.join(os.tmpdir(), "vinext-document-enhancers-out-"));
+    await fsp.symlink(
+      path.resolve(import.meta.dirname, "../node_modules"),
+      path.join(fixtureRoot, "node_modules"),
+      "junction",
+    );
+    await fsp.symlink(
+      path.resolve(import.meta.dirname, "../node_modules"),
+      path.join(outDir, "node_modules"),
+      "junction",
+    );
+    await fsp.mkdir(path.join(fixtureRoot, "pages"), { recursive: true });
+    await fsp.writeFile(
+      path.join(fixtureRoot, "package.json"),
+      JSON.stringify({ private: true, dependencies: { next: "*", react: "*", "react-dom": "*" } }),
+    );
+    await fsp.writeFile(
+      path.join(fixtureRoot, "pages", "_app.tsx"),
+      `export default function App({ Component, pageProps }: any) {
+  return <main id="app-shell"><Component {...pageProps} /></main>;
+}
+`,
+    );
+    await fsp.writeFile(
+      path.join(fixtureRoot, "render-counts.ts"),
+      `export const renderCounts = { enhancer: 0, page: 0, error: 0 };
+`,
+    );
+    await fsp.writeFile(
+      path.join(fixtureRoot, "pages", "index.tsx"),
+      `import { renderCounts } from "../render-counts";
+export function getServerSideProps({ query }: any) {
+  renderCounts.enhancer = 0;
+  renderCounts.page = 0;
+  renderCounts.error = 0;
+  return { props: { throwPage: query.throwPage === "true" } };
+}
+export default function Page({ throwPage }: { throwPage: boolean }) {
+  if (throwPage) {
+    renderCounts.page += 1;
+    throw new Error("page render failed");
+  }
+  return <p id="page-content">PAGE</p>;
+}
+`,
+    );
+    await fsp.writeFile(
+      path.join(fixtureRoot, "pages", "_error.tsx"),
+      `import { renderCounts } from "../render-counts";
+function ErrorPage({ message }: { message: string }) {
+  renderCounts.error += 1;
+  return (
+    <div id="error-page">
+      <p id="error-message">{message}</p>
+      <p id="enhancer-render-count">{renderCounts.enhancer}</p>
+      <p id="page-render-count">{renderCounts.page}</p>
+      <p id="error-render-count">{renderCounts.error}</p>
+    </div>
+  );
+}
+ErrorPage.getInitialProps = ({ err }: any) => ({
+  message: err instanceof Error ? err.message : String(err),
+});
+export default ErrorPage;
+`,
+    );
+    await fsp.writeFile(
+      path.join(fixtureRoot, "pages", "_document.tsx"),
+      `import Document, { Html, Head, Main, NextScript } from "next/document";
+import { renderCounts } from "../render-counts";
+export default class CustomDocument extends Document {
+  static async getInitialProps(ctx: any) {
+    const enhanceComponent = (Component: any) => (props: any) => (
+      <div><span id="render-page-enhance-component">RENDERED</span><Component {...props} /></div>
+    );
+    const enhanceApp = (App: any) => (props: any) => (
+      <div><span id="render-page-enhance-app">RENDERED</span><App {...props} /></div>
+    );
+    const throwEnhancer = (_Component: any) => {
+      renderCounts.enhancer += 1;
+      throw new Error("enhancer render failed");
+    };
+    const ThrowingStyle = () => {
+      throw new Error("style serialization failed");
+    };
+    const enhanceErrorComponent = (Component: any) => (props: any) => (
+      <div id="document-error-enhancer"><Component {...props} /></div>
+    );
+    let options;
+    if (ctx.pathname !== "/_error" && ctx.query?.throwEnhancer) {
+      options = throwEnhancer;
+    } else if (ctx.query?.withEnhancer) {
+      options = enhanceComponent;
+    } else if (ctx.query?.withEnhanceComponent || ctx.query?.withEnhanceApp) {
+      options = {
+        enhanceComponent: ctx.query.withEnhanceComponent ? enhanceComponent : undefined,
+        enhanceApp: ctx.query.withEnhanceApp ? enhanceApp : undefined,
+      };
+    }
+    if (ctx.pathname !== "/_error" && ctx.query?.invalidDocumentHtml) return { html: null };
+    if (ctx.query?.manualDocumentHtml) {
+      return {
+        html: '<article id="manual-document-html">MANUAL</article>',
+        styles: <style data-manual-document-style>{".manual{color:blue}"}</style>,
+        documentProp: "DOCUMENT",
+        documentErrorContext: "",
+      };
+    }
+    const originalRenderPage = ctx.renderPage;
+    ctx.renderPage = () =>
+      originalRenderPage(
+        ctx.pathname === "/_error" ? { enhanceComponent: enhanceErrorComponent } : options,
+      );
+    const initialProps = await Document.getInitialProps(ctx);
+    return {
+      ...initialProps,
+      styles:
+        ctx.pathname === "/_error"
+          ? <style data-error-document-style>{".error-document{color:red}"}</style>
+          : ctx.query?.throwStyles
+            ? <ThrowingStyle />
+            : initialProps.styles,
+      documentProp: "DOCUMENT",
+      documentErrorContext:
+        ctx.pathname === "/_error"
+          ? [ctx.pathname, Object.keys(ctx.query ?? {})[0] ?? "", ctx.err?.message ?? ""].join("|")
+          : "",
+    };
+  }
+  render() {
+    return (
+      <Html><Head /><body><p id="document-prop">{(this.props as any).documentProp}</p><p id="document-error-context">{(this.props as any).documentErrorContext}</p><Main /><NextScript /></body></Html>
+    );
+  }
+}
+`,
+    );
+
+    const dev = await startFixtureServer(fixtureRoot);
+    devServer = dev.server;
+    devUrl = dev.baseUrl;
+
+    await buildPagesFixtureToOutDir(fixtureRoot, outDir);
+    const { startProdServer } = await import("../packages/vinext/src/server/prod-server.js");
+    prodServer = unwrapStartedProdServer(
+      await startProdServer({ port: 0, host: "127.0.0.1", outDir }),
+    );
+    const address = prodServer.address() as { port: number };
+    prodUrl = `http://127.0.0.1:${address.port}`;
+  }, 120000);
+
+  afterAll(async () => {
+    await devServer?.close();
+    if (prodServer) await new Promise<void>((resolve) => prodServer.close(() => resolve()));
+    if (fixtureRoot) fs.rmSync(fixtureRoot, { recursive: true, force: true });
+    if (outDir) fs.rmSync(outDir, { recursive: true, force: true });
+  });
+
+  // Ported from Next.js: test/e2e/app-document/rendering.test.ts
+  // https://github.com/vercel/next.js/blob/v16.2.6/test/e2e/app-document/rendering.test.ts
+  it.each(["dev", "prod"] as const)("applies all renderPage enhancer forms in %s", async (mode) => {
+    const url = mode === "dev" ? devUrl : prodUrl;
+    for (const [query, expectedIds] of enhancerCases) {
+      const response = await fetch(`${url}/?${query}`);
+      expect(response.status).toBe(200);
+      const html = await response.text();
+      expect(html).toContain('id="document-prop">DOCUMENT');
+      expect(html).toContain('id="page-content">PAGE');
+      expect(html.match(/id="page-content"/g)).toHaveLength(1);
+      for (const id of expectedIds) {
+        expect(html).toContain(`id="${id}">RENDERED`);
+        expect(html.match(new RegExp(`id="${id}"`, "g"))).toHaveLength(1);
+      }
+    }
+  });
+
+  it.each(["dev", "prod"] as const)(
+    "uses direct document html and styles without rendering the page in %s",
+    async (mode) => {
+      const url = mode === "dev" ? devUrl : prodUrl;
+      const response = await fetch(`${url}/?manualDocumentHtml=true`);
+      expect(response.status).toBe(200);
+      const html = await response.text();
+      expect(html).toContain('id="manual-document-html">MANUAL');
+      expect(html).toContain("data-manual-document-style");
+      expect(html).toContain(".manual{color:blue}");
+      expect(html).not.toContain('id="page-content"');
+      expect(html).not.toContain('id="app-shell"');
+    },
+  );
+
+  it.each(["dev", "prod"] as const)(
+    "routes throwing renderPage enhancers through the error page once in %s",
+    async (mode) => {
+      const url = mode === "dev" ? devUrl : prodUrl;
+      const response = await fetch(`${url}/?throwEnhancer=true`);
+      expect(response.status).toBe(500);
+      const html = await response.text();
+      expectErrorDocument(html, "enhancer render failed", "throwEnhancer");
+      expect(html).toContain('id="enhancer-render-count">1');
+      expect(html).toContain('id="page-render-count">0');
+    },
+  );
+
+  it.each(["dev", "prod"] as const)(
+    "routes throwing page renders through the error page once in %s",
+    async (mode) => {
+      const url = mode === "dev" ? devUrl : prodUrl;
+      const response = await fetch(`${url}/?throwPage=true`);
+      expect(response.status).toBe(500);
+      const html = await response.text();
+      expectErrorDocument(html, "page render failed", "throwPage");
+      expect(html).toContain('id="enhancer-render-count">0');
+    },
+  );
+
+  it.each(["dev", "prod"] as const)(
+    "routes invalid document html through the error page in %s",
+    async (mode) => {
+      const url = mode === "dev" ? devUrl : prodUrl;
+      const response = await fetch(`${url}/?invalidDocumentHtml=true`);
+      expect(response.status).toBe(500);
+      const html = await response.text();
+      expectErrorDocument(
+        html,
+        /id="error-message">(?:&quot;|").+?\.getInitialProps\(\)(?:&quot;|") should resolve to an object with a (?:&quot;|")html(?:&quot;|") prop set with a valid html string/,
+        "invalidDocumentHtml",
+      );
+    },
+  );
+
+  it.each(["dev", "prod"] as const)(
+    "routes document style serialization failures through the error page in %s",
+    async (mode) => {
+      const url = mode === "dev" ? devUrl : prodUrl;
+      const response = await fetch(`${url}/?throwStyles=true`);
+      expect(response.status).toBe(500);
+      const html = await response.text();
+      expectErrorDocument(html, "style serialization failed", "throwStyles");
+    },
+  );
 });
 
 describe("Production Pages Router SSR streaming", () => {
@@ -5147,6 +5865,45 @@ describe("Production Pages Router SSR streaming", () => {
     expect(res.headers.get("content-length")).toBeNull();
     expect(await res.text()).toBe("");
     expect(Date.now() - startedAt).toBeLessThan(400);
+  });
+
+  it("serves bot-buffered Pages SSR HEAD requests as headers-only responses in production", async () => {
+    // Crawlers get the *buffered* (non-streamed) HTML path, which routes through
+    // sendCompressed rather than sendWebResponse. Regression for #1980: HEAD must
+    // return the status + headers with an empty body (RFC 9110), like the
+    // streamed path already does.
+    const userAgent = "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)";
+
+    // Sanity anchor: a bot GET buffers the full HTML and returns a body. The
+    // ETag is set only on the buffered bot path, so its presence confirms we
+    // exercised sendCompressed and not the streamed sender.
+    const getRes = await fetch(`${prodUrl}/streaming-ssr`, {
+      method: "GET",
+      headers: { "user-agent": userAgent },
+    });
+    expect(getRes.status).toBe(200);
+    expect(getRes.headers.get("content-type") ?? "").toContain("text/html");
+    expect(getRes.headers.get("etag")).toBeTruthy();
+    expect((await getRes.text()).length).toBeGreaterThan(0);
+
+    // The equivalent HEAD returns the same status + headers but no body.
+    const headRes = await fetch(`${prodUrl}/streaming-ssr`, {
+      method: "HEAD",
+      headers: { "user-agent": userAgent, "accept-encoding": "br" },
+    });
+    expect(headRes.status).toBe(200);
+    expect(headRes.headers.get("content-type") ?? "").toContain("text/html");
+    expect(headRes.headers.get("etag")).toBeTruthy();
+    expect(await headRes.text()).toBe("");
+  });
+
+  it("returns headers-only for HEAD on Pages API routes", async () => {
+    // The HEAD guard in sendCompressed is unconditional, and Node also drops
+    // HEAD response bodies at the socket level — so an API-route HEAD returns the
+    // status + headers with an empty body, the same as the HTML render path.
+    const res = await fetch(`${prodUrl}/api/hello`, { method: "HEAD" });
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("");
   });
 
   it("strips stale content-length from streamed Pages SSR responses when gSSP sets one", async () => {
@@ -6065,6 +6822,14 @@ describe("router __NEXT_DATA__ correctness (Pages Router)", () => {
   let routerServer: ViteDevServer;
   let routerBaseUrl: string;
 
+  function readNextData(html: string) {
+    const match = html.match(
+      /<script id="__NEXT_DATA__" type="application\/json"(?: nonce="[^"]+")?>([\s\S]*?)<\/script>/,
+    );
+    expect(match).toBeTruthy();
+    return JSON.parse(match![1]);
+  }
+
   beforeAll(async () => {
     ({ server: routerServer, baseUrl: routerBaseUrl } = await startFixtureServer(FIXTURE_DIR));
   });
@@ -6077,9 +6842,7 @@ describe("router __NEXT_DATA__ correctness (Pages Router)", () => {
     const res = await fetch(`${routerBaseUrl}/blog/hello-world`);
     expect(res.status).toBe(200);
     const html = await res.text();
-    const match = html.match(/<script>window\.__NEXT_DATA__\s*=\s*({.*?})<\/script>/);
-    expect(match).toBeTruthy();
-    const nextData = JSON.parse(match![1]);
+    const nextData = readNextData(html);
     expect(nextData.query).toEqual({ slug: "hello-world" });
     expect(nextData.page).toBe("/blog/[slug]");
   });
@@ -6088,8 +6851,7 @@ describe("router __NEXT_DATA__ correctness (Pages Router)", () => {
     const res = await fetch(`${routerBaseUrl}/posts/hello-world`);
     expect(res.status).toBe(200);
     const html = await res.text();
-    const match = html.match(/<script>window\.__NEXT_DATA__\s*=\s*({.*?})<\/script>/);
-    const nextData = JSON.parse(match![1]);
+    const nextData = readNextData(html);
     expect(nextData.page).toBe("/posts/[id]");
     expect(nextData.query.id).toBe("hello-world");
   });
@@ -6098,33 +6860,38 @@ describe("router __NEXT_DATA__ correctness (Pages Router)", () => {
     const res = await fetch(`${routerBaseUrl}/docs/a/b/c`);
     expect(res.status).toBe(200);
     const html = await res.text();
-    const match = html.match(/<script>window\.__NEXT_DATA__\s*=\s*({.*?})<\/script>/);
-    const nextData = JSON.parse(match![1]);
+    const nextData = readNextData(html);
     expect(nextData.page).toBe("/docs/[...slug]");
   });
 
   it("__NEXT_DATA__ includes isFallback: false", async () => {
     const res = await fetch(`${routerBaseUrl}/blog/hello-world`);
     const html = await res.text();
-    const match = html.match(/<script>window\.__NEXT_DATA__\s*=\s*({.*?})<\/script>/);
-    const nextData = JSON.parse(match![1]);
+    const nextData = readNextData(html);
     expect(nextData.isFallback).toBe(false);
   });
 
   it("static page __NEXT_DATA__.page is the pathname", async () => {
     const res = await fetch(`${routerBaseUrl}/about`);
     const html = await res.text();
-    const match = html.match(/<script>window\.__NEXT_DATA__\s*=\s*({.*?})<\/script>/);
-    const nextData = JSON.parse(match![1]);
+    const nextData = readNextData(html);
     expect(nextData.page).toBe("/about");
+  });
+
+  // Ported from Next.js: test/e2e/prerender.test.ts
+  // https://github.com/vercel/next.js/blob/v16.2.6/test/e2e/prerender.test.ts
+  it("omits gsp from __NEXT_DATA__ for non-GSP pages", async () => {
+    const res = await fetch(`${routerBaseUrl}/about`);
+    const html = await res.text();
+    const nextData = readNextData(html);
+    expect("gsp" in nextData).toBe(false);
   });
 
   it("shallow-test page returns correct __NEXT_DATA__ with GSSP props", async () => {
     const res = await fetch(`${routerBaseUrl}/shallow-test`);
     expect(res.status).toBe(200);
     const html = await res.text();
-    const match = html.match(/<script>window\.__NEXT_DATA__\s*=\s*({.*?})<\/script>/);
-    const nextData = JSON.parse(match![1]);
+    const nextData = readNextData(html);
     expect(nextData.page).toBe("/shallow-test");
     expect(nextData.props.pageProps.gsspCallId).toBeGreaterThan(0);
   });
@@ -6185,9 +6952,7 @@ export default function middleware() {
         const res = await fetch(`${baseUrl}/docs/first`);
         expect(res.status).toBe(200);
         const html = await res.text();
-        const match = html.match(/<script>window\.__NEXT_DATA__\s*=\s*({.*?})<\/script>/);
-        expect(match).toBeTruthy();
-        const nextData = JSON.parse(match![1]);
+        const nextData = readNextData(html);
         expect(nextData.page).toBe("/[...path]");
         expect(nextData.query).toEqual({ path: ["first"] });
         expect(html).toContain("CatchAll");
@@ -6248,6 +7013,15 @@ describe("Pages Router dev ISR regeneration", () => {
       let regenTags: string[] = [];
       let regenExecutionContext: unknown;
       let regenUnifiedExecutionContext: unknown;
+      let regenSsrContext: unknown;
+      let regenI18nContext: unknown;
+      let appTreeWrapCount = 0;
+      const App = Object.assign(({ Component, pageProps }: any) => Component(pageProps), {
+        getInitialProps: vi.fn(async () => ({
+          appLevel: "preserved",
+          pageProps: { fromApp: true },
+        })),
+      });
       const outerExecutionContext = {
         waitUntil() {},
       };
@@ -6266,9 +7040,14 @@ describe("Pages Router dev ISR regeneration", () => {
               parentRequestTags = [...getRequestContext().currentRequestTags];
             },
             wrapWithRouterContext(element: unknown) {
+              appTreeWrapCount += 1;
               return element;
             },
           };
+        }
+
+        if (id === path.join(FIXTURE_DIR, "pages", "_app")) {
+          return { default: App };
         }
 
         if (id === routeFile) {
@@ -6281,6 +7060,8 @@ describe("Pages Router dev ISR regeneration", () => {
               regenTags = [...getRequestContext().currentRequestTags];
               regenExecutionContext = getRequestExecutionContext();
               regenUnifiedExecutionContext = getRequestContext().executionContext;
+              regenSsrContext = getRequestContext().ssrContext;
+              regenI18nContext = getRequestContext().i18nContext;
               return {
                 props: {
                   timestamp: Date.now(),
@@ -6295,6 +7076,10 @@ describe("Pages Router dev ISR regeneration", () => {
         throw new Error(`Unexpected module load: ${id}`);
       };
       const server = {
+        config: {
+          root: FIXTURE_DIR,
+          base: "/docs/",
+        },
         transformIndexHtml: vi.fn(async (_url: string, html: string) => html),
       } as unknown as ViteDevServer;
       const runner = { import: loadModule };
@@ -6358,7 +7143,27 @@ describe("Pages Router dev ISR regeneration", () => {
       expect(regenTags).toEqual([]);
       expect(regenExecutionContext).toBeNull();
       expect(regenUnifiedExecutionContext).toBeNull();
+      expect(regenSsrContext).toMatchObject({
+        pathname: "/isr-test",
+        query: {},
+        asPath: "/isr-test",
+      });
+      expect(regenI18nContext).toBeNull();
+      expect(appTreeWrapCount).toBe(1);
       expect(isrSetSpy).toHaveBeenCalledOnce();
+      expect(isrSetSpy.mock.calls[0]?.[1]).toMatchObject({
+        kind: "PAGES",
+        pageData: {
+          appLevel: "preserved",
+          pageProps: {
+            fromApp: true,
+            message: "fresh",
+          },
+        },
+      });
+      const regeneratedHtml = isrSetSpy.mock.calls[0]?.[1].html as string;
+      expect(regeneratedHtml).toContain('"pageModuleUrl":"/docs/pages/isr-test.tsx"');
+      expect(regeneratedHtml).toContain('"appModuleUrl":"/docs/pages/_app"');
     } finally {
       vi.doUnmock("../packages/vinext/src/server/isr-cache.js");
       vi.resetModules();

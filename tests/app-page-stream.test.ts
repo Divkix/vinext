@@ -3,11 +3,11 @@ import {
   buildAppPageLinkHeader,
   createAppPageFontData,
   createAppPageRscErrorTracker,
-  deferUntilStreamConsumed,
   renderAppPageHtmlResponse,
   renderAppPageHtmlStream,
   renderAppPageHtmlStreamWithRecovery,
 } from "../packages/vinext/src/server/app-page-stream.js";
+import { deferUntilStreamConsumed } from "../packages/vinext/src/server/defer-until-stream-consumed.js";
 
 function createStream(chunks: string[]): ReadableStream<Uint8Array> {
   return new ReadableStream({
@@ -313,7 +313,33 @@ describe("app page stream helpers", () => {
 
     expect(onShellRendered).toHaveBeenCalledTimes(1);
     expect(result.response).toBeNull();
+    expect(result.shellErrorRecovered).toBe(false);
     await expect(new Response(result.htmlStream).text()).resolves.toBe("<html>ok</html>");
+  });
+
+  it("preserves the SSR shell recovery outcome", async () => {
+    const result = await renderAppPageHtmlStreamWithRecovery({
+      async renderErrorBoundaryResponse() {
+        throw new Error("should not render an error boundary");
+      },
+      async renderHtmlStream() {
+        return {
+          htmlStream: createStream(['<html id="__next_error__"></html>']),
+          metadataReady: Promise.resolve(),
+          capturedRscData: null,
+          shellErrorRecovered: true,
+        };
+      },
+      async renderSpecialErrorResponse() {
+        throw new Error("should not render a special response");
+      },
+      resolveSpecialError() {
+        return null;
+      },
+    });
+
+    expect(result.response).toBeNull();
+    expect(result.shellErrorRecovered).toBe(true);
   });
 
   it("turns special SSR failures into the provided response", async () => {

@@ -202,7 +202,7 @@ export type NextConfig = {
     deviceSizes?: number[];
     /** Allowed image sizes for fixed-width images. Defaults to Next.js defaults: [16, 32, 48, 64, 96, 128, 256, 384] */
     imageSizes?: number[];
-    /** Allowed image qualities. Defaults to Next.js 16's `[75]`. */
+    /** Allowed image qualities. When unset, any quality from 1-100 is permitted (matches Next.js). */
     qualities?: number[];
     /** Allow SVG images through the image optimization endpoint. SVG can contain scripts, so only enable if you trust all image sources. */
     dangerouslyAllowSVG?: boolean;
@@ -284,6 +284,8 @@ export type NextConfig = {
     defineServer?: Record<string, string | number | boolean>;
   };
   experimental?: {
+    /** Enables hard-navigation recovery when App Router navigation rendering fails. */
+    appNavFailHandling?: boolean;
     /**
      * Enables the experimental App Router gesture transition API:
      * `useRouter().experimental_gesturePush()`.
@@ -348,6 +350,7 @@ export type ResolvedNextConfig = {
   serverResolveExtensions: string[] | null;
   instrumentationClientInject: string[];
   cacheComponents: boolean;
+  appNavFailHandling: boolean;
   /**
    * Enables the experimental App Router gesture transition API:
    * `useRouter().experimental_gesturePush()`.
@@ -1280,6 +1283,7 @@ export async function resolveNextConfig(
       resolveExtensions: null,
       serverResolveExtensions: null,
       cacheComponents: false,
+      appNavFailHandling: false,
       gestureTransition: false,
       prefetchInlining: false,
       useCacheTimeout: 54,
@@ -1598,6 +1602,7 @@ export async function resolveNextConfig(
         )
       : [],
     cacheComponents: config.cacheComponents ?? false,
+    appNavFailHandling: experimental?.appNavFailHandling === true,
     gestureTransition: experimental?.gestureTransition === true,
     prefetchInlining,
     useCacheTimeout:
