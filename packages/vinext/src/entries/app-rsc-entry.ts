@@ -34,7 +34,6 @@ const middlewareRequestHeadersPath = resolveEntryPath(
   import.meta.url,
 );
 const normalizePathModulePath = resolveEntryPath("../server/normalize-path.js", import.meta.url);
-const appRscHandlerPath = resolveEntryPath("../server/app-rsc-handler.js", import.meta.url);
 const appRouteHandlerDispatchPath = resolveEntryPath(
   "../server/app-route-handler-dispatch.js",
   import.meta.url,
@@ -265,7 +264,7 @@ const prerenderToReadableStream = createRscPrerenderer(async (model, options) =>
 );
 import { createElement } from "react";
 import { getNavigationContext as _getNavigationContext } from "next/navigation";
-import { configureMemoryCacheHandler as __configureMemoryCacheHandler } from "next/cache";
+import { configureMemoryCacheHandler as __configureMemoryCacheHandler } from "vinext/shims/cache-handler";
 import { headersContextFromRequest, getDraftModeCookieHeader, getAndClearPendingCookies, consumeDynamicUsage, consumeInvalidDynamicUsageError, setHeadersAccessPhase } from "next/headers";
 import { mergeMetadata, resolveModuleMetadata, mergeViewport, resolveModuleViewport } from "vinext/metadata";
 ${middlewarePath ? `import * as middlewareModule from ${JSON.stringify(normalizePathSeparators(middlewarePath))};` : ""}
@@ -275,23 +274,19 @@ ${
 import { ensureInstrumentationRegistered as __ensureInstrumentationRegistered } from ${JSON.stringify(instrumentationRuntimePath)};`
     : ""
 }
-import { createAppRscHandler as __createAppRscHandler } from ${JSON.stringify(appRscHandlerPath)};
+import { createAppRscHandler } from "vinext/server/app-rsc-handler";
 import { registerConfiguredCacheAdapters as __registerConfiguredCacheAdapters } from "virtual:vinext-cache-adapters";
 import { decodePathParams as __decodePathParams } from ${JSON.stringify(normalizePathModulePath)};
 import { buildRequestHeadersFromMiddlewareResponse as __buildRequestHeadersFromMiddlewareResponse } from ${JSON.stringify(middlewareRequestHeadersPath)};
-import {
-  dispatchAppRouteHandler as __dispatchAppRouteHandler,
-} from ${JSON.stringify(appRouteHandlerDispatchPath)};
-import {
+${
+  hasPagesDir
+    ? `import {
   applyRouteHandlerMiddlewareContext as __applyRouteHandlerMiddlewareContext,
-} from ${JSON.stringify(appRouteHandlerResponsePath)};
-import {
-  handleProgressiveServerActionRequest as __handleProgressiveServerActionRequest,
-  handleServerActionRscRequest as __handleServerActionRscRequest,
-  isProgressiveServerActionRequest as __isProgressiveServerActionRequest,
-  readActionBodyWithLimit as __readBodyWithLimit,
-  readActionFormDataWithLimit as __readFormDataWithLimit,
-} from ${JSON.stringify(appServerActionExecutionPath)};
+} from ${JSON.stringify(appRouteHandlerResponsePath)};`
+    : ""
+}
+const __loadAppRouteHandlerDispatch = () => import(${JSON.stringify(appRouteHandlerDispatchPath)});
+const __loadAppServerActionExecution = () => import(${JSON.stringify(appServerActionExecutionPath)});
 import {
   sanitizeErrorForClient as __sanitizeErrorForClient,
 } from ${JSON.stringify(appRscErrorsPath)};
@@ -361,7 +356,6 @@ import { clearAppRequestContext as __clearRequestContext, setAppNavigationContex
 __configureMemoryCacheHandler({ cacheMaxMemorySize: ${JSON.stringify(cacheMaxMemorySize)} });
 import { createAppPrerenderStaticParamsResolver as __createAppPrerenderStaticParamsResolver } from ${JSON.stringify(appPrerenderStaticParamsPath)};
 import { ensureAppRouteModulesLoaded as __ensureRouteLoaded } from ${JSON.stringify(appRouteModuleLoaderPath)};
-import { seedMemoryCacheFromPrerender as __seedMemoryCacheFromPrerender } from ${JSON.stringify(seedCachePath)};
 import {
   getRenderedConcreteUrlPathsForRoute as __getRenderedConcreteUrlPathsForRoute,
   initPregeneratedPathsFromGlobals as __initPregeneratedPathsFromGlobals,
@@ -578,7 +572,9 @@ export const __hasPagesDir = ${JSON.stringify(hasPagesDir)};
 export const getRenderedConcreteUrlPathsForRoute = __getRenderedConcreteUrlPathsForRoute;
 const __cacheComponents = ${JSON.stringify(cacheComponents)};
 
-export function seedMemoryCacheFromPrerender(serverDir) {
+export async function seedMemoryCacheFromPrerender(serverDir) {
+  const { seedMemoryCacheFromPrerender: __seedMemoryCacheFromPrerender } =
+    await import(${JSON.stringify(seedCachePath)});
   return __seedMemoryCacheFromPrerender(serverDir, {
     buildAppPageHtmlKey(pathname) {
       return __isrHtmlKey(pathname);
@@ -620,7 +616,7 @@ const rootParamNamesMap = {
 ${rootParamNameEntries.join("\n")}
 };
 
-export default __createAppRscHandler({
+export default createAppRscHandler({
   basePath: __basePath,
   buildId: process.env.__VINEXT_BUILD_ID ?? null,
   ensureRouteLoaded: __ensureRouteLoaded,
@@ -823,7 +819,7 @@ export default __createAppRscHandler({
       renderMode,
     });
   },
-  dispatchMatchedRouteHandler({
+  async dispatchMatchedRouteHandler({
     cleanPathname,
     middlewareContext,
     params,
@@ -831,6 +827,8 @@ export default __createAppRscHandler({
     route,
     searchParams,
   }) {
+    const { dispatchAppRouteHandler: __dispatchAppRouteHandler } =
+      await __loadAppRouteHandlerDispatch();
     return __dispatchAppRouteHandler({
       basePath: __basePath,
       cleanPathname,
@@ -864,13 +862,18 @@ export default __createAppRscHandler({
   },`
       : ""
   }
-  handleProgressiveActionRequest({
+  async handleProgressiveActionRequest({
     actionId,
     cleanPathname,
     contentType,
     middlewareContext,
     request,
   }) {
+    const {
+      handleProgressiveServerActionRequest: __handleProgressiveServerActionRequest,
+      isProgressiveServerActionRequest: __isProgressiveServerActionRequest,
+      readActionFormDataWithLimit: __readFormDataWithLimit,
+    } = await __loadAppServerActionExecution();
     // A multipart form POST to a page is always a server-action attempt, so a
     // body that decodes to no action must surface as 404 action-not-found
     // (#1340). Route handlers run after this dispatch and accept raw multipart
@@ -925,6 +928,11 @@ export default __createAppRscHandler({
     request,
     searchParams,
   }) {
+    const {
+      handleServerActionRscRequest: __handleServerActionRscRequest,
+      readActionBodyWithLimit: __readBodyWithLimit,
+      readActionFormDataWithLimit: __readFormDataWithLimit,
+    } = await __loadAppServerActionExecution();
     const __actionMatch = matchRoute(cleanPathname, rawCleanPathname);
     if (__actionMatch) await __ensureRouteLoaded(__actionMatch.route);
     const __actionIsEdgeRuntime = __actionMatch
