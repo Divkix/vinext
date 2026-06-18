@@ -66,11 +66,17 @@ declare module "next/document" {
     styles?: ReactElement[] | Iterable<ReactNode> | ReactElement;
   };
   export type DocumentContext = {
-    renderPage?: (options?: {
-      enhanceApp?: (App: ComponentType<{ children?: ReactNode }>) => unknown;
-      enhanceComponent?: (Comp: ComponentType<unknown>) => unknown;
-    }) => { html: string; head?: ReadonlyArray<ReactElement> };
-    defaultGetInitialProps?: (
+    renderPage: (
+      options?:
+        | {
+            enhanceApp?: (
+              App: ComponentType<{ children?: ReactNode }>,
+            ) => ComponentType<{ children?: ReactNode }>;
+            enhanceComponent?: (Comp: ComponentType<unknown>) => ComponentType<unknown>;
+          }
+        | ((Comp: ComponentType<unknown>) => ComponentType<unknown>),
+    ) => DocumentInitialProps | Promise<DocumentInitialProps>;
+    defaultGetInitialProps: (
       ctx: DocumentContext,
       options?: { nonce?: string },
     ) => Promise<DocumentInitialProps>;
@@ -169,7 +175,7 @@ declare module "next/navigation" {
     refresh(): void;
     prefetch(href: string, options?: { onInvalidate?: () => void }): void;
   };
-  export function usePathname(): string;
+  export function usePathname(): string | null;
   export class ReadonlyURLSearchParams extends URLSearchParams {
     append(name: string, value: string): never;
     delete(name: string, value?: string): never;
@@ -179,7 +185,7 @@ declare module "next/navigation" {
   export function useSearchParams(): ReadonlyURLSearchParams;
   export function useParams<
     T extends Record<string, string | string[]> = Record<string, string | string[]>,
-  >(): T;
+  >(): T | null;
   export function useSelectedLayoutSegment(parallelRoutesKey?: string): string | null;
   export function useSelectedLayoutSegments(parallelRoutesKey?: string): string[];
   export function useServerInsertedHTML(callback: () => unknown): void;
@@ -259,6 +265,7 @@ declare module "next/navigation" {
     rscUrl: string,
     interceptionContext?: string | null,
     mountedSlotsHeader?: string | null,
+    options?: { notifyInvalidation?: boolean },
   ): boolean;
   export function storePrefetchResponse(
     rscUrl: string,

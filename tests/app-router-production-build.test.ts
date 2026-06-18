@@ -47,9 +47,9 @@ describe("App Router Production build", () => {
     // Client bundle should exist
     expect(fs.existsSync(path.join(outDir, "client"))).toBe(true);
 
-    // Client should have hashed JS assets under Next.js's canonical
-    // `_next/static/` directory (matches `resolveAssetsDir("")`).
-    const clientAssets = fs.readdirSync(path.join(outDir, "client", "_next", "static"));
+    // Client JS should land under Next.js's canonical `_next/static/chunks/`
+    // directory.
+    const clientAssets = fs.readdirSync(path.join(outDir, "client", "_next", "static", "chunks"));
     expect(clientAssets.some((f: string) => f.endsWith(".js"))).toBe(true);
 
     // RSC bundle should contain route handling code
@@ -268,9 +268,9 @@ export default function proxy(request: NextRequest) {
       const homeHtml = await homeRes.text();
       expect(homeHtml).toContain("Welcome to App Router");
       expect(homeHtml).toContain("<script");
-      // Production bootstrap is emitted as a real <script type="module" src=…>
-      // tag (via React's bootstrapModules option) referencing hashed assets.
-      expect(homeHtml).toMatch(/<script[^>]+type="module"[^>]+src="\/_next\/static\/[^"]+\.js"/);
+      expect(homeHtml).toMatch(
+        /<script[^>]+type="module"[^>]+src="\/_next\/static\/chunks\/[^"]+\.js"/,
+      );
 
       // Dynamic route works
       const blogRes = await fetch(`${previewUrl}/blog/test-post`);
@@ -298,4 +298,92 @@ export default function proxy(request: NextRequest) {
       previewServer.httpServer.close();
     }
   }, 30000);
+
+  it("emits and serves Pages client entry in hybrid builds with basePath + assetPrefix", async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "vinext-hybrid-basepath-assetprefix-"));
+
+    try {
+      fs.writeFileSync(path.join(tmpDir, "package.json"), `{"type":"module"}`);
+      fs.symlinkSync(
+        path.resolve(import.meta.dirname, "../node_modules"),
+        path.join(tmpDir, "node_modules"),
+        "junction",
+      );
+      fs.mkdirSync(path.join(tmpDir, "app"), { recursive: true });
+      fs.writeFileSync(
+        path.join(tmpDir, "app", "layout.tsx"),
+        `export default function Root({ children }: { children: React.ReactNode }) {
+  return <html><body>{children}</body></html>;
+}
+`,
+      );
+      fs.writeFileSync(
+        path.join(tmpDir, "app", "page.tsx"),
+        `export default function Page() {
+  return <p>App Router</p>;
+}
+`,
+      );
+      fs.mkdirSync(path.join(tmpDir, "pages"), { recursive: true });
+      fs.writeFileSync(
+        path.join(tmpDir, "pages", "legacy.tsx"),
+        `export default function Legacy() {
+  return <p>Pages Router</p>;
+}
+`,
+      );
+      fs.writeFileSync(
+        path.join(tmpDir, "next.config.mjs"),
+        `export default { basePath: "/app", assetPrefix: "/cdn" };`,
+      );
+
+      const builder = await createBuilder({
+        root: tmpDir,
+        configFile: false,
+        plugins: [vinext({ appDir: tmpDir })],
+        logLevel: "silent",
+      });
+      await builder.buildApp();
+
+      const clientDir = path.join(tmpDir, "dist", "client");
+      const clientEntryManifestPath = path.join(clientDir, "vinext-client-entry-manifest.json");
+      expect(fs.existsSync(clientEntryManifestPath)).toBe(true);
+
+      const clientEntryManifest = JSON.parse(fs.readFileSync(clientEntryManifestPath, "utf-8"));
+      expect(clientEntryManifest.pagesClientEntry).toBeTruthy();
+      expect(clientEntryManifest.appBrowserEntry).toBeTruthy();
+
+      // The Pages client entry should be written under the assetPrefix path
+      // (cdn/_next/static/...) because assetPrefix is a path prefix.
+      const pagesEntryPath = clientEntryManifest.pagesClientEntry;
+      expect(pagesEntryPath.startsWith("cdn/_next/static/")).toBe(true);
+      expect(pagesEntryPath).toContain("vinext-client-entry");
+
+      // The App browser entry should also be under the assetPrefix path
+      const appEntryPath = clientEntryManifest.appBrowserEntry;
+      expect(appEntryPath.startsWith("cdn/_next/static/")).toBe(true);
+      expect(appEntryPath).toContain("index-");
+
+      // Import the RSC handler and verify the baked constants
+      const rscEntryPath = path.join(tmpDir, "dist", "server", "index.js");
+      const rscMtime = fs.statSync(rscEntryPath).mtimeMs;
+      const rscModule = await import(`${pathToFileURL(rscEntryPath).href}?t=${rscMtime}`);
+      expect(rscModule.__basePath).toBe("/app");
+      expect(rscModule.__assetPrefix).toBe("/cdn");
+      expect(rscModule.__hasPagesDir).toBe(true);
+
+      // Verify the RSC handler can serve the App route under basePath
+      const appResponse = await rscModule.default(new Request("http://localhost/app/"));
+      expect(appResponse.status).toBe(200);
+      const appHtml = await appResponse.text();
+      expect(appHtml).toContain("App Router");
+
+      // The App HTML should include the App browser entry script
+      // addressed through the assetPrefix (CDN) path, not basePath.
+      const appScriptMatch = appHtml.match(/<script[^>]+type="module"[^>]+src="\/cdn\/[^"]+\.js"/);
+      expect(appScriptMatch).toBeTruthy();
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  }, 120000);
 });

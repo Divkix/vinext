@@ -1,4 +1,7 @@
-import { getAndClearActionRevalidationKind, type ActionRevalidationKind } from "vinext/shims/cache";
+import {
+  getAndClearActionRevalidationKind,
+  type ActionRevalidationKind,
+} from "vinext/shims/cache-request-state";
 import {
   headersContextFromRequest,
   setHeadersContext,
@@ -8,6 +11,7 @@ import {
   type FetchCacheMode,
   setCurrentFetchCacheMode,
   setCurrentFetchSoftTags,
+  setCurrentForceDynamicFetchDefault,
 } from "vinext/shims/fetch-cache";
 import type { ReactFormState } from "react-dom/client";
 import { isExternalUrl } from "../config/config-matchers.js";
@@ -27,8 +31,9 @@ import {
 } from "./app-rsc-cache-busting.js";
 import { applyEdgeRuntimeHeader } from "./app-page-response.js";
 import { resolveAppPageActionRerenderTarget } from "./app-page-request.js";
+import { resolveAppPageNavigationParams } from "./app-page-element-builder.js";
 import { deferUntilStreamConsumed } from "./app-page-stream.js";
-import { buildPageCacheTags } from "./implicit-tags.js";
+import { buildAppPageTags } from "./implicit-tags.js";
 import { mergeMiddlewareResponseHeaders } from "./middleware-response-headers.js";
 import { getSetCookieName } from "./cookie-utils.js";
 import {
@@ -90,6 +95,18 @@ type AppServerActionRoute = {
   pattern: string;
   routeHandler?: unknown;
   routeSegments?: readonly string[];
+  params?: readonly string[] | null;
+  slots?: Readonly<
+    Record<
+      string,
+      {
+        default?: { default?: unknown } | null;
+        page?: { default?: unknown } | null;
+        slotPatternParts?: readonly string[] | null;
+        slotParamNames?: readonly string[] | null;
+      }
+    >
+  > | null;
 };
 
 /**
@@ -183,6 +200,15 @@ export type HandleProgressiveServerActionRequestOptions = {
   decodeFormState: AppServerActionFormStateDecoder;
   getAndClearPendingCookies: () => string[];
   getDraftModeCookieHeader: () => string | null | undefined;
+  /**
+   * Whether the posted-to route resolves to an App Router *page* (as opposed to
+   * a route handler or no match). Multipart form POSTs to a page are always
+   * server-action attempts in Next.js, so a body that decodes to no action must
+   * surface as 404 action-not-found rather than rendering the page. Route
+   * handlers (which run *after* this dispatch in vinext) legitimately receive
+   * raw multipart POSTs, so they must still fall through. See issue #1340.
+   */
+  hasPageRoute: boolean;
   maxActionBodySize: number;
   middlewareHeaders: Headers | null;
   readFormDataWithLimit: ReadFormDataWithLimit;
@@ -249,6 +275,7 @@ export type HandleServerActionRscRequestOptions<
   ) => BodyInit | null | Promise<BodyInit | null>;
   reportRequestError: AppServerActionErrorReporter;
   resolveRouteFetchCacheMode?: (route: TRoute) => FetchCacheMode | null;
+  resolveRouteDynamicConfig?: (route: TRoute) => string | null | undefined;
   resolveRouteRuntime?: (route: TRoute) => AppServerActionRouteRuntime;
   request: Request;
   sanitizeErrorForClient: (error: unknown) => unknown;
@@ -294,6 +321,11 @@ function resolveActionRevalidationKind(hasModifiedCookies: boolean): ActionReval
   // this matches the max-precedence semantics in markActionRevalidation.
   if (hasModifiedCookies) return ACTION_DID_REVALIDATE_STATIC_AND_DYNAMIC;
   return revalidationKind;
+}
+
+function clearRejectedActionSideEffects(getAndClearPendingCookies: () => string[]): void {
+  getAndClearPendingCookies();
+  getAndClearActionRevalidationKind();
 }
 
 function cloneActionRedirectHeaders(requestHeaders: Headers): Headers {
@@ -495,7 +527,7 @@ export async function readActionFormDataWithLimit(
 
     totalSize += result.value.byteLength;
     if (totalSize > maxBytes) {
-      await reader.cancel();
+      void reader.cancel();
       throw new Error("Request body too large");
     }
     chunks.push(result.value);
@@ -571,7 +603,7 @@ export function applyActionRedirectBasePath(url: string, basePath: string): stri
 }
 
 function buildServerActionPageTags(route: AppServerActionRoute, pathname: string): string[] {
-  return buildPageCacheTags(pathname, [], [...(route.routeSegments ?? [])], "page");
+  return buildAppPageTags(pathname, [], route.routeSegments ?? []);
 }
 
 function resolveInternalActionRedirectTarget(
@@ -767,12 +799,25 @@ export async function handleProgressiveServerActionRequest(
 
     const payloadResponse = await validateServerActionPayload(body);
     if (payloadResponse) {
+      clearRejectedActionSideEffects(options.getAndClearPendingCookies);
       options.clearRequestContext();
       return payloadResponse;
     }
 
     const action = await options.decodeAction(body);
     if (!isAppServerActionFunction(action)) {
+      // A multipart POST to a *page* is always a server-action attempt; a body
+      // that decodes to no action means the referenced action doesn't exist
+      // (e.g. the build has no server actions). Mirror Next.js' 404 +
+      // action-not-found rather than rendering the page. Route handlers run
+      // after this dispatch and legitimately receive raw multipart POSTs, so
+      // fall through for them (and for unmatched routes). See issue #1340.
+      if (options.hasPageRoute) {
+        return createActionNotFoundResponse(null, {
+          clearRequestContext: options.clearRequestContext,
+          getAndClearPendingCookies: options.getAndClearPendingCookies,
+        });
+      }
       return null;
     }
 
@@ -997,10 +1042,38 @@ export async function handleServerActionRscRequest<
 
   const contentLength = parseInt(options.request.headers.get("content-length") || "0", 10);
   if (contentLength > options.maxActionBodySize) {
+    if (options.request.body) {
+      void options.request.body.cancel().catch(() => {});
+    }
     return renderFetchActionBodyExceededResponse(options);
   }
 
   try {
+    let action: AppServerActionFunction | undefined;
+    if (options.contentType.startsWith("multipart/form-data")) {
+      let loadedAction: unknown;
+      try {
+        loadedAction = await options.loadServerAction(options.actionId);
+      } catch (error) {
+        if (isServerActionNotFoundError(error, options.actionId)) {
+          return createActionNotFoundResponse(options.actionId, {
+            clearRequestContext: options.clearRequestContext,
+            getAndClearPendingCookies: options.getAndClearPendingCookies,
+          });
+        }
+
+        throw error;
+      }
+
+      if (!isAppServerActionFunction(loadedAction)) {
+        return createActionNotFoundResponse(options.actionId, {
+          clearRequestContext: options.clearRequestContext,
+          getAndClearPendingCookies: options.getAndClearPendingCookies,
+        });
+      }
+      action = loadedAction;
+    }
+
     let body: string | FormData;
     try {
       body = options.contentType.startsWith("multipart/form-data")
@@ -1015,29 +1088,33 @@ export async function handleServerActionRscRequest<
 
     const payloadResponse = await validateServerActionPayload(body);
     if (payloadResponse) {
+      clearRejectedActionSideEffects(options.getAndClearPendingCookies);
       options.clearRequestContext();
       return payloadResponse;
     }
 
-    let action: unknown;
-    try {
-      action = await options.loadServerAction(options.actionId);
-    } catch (error) {
-      if (isServerActionNotFoundError(error, options.actionId)) {
+    if (action === undefined) {
+      let loadedAction: unknown;
+      try {
+        loadedAction = await options.loadServerAction(options.actionId);
+      } catch (error) {
+        if (isServerActionNotFoundError(error, options.actionId)) {
+          return createActionNotFoundResponse(options.actionId, {
+            clearRequestContext: options.clearRequestContext,
+            getAndClearPendingCookies: options.getAndClearPendingCookies,
+          });
+        }
+
+        throw error;
+      }
+
+      if (!isAppServerActionFunction(loadedAction)) {
         return createActionNotFoundResponse(options.actionId, {
           clearRequestContext: options.clearRequestContext,
           getAndClearPendingCookies: options.getAndClearPendingCookies,
         });
       }
-
-      throw error;
-    }
-
-    if (!isAppServerActionFunction(action)) {
-      return createActionNotFoundResponse(options.actionId, {
-        clearRequestContext: options.clearRequestContext,
-        getAndClearPendingCookies: options.getAndClearPendingCookies,
-      });
+      action = loadedAction;
     }
 
     const temporaryReferences = options.createTemporaryReferenceSet();
@@ -1139,12 +1216,21 @@ export async function handleServerActionRscRequest<
         url: redirectTarget,
       });
       setHeadersContext(headersContextFromRequest(redirectRenderRequest));
+      const redirectNavigationParams = resolveAppPageNavigationParams(
+        targetMatch.route,
+        targetMatch.params,
+        targetPathname,
+        null,
+      );
       options.setNavigationContext({
         pathname: targetPathname,
         searchParams: redirectTarget.searchParams,
-        params: targetMatch.params,
+        params: redirectNavigationParams,
       });
       setCurrentFetchCacheMode(options.resolveRouteFetchCacheMode?.(targetMatch.route) ?? null);
+      setCurrentForceDynamicFetchDefault(
+        options.resolveRouteDynamicConfig?.(targetMatch.route) === "force-dynamic",
+      );
       setCurrentFetchSoftTags(buildServerActionPageTags(targetMatch.route, targetPathname));
       const element = options.buildPageElement({
         cleanPathname: targetPathname,
@@ -1249,15 +1335,30 @@ export async function handleServerActionRscRequest<
         toInterceptOpts: options.toInterceptOpts,
       });
 
+      // Use the full navigationParams (not narrowed params) as the merge base so
+      // interception-specific extras from a source-route intercept survive the
+      // slot param merge — mirroring the dispatch ISR path in app-page-dispatch.ts.
+      // The `as` cast is safe because TInterceptOpts is always produced by toInterceptOpts
+      // in app-rsc-entry.ts with the same structural shape. Tightening the generic constraint
+      // on TInterceptOpts would remove this cast but requires updating all callers.
+      const resolvedActionNavigationParams = resolveAppPageNavigationParams(
+        actionRerenderTarget.route,
+        actionRerenderTarget.navigationParams,
+        options.cleanPathname,
+        actionRerenderTarget.interceptOpts as Parameters<typeof resolveAppPageNavigationParams>[3],
+      );
       options.setNavigationContext({
         pathname: options.cleanPathname,
         searchParams: options.searchParams,
-        params: actionRerenderTarget.navigationParams,
+        params: resolvedActionNavigationParams,
       });
       // Hydrate the re-render target before reading its page module.
       await options.ensureRouteLoaded?.(actionRerenderTarget.route);
       setCurrentFetchCacheMode(
         options.resolveRouteFetchCacheMode?.(actionRerenderTarget.route) ?? null,
+      );
+      setCurrentForceDynamicFetchDefault(
+        options.resolveRouteDynamicConfig?.(actionRerenderTarget.route) === "force-dynamic",
       );
       setCurrentFetchSoftTags(
         buildServerActionPageTags(actionRerenderTarget.route, options.cleanPathname),

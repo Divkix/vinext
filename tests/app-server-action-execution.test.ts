@@ -20,7 +20,12 @@ import {
   VINEXT_RSC_COMPATIBILITY_ID_HEADER,
   VINEXT_RSC_VARY_HEADER,
 } from "../packages/vinext/src/server/app-rsc-cache-busting.js";
-import { refresh, revalidatePath, revalidateTag } from "../packages/vinext/src/shims/cache.js";
+import {
+  getAndClearActionRevalidationKind,
+  refresh,
+  revalidatePath,
+  revalidateTag,
+} from "../packages/vinext/src/shims/cache.js";
 import {
   cookies,
   setHeadersAccessPhase,
@@ -119,6 +124,7 @@ function createOptions(
     getDraftModeCookieHeader() {
       return null;
     },
+    hasPageRoute: false,
     maxActionBodySize: 1024,
     middlewareHeaders: null,
     async readFormDataWithLimit() {
@@ -301,6 +307,14 @@ describe("app server action execution helpers", () => {
     );
   });
 
+  it("rejects cloned streamed action text without waiting for the sibling branch", async () => {
+    const request = createStreamBodyRequest("hello!");
+    const sibling = request.clone();
+
+    await expect(readActionBodyWithLimit(request, 5)).rejects.toThrow("Request body too large");
+    await expect(sibling.text()).resolves.toBe("hello!");
+  });
+
   it("reads multipart action form data and enforces the streamed byte limit", async () => {
     const body = new FormData();
     body.set("field", "value");
@@ -319,6 +333,18 @@ describe("app server action execution helpers", () => {
     await expect(readActionFormDataWithLimit(oversizedRequest, 16)).rejects.toThrow(
       "Request body too large",
     );
+  });
+
+  it("rejects cloned multipart bodies without waiting for the sibling branch", async () => {
+    const request = createStreamBodyRequest("x".repeat(64), {
+      "content-type": "multipart/form-data; boundary=vinext",
+    });
+    const sibling = request.clone();
+
+    await expect(readActionFormDataWithLimit(request, 16)).rejects.toThrow(
+      "Request body too large",
+    );
+    await expect(sibling.text()).resolves.toBe("x".repeat(64));
   });
 
   it("identifies progressive multipart server action submissions", () => {
@@ -468,6 +494,54 @@ describe("app server action execution helpers", () => {
     expect((renderedModel.get().returnValue.data as Error).message).toContain("Body exceeded");
   });
 
+  it("bounds chunked multipart bodies after resolving a valid action", async () => {
+    const loadServerAction = vi.fn(() => Promise.resolve(() => "ok"));
+    const renderedModel = captureRenderedModel();
+
+    const response = await handleServerActionRscRequest(
+      createRscOptions({
+        contentType: "multipart/form-data; boundary=VINEXTDOS",
+        loadServerAction,
+        readFormDataWithLimit() {
+          throw new Error("Request body too large");
+        },
+        renderToReadableStream: renderedModel.capture,
+      }),
+    );
+
+    expect(response?.status).toBe(500);
+    expect(response?.headers.get("content-type")).toBe("text/x-component");
+    expect(loadServerAction).toHaveBeenCalledTimes(1);
+    expect(renderedModel.get().returnValue.ok).toBe(false);
+    expect((renderedModel.get().returnValue.data as Error).message).toContain("Body exceeded");
+  });
+
+  it("rejects declared-oversized stale multipart actions before action lookup", async () => {
+    const loadServerAction = vi.fn();
+    const readFormDataWithLimit = vi.fn();
+    const renderedModel = captureRenderedModel();
+
+    const response = await handleServerActionRscRequest(
+      createRscOptions({
+        actionId: "stale-action-id",
+        contentType: "multipart/form-data; boundary=VINEXTDOS",
+        loadServerAction,
+        maxActionBodySize: 10,
+        readFormDataWithLimit,
+        renderToReadableStream: renderedModel.capture,
+        request: createFetchActionRequest({
+          "content-length": "11",
+          "content-type": "multipart/form-data; boundary=VINEXTDOS",
+        }),
+      }),
+    );
+
+    expect(response?.status).toBe(500);
+    expect(loadServerAction).not.toHaveBeenCalled();
+    expect(readFormDataWithLimit).not.toHaveBeenCalled();
+    expect(renderedModel.get().returnValue.ok).toBe(false);
+  });
+
   it("rejects malformed action payloads before decoding the action", async () => {
     const formData = new FormData();
     formData.set("0", '"$Q1"');
@@ -487,6 +561,30 @@ describe("app server action execution helpers", () => {
     expect(response.status).toBe(400);
     expect(await response.text()).toBe("Invalid server action payload");
     expect(decodeAction).not.toHaveBeenCalled();
+  });
+
+  it("clears pending cookies and revalidation state for rejected progressive payloads", async () => {
+    const formData = new FormData();
+    formData.set("0", '"$Q1:x"');
+    const getAndClearPendingCookies = vi.fn(() => ["session=stale"]);
+    const previousPhase = setHeadersAccessPhase("action");
+    await revalidatePath("/stale");
+    setHeadersAccessPhase(previousPhase);
+
+    const response = requireProgressiveActionResponse(
+      await handleProgressiveServerActionRequest(
+        createOptions({
+          getAndClearPendingCookies,
+          readFormDataWithLimit() {
+            return Promise.resolve(formData);
+          },
+        }),
+      ),
+    );
+
+    expect(response.status).toBe(400);
+    expect(getAndClearPendingCookies).toHaveBeenCalledTimes(1);
+    expect(getAndClearActionRevalidationKind()).toBe(0);
   });
 
   it("executes decoded form actions and converts redirects into 303 responses", async () => {
@@ -879,6 +977,68 @@ describe("app server action execution helpers", () => {
 
     expect(response.status).toBe(404);
     expect(response.headers.get("x-nextjs-action-not-found")).toBe("1");
+  });
+
+  // Ported from Next.js: test/e2e/app-dir/no-server-actions/no-server-actions.test.ts
+  // ("should error when triggering an MPA action on an app with no server actions")
+  //
+  // A multipart form POST to a *page* route that decodes to no action at all
+  // (e.g. the build has no server actions, so `decodeAction` returns null
+  // rather than throwing) must surface Next.js' 404 + action-not-found, not
+  // fall through to a 200 page render. The fetch-action variant of this case
+  // (handled via the `Next-Action` header) already worked; the MPA/form-POST
+  // variant did not. See issue #1340.
+  it("returns action-not-found when an MPA action targets a page with no server actions", async () => {
+    const clearContext = vi.fn();
+    const reportedErrors: Error[] = [];
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    try {
+      const response = requireProgressiveActionResponse(
+        await handleProgressiveServerActionRequest(
+          createOptions({
+            clearRequestContext: clearContext,
+            hasPageRoute: true,
+            async decodeAction() {
+              return null;
+            },
+            reportRequestError(error) {
+              reportedErrors.push(error);
+            },
+          }),
+        ),
+      );
+
+      expect(response.status).toBe(404);
+      expect(response.headers.get("x-nextjs-action-not-found")).toBe("1");
+      expect(await response.text()).toBe("Server action not found.");
+      expect(reportedErrors).toEqual([]);
+      expect(clearContext).toHaveBeenCalledTimes(1);
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining(
+          "Failed to find Server Action. This request might be from an older or newer deployment.",
+        ),
+      );
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  // Route handlers (route.ts) accept raw multipart POSTs that legitimately
+  // decode to no action; those must still fall through to the route-handler
+  // dispatch rather than 404. The page-vs-route distinction comes from the
+  // caller (`hasPageRoute`).
+  it("falls through for multipart posts that decode to no action on a non-page route", async () => {
+    const response = await handleProgressiveServerActionRequest(
+      createOptions({
+        hasPageRoute: false,
+        async decodeAction() {
+          return null;
+        },
+      }),
+    );
+
+    expect(response).toBeNull();
   });
 
   it("returns null for non-fetch RSC action requests", async () => {
@@ -1337,6 +1497,69 @@ describe("app server action execution helpers", () => {
     expect(decodeReply).not.toHaveBeenCalled();
   });
 
+  it("rejects adversarial multipart payloads through the real request reader", async () => {
+    const formData = new FormData();
+    formData.append("0", '["$Q1:x"]');
+    formData.append("0", "[]");
+    const request = createMultipartBodyRequest(formData);
+    const decodeReply = vi.fn();
+
+    const response = await handleServerActionRscRequest(
+      createRscOptions({
+        contentType: request.headers.get("content-type") ?? "",
+        decodeReply,
+        maxActionBodySize: 1024 * 1024,
+        readFormDataWithLimit: readActionFormDataWithLimit,
+        request,
+      }),
+    );
+
+    expect(response?.status).toBe(400);
+    expect(await response?.text()).toBe("Invalid server action payload");
+    expect(decodeReply).not.toHaveBeenCalled();
+  });
+
+  it("rejects cyclic multipart graphs for valid action ids", async () => {
+    const formData = new FormData();
+    formData.set("0", '["$Q0"]');
+    const request = createMultipartBodyRequest(formData);
+    const decodeReply = vi.fn();
+
+    const response = await handleServerActionRscRequest(
+      createRscOptions({
+        contentType: request.headers.get("content-type") ?? "",
+        decodeReply,
+        maxActionBodySize: 1024 * 1024,
+        readFormDataWithLimit: readActionFormDataWithLimit,
+        request,
+      }),
+    );
+
+    expect(response?.status).toBe(400);
+    expect(await response?.text()).toBe("Invalid server action payload");
+    expect(decodeReply).not.toHaveBeenCalled();
+  });
+
+  it("clears pending cookies and revalidation state for rejected fetch payloads", async () => {
+    const getAndClearPendingCookies = vi.fn(() => ["session=stale"]);
+    const previousPhase = setHeadersAccessPhase("action");
+    await revalidatePath("/stale");
+    setHeadersAccessPhase(previousPhase);
+
+    const response = await handleServerActionRscRequest(
+      createRscOptions({
+        getAndClearPendingCookies,
+        readBodyWithLimit() {
+          return Promise.resolve('{"0":"$Q1:x"}');
+        },
+      }),
+    );
+
+    expect(response?.status).toBe(400);
+    expect(getAndClearPendingCookies).toHaveBeenCalledTimes(1);
+    expect(getAndClearActionRevalidationKind()).toBe(0);
+  });
+
   // Regression coverage for #1340: realistic action ids include `#<exportName>`,
   // but @vitejs/plugin-rsc's reference-validation virtual module only knows the
   // module path portion. The dev-mode "invalid server reference '<id>'" error
@@ -1378,6 +1601,7 @@ describe("app server action execution helpers", () => {
   // https://github.com/vercel/next.js/blob/canary/test/e2e/app-dir/no-server-actions/no-server-actions.test.ts
   it("returns the Next.js action-not-found response for stale fetch action ids", async () => {
     const decodeReply = vi.fn();
+    const readFormDataWithLimit = vi.fn();
     const renderToReadableStream = vi.fn();
     const reportRequestError = vi.fn();
     const clearRequestContext = vi.fn();
@@ -1386,10 +1610,12 @@ describe("app server action execution helpers", () => {
       createRscOptions({
         actionId: "stale-action-id",
         clearRequestContext,
+        contentType: "multipart/form-data; boundary=VINEXTDOS",
         decodeReply,
         loadServerAction() {
           return Promise.reject(new Error("[vite-rsc] invalid server reference 'stale-action-id'"));
         },
+        readFormDataWithLimit,
         renderToReadableStream,
         reportRequestError,
       }),
@@ -1399,6 +1625,7 @@ describe("app server action execution helpers", () => {
     expect(response?.headers.get("x-nextjs-action-not-found")).toBe("1");
     expect(response?.headers.get("content-type")).toBe("text/plain");
     expect(await response?.text()).toBe("Server action not found.");
+    expect(readFormDataWithLimit).not.toHaveBeenCalled();
     expect(decodeReply).not.toHaveBeenCalled();
     expect(renderToReadableStream).not.toHaveBeenCalled();
     expect(reportRequestError).not.toHaveBeenCalled();
@@ -1914,6 +2141,89 @@ describe("app server action execution helpers", () => {
 
     expect(response?.status).toBe(200);
     expect(response?.headers.get("x-edge-runtime")).toBe("1");
+  });
+
+  it("resolves the redirect target route's dynamic config and fetch cache mode for force-dynamic fetch defaults", async () => {
+    const fetchCacheShims = await import("../packages/vinext/src/shims/fetch-cache.js");
+    const modeSpy = vi.spyOn(fetchCacheShims, "setCurrentFetchCacheMode");
+    const forceDynamicSpy = vi.spyOn(fetchCacheShims, "setCurrentForceDynamicFetchDefault");
+
+    const targetRoute: TestRoute = {
+      id: "redirect-target",
+      page: {},
+      params: [],
+      pattern: "/redirect-target",
+    };
+
+    const response = await handleServerActionRscRequest(
+      createRscOptions({
+        loadServerAction() {
+          return Promise.resolve(() => redirect("/redirect-target"));
+        },
+        matchRoute(pathname) {
+          if (pathname === "/redirect-target") {
+            return { params: {}, route: targetRoute };
+          }
+          return {
+            params: {},
+            route: { id: "dashboard", page: {}, params: [], pattern: "/dashboard" },
+          };
+        },
+        resolveRouteFetchCacheMode(route) {
+          return route === targetRoute ? "force-cache" : null;
+        },
+        resolveRouteDynamicConfig(route) {
+          return route === targetRoute ? "force-dynamic" : null;
+        },
+      }),
+    );
+
+    expect(response?.status).toBe(303);
+    expect(modeSpy).toHaveBeenCalledWith("force-cache");
+    expect(forceDynamicSpy).toHaveBeenCalledWith(true);
+
+    modeSpy.mockRestore();
+    forceDynamicSpy.mockRestore();
+  });
+
+  it("resolves the re-render target route's dynamic config and fetch cache mode for force-dynamic fetch defaults", async () => {
+    const fetchCacheShims = await import("../packages/vinext/src/shims/fetch-cache.js");
+    const modeSpy = vi.spyOn(fetchCacheShims, "setCurrentFetchCacheMode");
+    const forceDynamicSpy = vi.spyOn(fetchCacheShims, "setCurrentForceDynamicFetchDefault");
+
+    const targetRoute: TestRoute = {
+      id: "dashboard",
+      page: {},
+      params: [],
+      pattern: "/dashboard",
+    };
+
+    const response = await handleServerActionRscRequest(
+      createRscOptions({
+        loadServerAction() {
+          return Promise.resolve(async () => {
+            await revalidatePath("/dashboard");
+            return "revalidated";
+          });
+        },
+        matchRoute() {
+          return { params: {}, route: targetRoute };
+        },
+        resolveRouteFetchCacheMode(route) {
+          return route === targetRoute ? "force-no-store" : null;
+        },
+        resolveRouteDynamicConfig(route) {
+          return route === targetRoute ? "force-dynamic" : null;
+        },
+      }),
+    );
+
+    expect(response?.status).toBe(200);
+    expect(modeSpy).toHaveBeenCalledWith("force-no-store");
+    expect(forceDynamicSpy).toHaveBeenCalledWith(true);
+
+    modeSpy.mockRestore();
+    forceDynamicSpy.mockRestore();
   });
 });
 

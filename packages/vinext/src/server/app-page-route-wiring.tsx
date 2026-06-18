@@ -11,11 +11,13 @@ import {
 import {
   ErrorBoundary,
   ForbiddenBoundary,
+  GlobalErrorBoundary,
   NotFoundBoundary,
   RedirectBoundary,
   UnauthorizedBoundary,
 } from "vinext/shims/error-boundary";
 import { AppRouterScrollTarget } from "vinext/shims/app-router-scroll";
+import DefaultGlobalError from "vinext/shims/default-global-error";
 import type { AppRouteSemanticIds } from "../routing/app-route-graph.js";
 import { LayoutSegmentProvider } from "vinext/shims/layout-segment-context";
 import {
@@ -66,6 +68,7 @@ type AppPageComponentProps = {
 type AppPageComponent = ComponentType<AppPageComponentProps>;
 type AppPageErrorComponent = ComponentType<{ error: unknown; reset: () => void }>;
 const APP_PAGE_LAYOUT_PROBE_CHILD = <Fragment />;
+const DEFAULT_GLOBAL_ERROR_COMPONENT = DefaultGlobalError as AppPageErrorComponent;
 
 export type AppPageModule = Record<string, unknown> & {
   default?: AppPageComponent | null | undefined;
@@ -180,6 +183,7 @@ type BuildAppPageRouteElementOptions<
   resolvedMetadata: Metadata | null;
   resolvedMetadataPathname?: string;
   resolvedViewport: Viewport;
+  trailingSlash?: boolean;
   rootForbiddenModule?: TModule | null;
   rootNotFoundModule?: TModule | null;
   rootUnauthorizedModule?: TModule | null;
@@ -201,6 +205,7 @@ type BuildAppPageElementsOptions<
   renderIdentity?: AppPageRenderIdentity;
   renderMode?: AppRscRenderMode;
   routePath: string;
+  sourcePageSegments?: readonly string[] | null;
 };
 
 type AppPageTemplateEntry<TModule extends AppPageModule = AppPageModule> = {
@@ -359,6 +364,12 @@ function createAppPageTemplateEntries<TModule extends AppPageModule>(
   });
 }
 
+export function createAppPageSourcePage(
+  routeSegments: readonly string[] | null | undefined,
+): string {
+  return `/${[...(routeSegments ?? []), "page"].join("/")}`;
+}
+
 function createAppPageErrorEntries<TErrorModule extends AppPageErrorModule>(
   route: Pick<
     AppPageRouteWiringRoute<AppPageModule, TErrorModule>,
@@ -475,26 +486,33 @@ function createAppPageRouteHead(
   viewport: Viewport,
   pathname: string,
   metadataPlacement: "body" | "head",
+  trailingSlash?: boolean,
 ): ReactNode {
   return (
     <>
       <meta charSet="utf-8" />
       {metadata && metadataPlacement === "head" ? (
-        <MetadataHead metadata={metadata} pathname={pathname} />
+        <MetadataHead metadata={metadata} pathname={pathname} trailingSlash={trailingSlash} />
       ) : null}
       <ViewportHead viewport={viewport} />
     </>
   );
 }
 
-function createAppPageRouteBodyMetadata(
+export function createAppPageRouteBodyMetadata(
   metadata: Metadata | null,
   pathname: string,
   metadataPlacement: "body" | "head",
+  trailingSlash?: boolean,
 ): ReactNode {
   if (!metadata || metadataPlacement !== "body") return null;
   return (
-    <div hidden dangerouslySetInnerHTML={{ __html: renderMetadataToHtml(metadata, pathname) }} />
+    <div
+      hidden
+      dangerouslySetInnerHTML={{
+        __html: renderMetadataToHtml(metadata, pathname, { trailingSlash }),
+      }}
+    />
   );
 }
 
@@ -582,6 +600,7 @@ export function buildAppPageElements<
       layoutIds: options.route.ids?.layouts ?? layoutEntries.map((entry) => entry.id),
       rootLayoutTreePath,
       routeId,
+      sourcePage: createAppPageSourcePage(options.sourcePageSegments ?? routeSegments),
       slotBindings: createAppPageSlotBindings(options.route, layoutEntries, resolveSlotOverride, {
         interception: renderIdentity?.interception ?? options.interception ?? null,
         interceptionContext,
@@ -817,13 +836,15 @@ export function buildAppPageElements<
 
   let routeChildren: ReactNode = (
     <LayoutSegmentProvider segmentMap={{ children: [] }}>
-      <AppRouterScrollTarget>
-        <Slot id={pageId} />
-      </AppRouterScrollTarget>
+      <Slot id={pageId} />
     </LayoutSegmentProvider>
   );
 
   if (isPrefetchLoadingShell) {
+    // A prefetch loading shell is a cached payload, not a committed navigation,
+    // so it intentionally does not mount AppRouterScrollTarget — the scroll/focus
+    // effect belongs to the real render that replaces this shell (handled in the
+    // else branch below).
     if (routeLoadingComponent === null) {
       routeChildren = null;
     } else {
@@ -863,6 +884,16 @@ export function buildAppPageElements<
         </Suspense>
       );
     }
+
+    // Mount the scroll/focus target *outside* the loading Suspense so it does
+    // not suspend with the page content. Next.js places ScrollAndMaybeFocusHandler
+    // above the LoadingBoundary for the same reason: the handler must stay
+    // committed while the loading.js fallback renders, so the default-navigation
+    // scroll fires against the loading boundary's DOM (`should apply scroll when
+    // loading.js is used`) and again when the final content commits — rather than
+    // relying on a raw post-navigation scrollTo fallback that only runs after the
+    // streamed content resolves.
+    routeChildren = <AppRouterScrollTarget>{routeChildren}</AppRouterScrollTarget>;
   }
 
   const lastLayoutErrorModule =
@@ -1028,9 +1059,15 @@ export function buildAppPageElements<
   }
 
   const globalErrorComponent = getErrorBoundaryExport(options.globalErrorModule);
-  if (globalErrorComponent) {
-    routeChildren = <ErrorBoundary fallback={globalErrorComponent}>{routeChildren}</ErrorBoundary>;
-  }
+  routeChildren = (
+    <GlobalErrorBoundary fallback={DEFAULT_GLOBAL_ERROR_COMPONENT}>
+      {globalErrorComponent ? (
+        <ErrorBoundary fallback={globalErrorComponent}>{routeChildren}</ErrorBoundary>
+      ) : (
+        routeChildren
+      )}
+    </GlobalErrorBoundary>
+  );
 
   elements[routeId] = (
     <>
@@ -1039,12 +1076,14 @@ export function buildAppPageElements<
         options.resolvedViewport,
         options.resolvedMetadataPathname ?? options.routePath,
         metadataPlacement,
+        options.trailingSlash,
       )}
       {routeChildren}
       {createAppPageRouteBodyMetadata(
         options.resolvedMetadata,
         options.resolvedMetadataPathname ?? options.routePath,
         metadataPlacement,
+        options.trailingSlash,
       )}
     </>
   );

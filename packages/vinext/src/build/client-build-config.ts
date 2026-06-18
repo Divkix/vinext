@@ -7,6 +7,15 @@ type ClientAssetFileNameInfo = {
   readonly originalFileNames?: readonly string[];
 };
 
+type RscFrameworkModuleInfo = {
+  importers: string[];
+  isEntry: boolean;
+};
+
+type RscFrameworkManualChunksMeta = {
+  getModuleInfo(id: string): RscFrameworkModuleInfo | null;
+};
+
 // Next.js emits CSS under `static/css/` and CSS url() dependencies (images,
 // fonts, …) under `static/media/`, both with an 8-char content hash. Mirror
 // that layout so migrated apps keep stable, Next-shaped asset URLs.
@@ -55,9 +64,10 @@ export function createClientAssetFileNames(assetsDir: string) {
  * (node_modules/.pnpm/pkg@ver/node_modules/pkg).
  */
 function getPackageName(id: string): string | null {
-  const nmIdx = id.lastIndexOf("node_modules/");
+  const normalizedId = id.replaceAll("\\", "/");
+  const nmIdx = normalizedId.lastIndexOf("node_modules/");
   if (nmIdx === -1) return null;
-  const rest = id.slice(nmIdx + "node_modules/".length);
+  const rest = normalizedId.slice(nmIdx + "node_modules/".length);
   if (rest.startsWith("@")) {
     // Scoped package: @org/pkg
     const parts = rest.split("/");
@@ -132,11 +142,20 @@ export function createClientManualChunks(shimsDir: string) {
  * compression efficiency — small files restart the compression dictionary,
  * adding ~5-15% wire overhead vs fewer larger chunks.
  */
+export function createClientFileNameConfig(assetsDir: string) {
+  const chunksDir = `${assetsDir}/chunks`;
+  return {
+    entryFileNames: `${chunksDir}/[name]-[hash].js`,
+    chunkFileNames: `${chunksDir}/[name]-[hash].js`,
+  };
+}
+
 export function createClientOutputConfig(
   clientManualChunks: (id: string) => string | undefined,
   assetsDir: string,
 ) {
   return {
+    ...createClientFileNameConfig(assetsDir),
     assetFileNames: createClientAssetFileNames(assetsDir),
     manualChunks: clientManualChunks,
     experimentalMinChunkSize: 10_000,
@@ -155,6 +174,96 @@ export function createClientCodeSplittingConfig(
         },
       },
     ],
+  };
+}
+
+/**
+ * Matches React framework packages (and the RSC flight runtime) inside
+ * `node_modules`. Used to split them into a dedicated "framework" chunk in the
+ * RSC server build.
+ *
+ * Why the RSC build needs this: without an explicit framework chunk, the
+ * bundler colocates React into whichever chunk first reaches it — typically the
+ * RSC entry chunk, which also carries the root layout's CSS. Modules that only
+ * import React for runtime helpers (notably `app/global-not-found.tsx`, which
+ * replaces the root layout for route-miss 404s) then import that entry chunk
+ * and inherit the root layout's CSS in their `serverResources` metadata. The
+ * 404 document ends up linking the layout's stylesheet last, so the layout's
+ * rules win the cascade over global-not-found's — the bug tracked in
+ * https://github.com/cloudflare/vinext/issues/1549.
+ *
+ * Splitting React into its own (CSS-free) chunk means global-not-found imports
+ * the framework chunk instead of the layout-bearing entry chunk, so it no
+ * longer inherits the root layout's CSS. The match list mirrors the client
+ * build's `framework` chunk, plus `react-server-dom-webpack` for the RSC flight
+ * runtime that the server environment bundles.
+ *
+ * Uses `[\\/]` rather than `/` for the path separator so it matches on Windows
+ * too, per the rolldown `codeSplitting` docs.
+ */
+const FRAMEWORK_PACKAGES = ["react", "react-dom", "scheduler", "react-server-dom-webpack"] as const;
+
+/**
+ * Regex matching any {@link FRAMEWORK_PACKAGES} package inside `node_modules`.
+ * Derived from the package list so the regex and {@link isRscFrameworkModule}
+ * predicate can't drift.
+ */
+export const RSC_FRAMEWORK_CHUNK_TEST = new RegExp(
+  `[\\\\/]node_modules[\\\\/](${FRAMEWORK_PACKAGES.join("|")})[\\\\/]`,
+);
+
+export function isRscFrameworkModule(id: string): boolean {
+  if (!id.includes("node_modules")) return false;
+  const pkg = getPackageName(id);
+  return pkg !== null && (FRAMEWORK_PACKAGES as readonly string[]).includes(pkg);
+}
+
+function isStaticallyReachableFromEntry(
+  id: string,
+  meta: RscFrameworkManualChunksMeta,
+  visited = new Set<string>(),
+): boolean {
+  if (visited.has(id)) return false;
+  visited.add(id);
+
+  const moduleInfo = meta.getModuleInfo(id);
+  if (!moduleInfo) return false;
+  if (moduleInfo.isEntry) return true;
+  return moduleInfo.importers.some((importer) =>
+    isStaticallyReachableFromEntry(importer, meta, visited),
+  );
+}
+
+/**
+ * Output config that isolates React (and the RSC flight runtime) into a
+ * dedicated "framework" chunk in the RSC server build. Returns the bundler-
+ * appropriate shape: rolldown's `codeSplitting` for Vite 8+, Rollup's
+ * `manualChunks` for Vite 7. See {@link RSC_FRAMEWORK_CHUNK_TEST} for the
+ * motivation (issue #1549). Framework modules that are only reachable through
+ * dynamic imports must stay out of the eager framework chunk (issue #2073).
+ */
+export function createRscFrameworkChunkOutputConfig(viteMajorVersion: number) {
+  if (viteMajorVersion >= 8) {
+    return {
+      codeSplitting: {
+        groups: [
+          {
+            name: "framework",
+            test: RSC_FRAMEWORK_CHUNK_TEST,
+            // Split by the entries that use each module so lazy framework
+            // imports cannot become eager Worker-startup dependencies (#2073).
+            entriesAware: true,
+          },
+        ],
+      },
+    };
+  }
+  return {
+    manualChunks(id: string, meta: RscFrameworkManualChunksMeta): string | undefined {
+      return isRscFrameworkModule(id) && isStaticallyReachableFromEntry(id, meta)
+        ? "framework"
+        : undefined;
+    },
   };
 }
 

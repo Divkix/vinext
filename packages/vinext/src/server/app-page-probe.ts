@@ -1,6 +1,6 @@
 import { Fragment, isValidElement, type ReactElement, type ReactNode } from "react";
-import { markAppPagePropsForUseCache } from "vinext/shims/cache-runtime";
-import { isNextRouterError } from "vinext/shims/navigation";
+import { markAppPagePropsForUseCache } from "vinext/shims/internal/app-page-props-cache-key";
+import { isNextRouterError } from "vinext/shims/navigation-server";
 import { collectAppPageSearchParams } from "./app-page-head.js";
 import {
   probeAppPageComponent,
@@ -395,6 +395,7 @@ type ProbeAppPageBeforeRenderResult = {
 
 type ProbeAppPageBeforeRenderOptions = {
   hasLoadingBoundary: boolean;
+  skipProbes?: boolean;
   layoutCount: number;
   probeLayoutAt: (layoutIndex: number) => unknown;
   probePage: () => unknown;
@@ -413,6 +414,10 @@ export async function probeAppPageBeforeRender(
   options: ProbeAppPageBeforeRenderOptions,
 ): Promise<ProbeAppPageBeforeRenderResult> {
   let layoutFlags: LayoutFlags = {};
+
+  if (options.skipProbes) {
+    return { response: null, layoutFlags };
+  }
 
   // Layouts render before their children in Next.js, so layout-level special
   // errors must be handled before probing the page component itself.

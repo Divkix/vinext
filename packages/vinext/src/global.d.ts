@@ -43,8 +43,9 @@ declare global {
 
     /**
      * High-resolution timestamp recorded after client hydration is usable.
-     * Pages Router writes after hydrateRoot() returns; App Router writes after
-     * the first committed tree attaches browser router state.
+     * Pages Router writes from the stable router provider after passive
+     * effects can attach; App Router writes after the first committed tree
+     * attaches browser router state.
      */
     __VINEXT_HYDRATED_AT: number | undefined;
 
@@ -65,6 +66,8 @@ declare global {
       | React.ComponentType<{
           Component: React.ComponentType<Record<string, unknown>>;
           pageProps: unknown;
+          router?: unknown;
+          [key: string]: unknown;
         }>
       | undefined;
 
@@ -130,6 +133,15 @@ declare global {
      * Used by E2E tests as a sentinel to detect that hydration has completed.
      */
     __VINEXT_RSC_ROOT__: Root | undefined;
+
+    /**
+     * App Router browser bootstrap ownership marker.
+     * Shared on `window` because the same browser entry can be evaluated under
+     * distinct ESM URLs when deployment-id cache busting meets split chunks.
+     * Only the first module instance may consume the inlined RSC payload and
+     * hydrate the document.
+     */
+    __VINEXT_RSC_BOOTSTRAP_STATE__: "starting" | "hydrated" | undefined;
 
     /**
      * A Promise that resolves when the current in-flight popstate RSC navigation
@@ -245,6 +257,15 @@ declare global {
    */
   // oxlint-disable-next-line no-var
   var __VINEXT_LAZY_CHUNKS__: string[] | undefined;
+
+  /**
+   * Per-module preload files for rendered `next/dynamic()` boundaries.
+   * Keys are root-relative module IDs injected by vinext's dynamic metadata
+   * transform. Values are JS/CSS files from Vite's build manifest, with any
+   * configured base path / asset prefix already applied.
+   */
+  // oxlint-disable-next-line no-var
+  var __VINEXT_DYNAMIC_PRELOADS__: Record<string, string[]> | undefined;
 
   /**
    * The client entry JS filename (e.g. `"_next/static/entry-abc123.js"`) for Pages
@@ -376,6 +397,29 @@ declare global {
        * by dev or standalone createRscCompatibilityId() resolution.
        */
       __VINEXT_SHARED_RSC_COMPATIBILITY_ID?: string;
+
+      /**
+       * Build-time secret that authenticates on-demand ISR revalidation
+       * requests (the vinext analog of Next.js's prerender-manifest
+       * `previewModeId`). Injected via a SERVER-ONLY Vite `define` so it is
+       * baked identically into every server bundle — and therefore shared by
+       * every Workers isolate — without ever reaching the client bundle. A
+       * per-process random secret would mismatch across isolates because
+       * `res.revalidate()`'s loopback `fetch()` can land on a different isolate;
+       * a build-baked constant is the same in all of them.
+       * `undefined` unless set during `vinext build` (so dev, and any non-CLI
+       * build, omit it — see `getRevalidateSecret`'s single-process fallback).
+       */
+      __VINEXT_REVALIDATE_SECRET?: string;
+
+      /**
+       * Build-only coordination variable set by the `vinext build` CLI so that
+       * every vinext() plugin instance in a single build (App Router buildApp +
+       * the separate hybrid Pages Router vite.build) bakes the same revalidate
+       * secret. Companion to `__VINEXT_SHARED_BUILD_ID`; never read by dev or
+       * standalone code paths.
+       */
+      __VINEXT_SHARED_REVALIDATE_SECRET?: string;
 
       /**
        * Deployment ID string injected via Vite `define` when

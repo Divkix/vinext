@@ -25,6 +25,8 @@ import {
   renameCJSConfigs as _renameCJSConfigs,
   detectPackageManager as _detectPackageManager,
   findInNodeModules as _findInNodeModules,
+  findDir,
+  hasAppDir,
 } from "./utils/project.js";
 import { getReactUpgradeDeps } from "./init.js";
 import { runTPR } from "./cloudflare/tpr.js";
@@ -32,6 +34,11 @@ import { runPrerender } from "./build/run-prerender.js";
 import { loadDotenv } from "./config/dotenv.js";
 import { loadNextConfig, resolveNextConfig } from "./config/next-config.js";
 import { parsePositiveIntegerArg } from "./cli-args.js";
+import {
+  readPrerenderManifest,
+  buildPregeneratedConcretePathTable,
+} from "./server/prerender-manifest.js";
+import { escapeRegExp } from "./utils/regex.js";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -177,10 +184,8 @@ export function formatMissingCloudflarePluginError(options: {
 }
 
 export function detectProject(root: string): ProjectInfo {
-  const hasApp =
-    fs.existsSync(path.join(root, "app")) || fs.existsSync(path.join(root, "src", "app"));
-  const hasPages =
-    fs.existsSync(path.join(root, "pages")) || fs.existsSync(path.join(root, "src", "pages"));
+  const hasApp = hasAppDir(root);
+  const hasPages = findDir(root, "pages", path.join("src", "pages")) !== null;
 
   // Prefer App Router if both exist
   const isAppRouter = hasApp;
@@ -227,14 +232,36 @@ export function detectProject(root: string): ProjectInfo {
       .replace(/^-|-$/g, "");
   }
 
-  // Detect ISR usage (rough heuristic: search for `revalidate` exports)
-  const hasISR = detectISR(root, isAppRouter);
-
   // Detect "type": "module" in package.json
   const hasTypeModule = pkg?.type === "module";
 
-  // Detect MDX usage
-  const hasMDX = detectMDX(root, isAppRouter, hasPages);
+  // Detect ISR (`export const revalidate`) and MDX usage. Both scan the same
+  // app/ tree, so they share a single recursive walk per directory instead of
+  // walking it twice. ISR is App-Router-only (Pages Router ISR isn't detected
+  // here — see note below); MDX may also be declared in next.config.
+  let hasISR = false;
+  let hasMDX = detectMDXFromConfig(root);
+
+  if (isAppRouter) {
+    // ISR detection is only implemented for App Router (scans for
+    // `export const revalidate`). Pages Router ISR (getStaticProps + revalidate)
+    // is not detected here — wrangler.jsonc will not include the KV namespace
+    // binding for Pages Router projects even if they use ISR. This is a known
+    // gap; KV must be configured manually for Pages Router ISR.
+    const appDir = resolveProjectDir(root, "app");
+    if (appDir) {
+      const found = scanTreeForDetection(appDir, { isr: true, mdx: !hasMDX });
+      hasISR = found.isr;
+      hasMDX = hasMDX || found.mdx;
+    }
+  }
+
+  if (hasPages && !hasMDX) {
+    const pagesDir = resolveProjectDir(root, "pages");
+    if (pagesDir) {
+      hasMDX = scanTreeForDetection(pagesDir, { isr: false, mdx: true }).mdx;
+    }
+  }
 
   // Detect CodeHike dependency
   const allDeps = {
@@ -243,8 +270,9 @@ export function detectProject(root: string): ProjectInfo {
   };
   const hasCodeHike = "codehike" in allDeps;
 
-  // Detect native Node modules that need stubbing for Workers
-  const nativeModulesToStub = detectNativeModules(root);
+  // Detect native Node modules that need stubbing for Workers. Reuses the
+  // already-merged dependency map instead of re-reading/re-parsing package.json.
+  const nativeModulesToStub = detectNativeModules(allDeps);
 
   return {
     root,
@@ -265,50 +293,85 @@ export function detectProject(root: string): ProjectInfo {
   };
 }
 
-function detectISR(root: string, isAppRouter: boolean): boolean {
-  // ISR detection is only implemented for App Router (scans for `export const revalidate`).
-  // Pages Router ISR (getStaticProps + revalidate) is not detected here — wrangler.jsonc
-  // will not include the KV namespace binding for Pages Router projects even if they use ISR.
-  // This is a known gap; KV must be configured manually for Pages Router ISR.
-  if (!isAppRouter) return false;
-  try {
-    // Check root-level app/ first, then fall back to src/app/
-    let appDir = path.join(root, "app");
-    if (!fs.existsSync(appDir)) {
-      appDir = path.join(root, "src", "app");
-    }
-    if (!fs.existsSync(appDir)) return false;
-    // Quick check: search .ts/.tsx files in app/ for `export const revalidate`
-    return scanDirForPattern(appDir, /export\s+const\s+revalidate\s*=/);
-  } catch {
-    return false;
-  }
-}
+/** Matches `export const revalidate = …` (ISR opt-in) in App Router source. */
+const ISR_REVALIDATE_PATTERN = /export\s+const\s+revalidate\s*=/;
 
-function scanDirForPattern(dir: string, pattern: RegExp): boolean {
-  const entries = fs.readdirSync(dir, { withFileTypes: true });
-  for (const entry of entries) {
-    const fullPath = path.join(dir, entry.name);
-    if (entry.isDirectory() && !entry.name.startsWith(".") && entry.name !== "node_modules") {
-      if (scanDirForPattern(fullPath, pattern)) return true;
-    } else if (entry.isFile() && /\.(ts|tsx|js|jsx)$/.test(entry.name)) {
-      try {
-        const content = fs.readFileSync(fullPath, "utf-8");
-        if (pattern.test(content)) return true;
-      } catch {
-        // skip unreadable files
-      }
-    }
-  }
-  return false;
+/** Source extensions whose contents are scanned for the ISR pattern. */
+const ISR_SCANNABLE_EXTENSION = /\.(ts|tsx|js|jsx)$/;
+
+/**
+ * Resolve a project subdirectory (`app`/`pages`), preferring the root-level
+ * location and falling back to the `src/` variant. Returns null when neither
+ * exists.
+ */
+function resolveProjectDir(root: string, name: string): string | null {
+  const rootDir = path.join(root, name);
+  if (fs.existsSync(rootDir)) return rootDir;
+  const srcDir = path.join(root, "src", name);
+  if (fs.existsSync(srcDir)) return srcDir;
+  return null;
 }
 
 /**
- * Detect .mdx files in the project's app/ or pages/ directory,
- * or `pageExtensions` including "mdx" in next.config.
+ * Recursively walk `dir` once, evaluating the requested detection predicates
+ * per entry. Each flag short-circuits independently: an `.mdx` file sets `mdx`;
+ * a scannable source file containing `export const revalidate` sets `isr`. The
+ * walk stops as soon as every requested flag is satisfied, so callers that only
+ * want one signal don't pay for the other.
+ *
+ * Replaces the previous pair of single-purpose recursive walkers
+ * (`scanDirForPattern` + `scanDirForExtension`) that traversed the same tree
+ * twice. Detection semantics are unchanged: same dirs skipped (dotfiles,
+ * node_modules), same extension and content tests.
  */
-function detectMDX(root: string, isAppRouter: boolean, hasPages: boolean): boolean {
-  // Check next.config for pageExtensions with mdx
+function scanTreeForDetection(
+  dir: string,
+  want: { isr: boolean; mdx: boolean },
+): { isr: boolean; mdx: boolean } {
+  const found = { isr: false, mdx: false };
+
+  const walk = (current: string): void => {
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(current, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      // Stop early once every requested flag is satisfied.
+      if ((!want.isr || found.isr) && (!want.mdx || found.mdx)) return;
+
+      const fullPath = path.join(current, entry.name);
+      if (entry.isDirectory()) {
+        if (entry.name.startsWith(".") || entry.name === "node_modules") continue;
+        walk(fullPath);
+      } else if (entry.isFile()) {
+        if (want.mdx && !found.mdx && entry.name.endsWith(".mdx")) {
+          found.mdx = true;
+        }
+        if (want.isr && !found.isr && ISR_SCANNABLE_EXTENSION.test(entry.name)) {
+          try {
+            if (ISR_REVALIDATE_PATTERN.test(fs.readFileSync(fullPath, "utf-8"))) {
+              found.isr = true;
+            }
+          } catch {
+            // skip unreadable files
+          }
+        }
+      }
+    }
+  };
+
+  walk(dir);
+  return found;
+}
+
+/**
+ * Detect MDX usage declared in next.config (`pageExtensions` including "mdx" or
+ * an `@next/mdx` import). Filesystem `.mdx` detection is handled separately by
+ * the shared app/pages tree walk in `detectProject`.
+ */
+function detectMDXFromConfig(root: string): boolean {
   // Mirror the Next.js-compatible set in shims/constants.ts. We accept
   // `.cjs` and `.cts` defensively in case a user has them — Next.js itself
   // does not, but `findNextConfigPath` will only return the first match in
@@ -331,39 +394,6 @@ function detectMDX(root: string, isAppRouter: boolean, hasPages: boolean): boole
       }
     }
   }
-
-  // Check for .mdx files in app/ or pages/ (with src/ fallback)
-  const dirs: string[] = [];
-  if (isAppRouter) {
-    const appDir = fs.existsSync(path.join(root, "app"))
-      ? path.join(root, "app")
-      : path.join(root, "src", "app");
-    dirs.push(appDir);
-  }
-  if (hasPages) {
-    const pagesDir = fs.existsSync(path.join(root, "pages"))
-      ? path.join(root, "pages")
-      : path.join(root, "src", "pages");
-    dirs.push(pagesDir);
-  }
-
-  for (const dir of dirs) {
-    if (fs.existsSync(dir) && scanDirForExtension(dir, ".mdx")) return true;
-  }
-
-  return false;
-}
-
-function scanDirForExtension(dir: string, ext: string): boolean {
-  const entries = fs.readdirSync(dir, { withFileTypes: true });
-  for (const entry of entries) {
-    const fullPath = path.join(dir, entry.name);
-    if (entry.isDirectory() && !entry.name.startsWith(".") && entry.name !== "node_modules") {
-      if (scanDirForExtension(fullPath, ext)) return true;
-    } else if (entry.isFile() && entry.name.endsWith(ext)) {
-      return true;
-    }
-  }
   return false;
 }
 
@@ -377,19 +407,12 @@ const NATIVE_MODULES_TO_STUB = [
 ];
 
 /**
- * Detect native Node modules in dependencies that need stubbing for Workers.
+ * Detect native Node modules in the project's merged dependency map that need
+ * stubbing for Workers. Accepts the already-built `allDeps` (dependencies +
+ * devDependencies) so package.json is not re-read or re-parsed.
  */
-function detectNativeModules(root: string): string[] {
-  const pkgPath = path.join(root, "package.json");
-  if (!fs.existsSync(pkgPath)) return [];
-
-  try {
-    const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf-8"));
-    const allDeps = { ...pkg.dependencies, ...pkg.devDependencies };
-    return NATIVE_MODULES_TO_STUB.filter((mod) => mod in allDeps);
-  } catch {
-    return [];
-  }
+function detectNativeModules(allDeps: Record<string, unknown>): string[] {
+  return NATIVE_MODULES_TO_STUB.filter((mod) => mod in allDeps);
 }
 
 // ─── Project Preparation (pre-build transforms) ─────────────────────────────
@@ -460,6 +483,17 @@ import { handleImageOptimization, DEFAULT_DEVICE_SIZES, DEFAULT_IMAGE_SIZES, isI
 import type { ImageConfig } from "vinext/server/image-optimization";
 import handler from "vinext/server/app-router-entry";
 
+const imageConfig: ImageConfig = {
+  deviceSizes: JSON.parse(
+    process.env.__VINEXT_IMAGE_DEVICE_SIZES ?? JSON.stringify(DEFAULT_DEVICE_SIZES),
+  ),
+  imageSizes: JSON.parse(
+    process.env.__VINEXT_IMAGE_SIZES ?? JSON.stringify(DEFAULT_IMAGE_SIZES),
+  ),
+  qualities: JSON.parse(process.env.__VINEXT_IMAGE_QUALITIES ?? "null") ?? undefined,
+  dangerouslyAllowSVG: process.env.__VINEXT_IMAGE_DANGEROUSLY_ALLOW_SVG === "true",
+};
+
 interface Env {
   ASSETS: Fetcher;
   IMAGES: {
@@ -490,14 +524,17 @@ export default {
     // The parseImageParams validation inside handleImageOptimization
     // normalizes backslashes and validates the origin hasn't changed.
     if (isImageOptimizationPath(url.pathname)) {
-      const allowedWidths = [...DEFAULT_DEVICE_SIZES, ...DEFAULT_IMAGE_SIZES];
+      const allowedWidths = [
+        ...(imageConfig.deviceSizes ?? DEFAULT_DEVICE_SIZES),
+        ...(imageConfig.imageSizes ?? DEFAULT_IMAGE_SIZES),
+      ];
       return handleImageOptimization(request, {
         fetchAsset: (path) => env.ASSETS.fetch(new Request(new URL(path, request.url))),
         transformImage: async (body, { width, format, quality }) => {
           const result = await env.IMAGES.input(body).transform(width > 0 ? { width } : {}).output({ format, quality });
           return result.response();
         },
-      }, allowedWidths);
+      }, allowedWidths, imageConfig);
     }
 
     // Delegate everything else to vinext, forwarding ctx so that
@@ -515,34 +552,17 @@ export function generatePagesRouterWorkerEntry(): string {
  * Cloudflare Worker entry point -- auto-generated by vinext deploy.
  * Edit freely or delete to regenerate on next deploy.
  */
+import { fetchWorkerFilesystemRoute, runPagesRequest, wrapMiddlewareWithBasePath } from "vinext/server/pages-request-pipeline";
+import type { PagesPipelineDeps } from "vinext/server/pages-request-pipeline";
 import { handleImageOptimization, DEFAULT_DEVICE_SIZES, DEFAULT_IMAGE_SIZES, isImageOptimizationPath } from "vinext/server/image-optimization";
 import type { ImageConfig } from "vinext/server/image-optimization";
-import {
-  matchRedirect,
-  matchRewrite,
-  preserveRedirectDestinationQuery,
-  requestContextFromRequest,
-  applyMiddlewareRequestHeaders,
-  isExternalUrl,
-  proxyExternalRequest,
-  sanitizeDestination,
-} from "vinext/config/config-matchers";
-import {
-  applyConfigHeadersToHeaderRecord,
-  cloneRequestWithHeaders,
-  filterInternalHeaders,
-  isOpenRedirectShaped,
-  normalizeTrailingSlash,
-} from "vinext/server/request-pipeline";
-import { mergeHeaders } from "vinext/server/worker-utils";
+import { cloneRequestWithHeaders, cloneRequestWithUrl, filterInternalHeaders, isOpenRedirectShaped } from "vinext/server/request-pipeline";
 import { notFoundStaticAssetResponse } from "vinext/server/http-error-responses";
 import { assetPrefixPathname, isNextStaticPath } from "vinext/utils/asset-prefix";
 import { hasBasePath, stripBasePath } from "vinext/utils/base-path";
-import { normalizeDefaultLocalePathname, stripI18nLocaleForApiRoute } from "vinext/server/pages-i18n";
-import { mergeRewriteQuery } from "vinext/utils/query";
 
 // @ts-expect-error -- virtual module resolved by vinext at build time
-import { renderPage, handleApiRoute, runMiddleware, vinextConfig, matchPageRoute } from "virtual:vinext-server-entry";
+import { renderPage, handleApiRoute, runMiddleware, normalizeDataRequest, vinextConfig, matchPageRoute } from "virtual:vinext-server-entry";
 // @ts-expect-error -- virtual module resolved by vinext at build time
 import { registerConfiguredCacheAdapters } from "virtual:vinext-cache-adapters";
 
@@ -571,6 +591,7 @@ const configRedirects = vinextConfig?.redirects ?? [];
 const configRewrites = vinextConfig?.rewrites ?? { beforeFiles: [], afterFiles: [], fallback: [] };
 const configHeaders = vinextConfig?.headers ?? [];
 const imageConfig: ImageConfig | undefined = vinextConfig?.images ? {
+  qualities: vinextConfig.images.qualities,
   dangerouslyAllowSVG: vinextConfig.images.dangerouslyAllowSVG,
   dangerouslyAllowLocalIP: vinextConfig.images.dangerouslyAllowLocalIP,
   contentDispositionType: vinextConfig.images.contentDispositionType,
@@ -584,7 +605,6 @@ export default {
     try {
       const url = new URL(request.url);
       let pathname = url.pathname;
-      let urlWithQuery = pathname + url.search;
 
       // Block protocol-relative URL open redirects in all shapes:
       //   literal  //evil.com, /\\\\evil.com
@@ -606,11 +626,6 @@ export default {
         return notFoundStaticAssetResponse();
       }
 
-      // Capture x-nextjs-data before filterInternalHeaders strips it -- the
-      // middleware redirect protocol needs to know whether the inbound request
-      // was a _next/data fetch to emit x-nextjs-redirect instead of a 3xx.
-      const isDataRequest = request.headers.get("x-nextjs-data") === "1";
-
       // Strip internal headers from inbound requests so they cannot be
       // forged to influence routing or impersonate internal state.
       // Request.headers is immutable in Workers, so build a clean copy.
@@ -627,16 +642,28 @@ export default {
       {
         const stripped = stripBasePath(pathname, basePath);
         if (stripped !== pathname) {
-          urlWithQuery = stripped + url.search;
+          const strippedUrl = new URL(request.url);
+          strippedUrl.pathname = stripped;
+          request = cloneRequestWithUrl(request, strippedUrl.toString());
           pathname = stripped;
         }
       }
-      const basePathState = { basePath, hadBasePath };
+
+      const dataNorm = normalizeDataRequest(request);
+      if (dataNorm.notFoundResponse) return dataNorm.notFoundResponse;
+      const isDataReq = dataNorm.isDataReq;
+      if (isDataReq) {
+        request = dataNorm.request;
+        pathname = dataNorm.normalizedPathname;
+      }
 
       // ── Image optimization via Cloudflare Images binding ──────────
       // Checked after basePath stripping so /<basePath>/_next/image works.
       if (isImageOptimizationPath(pathname)) {
-        const allowedWidths = [...DEFAULT_DEVICE_SIZES, ...DEFAULT_IMAGE_SIZES];
+        const allowedWidths = [
+          ...(vinextConfig?.images?.deviceSizes ?? DEFAULT_DEVICE_SIZES),
+          ...(vinextConfig?.images?.imageSizes ?? DEFAULT_IMAGE_SIZES),
+        ];
         return handleImageOptimization(request, {
           fetchAsset: (path) => env.ASSETS.fetch(new Request(new URL(path, request.url))),
           transformImage: async (body, { width, format, quality }) => {
@@ -646,296 +673,54 @@ export default {
         }, allowedWidths, imageConfig);
       }
 
-      // ── 2. Trailing slash normalization ────────────────────────────
-      {
-        const trailingSlashRedirect = normalizeTrailingSlash(
-          pathname,
-          basePath,
-          trailingSlash,
-          url.search,
-        );
-        if (trailingSlashRedirect) {
-          return trailingSlashRedirect;
-        }
-      }
-
-      // Build a request with the basePath-stripped URL for middleware and
-      // downstream handlers. In Workers the incoming request URL still
-      // contains basePath; prod-server constructs its webRequest from
-      // the already-stripped URL, so we replicate that here.
-      if (basePath) {
-        const strippedUrl = new URL(request.url);
-        strippedUrl.pathname = pathname;
-        request = new Request(strippedUrl, request);
-      }
-
-      // Build request context for pre-middleware config matching. Redirects
-      // run before middleware in Next.js. Header match conditions also use the
-      // original request snapshot even though header merging happens later so
-      // middleware response headers can still take precedence.
-      // beforeFiles, afterFiles, and fallback rewrites run after middleware
-      // (App Router order), so they use postMwReqCtx created after
-      // x-middleware-request-* headers are unpacked into request.
-      const reqCtx = requestContextFromRequest(request);
-
-      // Default-locale path normalisation (issue #1336, item 4). Mirrors
-      // Next.js's resolve-routes.ts: every request without a locale prefix
-      // gets the (domain-aware) default locale prepended before config rule
-      // matching so that locale-aware rules with :locale placeholders or
-      // locale: false overrides still match default-locale URLs.
-      const matchPathname = i18nConfig
-        ? normalizeDefaultLocalePathname(pathname, i18nConfig, {
-            hostname: url.hostname,
-          })
-        : pathname;
-
-      // ── 3. Apply redirects from next.config.js ────────────────────
-      if (configRedirects.length) {
-        const redirect = matchRedirect(matchPathname, configRedirects, reqCtx, basePathState);
-        if (redirect) {
-          // Only prepend basePath when the request was actually under basePath.
-          // Opt-out rules running on out-of-basepath requests must not receive
-          // a basePath prefix.
-          const dest = sanitizeDestination(
-            basePath &&
-              hadBasePath &&
-              !isExternalUrl(redirect.destination) &&
-              !hasBasePath(redirect.destination, basePath)
-              ? basePath + redirect.destination
-              : redirect.destination,
+      // Delegate the canonical 9-step Next.js pipeline to the shared owner.
+      // The worker adapter is responsible for: open-redirect guard, _next/static
+      // 404 short-circuit, header filtering, basePath stripping, and image
+      // optimization. runPagesRequest receives a clean, basePath-stripped request.
+      const deps: PagesPipelineDeps = {
+        basePath,
+        trailingSlash,
+        i18nConfig,
+        configRedirects,
+        configRewrites,
+        configHeaders,
+        hadBasePath,
+        isDataReq,
+        isDataRequest: isDataReq,
+        ctx,
+        matchPageRoute: typeof matchPageRoute === "function" ? matchPageRoute : null,
+        // Pass the original (pre-basePath-stripping) URL to middleware so that
+        // request.nextUrl.basePath reflects whether the URL actually had the
+        // basePath prefix. Matches Next.js behavior and the prod-server.ts
+        // equivalent (shared via wrapMiddlewareWithBasePath).
+        runMiddleware:
+          typeof runMiddleware === "function"
+            ? wrapMiddlewareWithBasePath(runMiddleware, basePath, hadBasePath)
+            : null,
+        renderPage: typeof renderPage === "function"
+          ? (req, resolvedUrl, options, stagedHeaders) =>
+              renderPage(req, resolvedUrl, null, ctx, stagedHeaders, options)
+          : null,
+        handleApi: typeof handleApiRoute === "function"
+          ? (req, apiUrl) => handleApiRoute(req, apiUrl, ctx)
+          : null,
+        serveFilesystemRoute: async (requestPathname, _stagedHeaders, phase) => {
+          return fetchWorkerFilesystemRoute(
+            request,
+            requestPathname,
+            phase,
+            (assetRequest) => env.ASSETS.fetch(assetRequest),
           );
-          // Carry the original request query (e.g. the App Router RSC
-          // cache-busting \`_rsc\` param) onto the redirect Location so the
-          // browser's auto-followed request is still treated as an RSC fetch.
-          // Mirrors Next.js resolve-routes.ts (issue #1529).
-          const location = preserveRedirectDestinationQuery(dest, url.search);
-          return new Response(null, {
-            status: redirect.permanent ? 308 : 307,
-            headers: { Location: location },
-          });
-        }
+        },
+      };
+
+      const result = await runPagesRequest(request, deps);
+      if (result.type === "response") {
+        return result.response;
       }
+      // Should not reach here for prod/worker (all callbacks supplied).
+      return new Response("This page could not be found", { status: 404 });
 
-      // ── 4. Run middleware ──────────────────────────────────────────
-      let resolvedUrl = urlWithQuery;
-      const middlewareHeaders: Record<string, string | string[]> = {};
-      let middlewareRewriteStatus: number | undefined;
-      if (typeof runMiddleware === "function") {
-        const result = await runMiddleware(request, ctx, { isDataRequest });
-
-        // Bubble up waitUntil promises (e.g. Clerk telemetry/session sync)
-        if (result.waitUntilPromises?.length) {
-          for (const p of result.waitUntilPromises) {
-            ctx.waitUntil(p);
-          }
-        }
-
-        if (!result.continue) {
-          if (result.redirectUrl) {
-            const redirectHeaders = new Headers({ Location: result.redirectUrl });
-            if (result.responseHeaders) {
-              for (const [key, value] of result.responseHeaders) {
-                redirectHeaders.append(key, value);
-              }
-            }
-            return new Response(null, {
-              status: result.redirectStatus ?? 307,
-              headers: redirectHeaders,
-            });
-          }
-          if (result.response) {
-            return result.response;
-          }
-        }
-
-        // Collect middleware response headers to merge into final response.
-        // Use an array for Set-Cookie to preserve multiple values.
-        if (result.responseHeaders) {
-          for (const [key, value] of result.responseHeaders) {
-            if (key === "set-cookie") {
-              const existing = middlewareHeaders[key];
-              if (Array.isArray(existing)) {
-                existing.push(value);
-              } else if (existing) {
-                middlewareHeaders[key] = [existing as string, value];
-              } else {
-                middlewareHeaders[key] = [value];
-              }
-            } else {
-              middlewareHeaders[key] = value;
-            }
-          }
-        }
-
-        // Apply middleware rewrite
-        if (result.rewriteUrl) {
-          resolvedUrl = result.rewriteUrl;
-        }
-
-        // Apply custom status code from middleware rewrite
-        middlewareRewriteStatus = result.rewriteStatus;
-      }
-
-      // Unpack x-middleware-request-* headers into the actual request and strip
-      // all x-middleware-* internal signals. Rebuilds postMwReqCtx for use by
-      // beforeFiles, afterFiles, and fallback config rules (which run after
-      // middleware per the Next.js execution order).
-      const { postMwReqCtx, request: postMwReq } = applyMiddlewareRequestHeaders(middlewareHeaders, request);
-      request = postMwReq;
-
-      // Config header matching must keep using the original normalized pathname
-      // even if middleware rewrites the downstream route/render target.
-      let resolvedPathname = resolvedUrl.split("?")[0];
-
-      // ── 5. Apply custom headers from next.config.js ───────────────
-      // Config headers are additive for multi-value headers (Vary,
-      // Set-Cookie) and override for everything else. Vary values are
-      // comma-joined per HTTP spec. Set-Cookie values are accumulated
-      // as arrays (RFC 6265 forbids comma-joining cookies).
-      // Middleware headers take precedence: skip config keys already set
-      // by middleware so middleware always wins for the same key.
-      if (configHeaders.length) {
-        applyConfigHeadersToHeaderRecord(middlewareHeaders, {
-          configHeaders,
-          pathname: matchPathname,
-          requestContext: reqCtx,
-          basePathState,
-        });
-      }
-
-      if (isExternalUrl(resolvedUrl)) {
-        const proxyResponse = await proxyExternalRequest(request, resolvedUrl);
-        return mergeHeaders(proxyResponse, middlewareHeaders, undefined);
-      }
-
-      // Default-locale-normalised form of resolvedPathname for matching
-      // against next.config.js rewrites (beforeFiles, afterFiles, fallback).
-      const matchResolvedPathname = (p: string): string =>
-        i18nConfig
-          ? normalizeDefaultLocalePathname(p, i18nConfig, { hostname: url.hostname })
-          : p;
-
-      // ── 6. Apply beforeFiles rewrites from next.config.js ─────────
-      let configRewriteFired = false;
-      if (configRewrites.beforeFiles?.length) {
-        const rewritten = matchRewrite(
-          matchResolvedPathname(resolvedPathname),
-          configRewrites.beforeFiles,
-          postMwReqCtx,
-          basePathState,
-        );
-        if (rewritten) {
-          if (isExternalUrl(rewritten)) {
-            return proxyExternalRequest(request, rewritten);
-          }
-          // Preserve original query params across rewrites (Next.js parity).
-          resolvedUrl = mergeRewriteQuery(resolvedUrl, rewritten);
-          resolvedPathname = resolvedUrl.split("?")[0];
-          configRewriteFired = true;
-        }
-      }
-
-      // Reject out-of-basePath requests that no rule rewrote. See the
-      // matching comment in prod-server.ts step 7b.
-      if (basePath && !hadBasePath && !configRewriteFired) {
-        return new Response("This page could not be found", {
-          status: 404,
-          headers: { "Content-Type": "text/html; charset=utf-8" },
-        });
-      }
-
-      // ── 7. API routes ─────────────────────────────────────────────
-      // Forward ctx so handlePagesApiRoute can wrap the user handler in
-      // runWithExecutionContext, making ctx.waitUntil() reachable from
-      // after() and other shims that schedule deferred work.
-      //
-      // Strip the i18n locale prefix before the /api/ check so
-      // /fr/api/ok resolves to the pages/api/ok handler (Next.js
-      // parity -- see base-server.ts's normalizeLocalePath call).
-      const apiLookupUrl = stripI18nLocaleForApiRoute(resolvedUrl, vinextConfig?.i18n ?? null);
-      const apiLookupPathname = apiLookupUrl.split("?")[0];
-      if (apiLookupPathname.startsWith("/api/") || apiLookupPathname === "/api") {
-        const response = typeof handleApiRoute === "function"
-          ? await handleApiRoute(request, apiLookupUrl, ctx)
-          : new Response("404 - API route not found", { status: 404 });
-        return mergeHeaders(response, middlewareHeaders, middlewareRewriteStatus);
-      }
-
-      const pageMatch =
-        typeof matchPageRoute === "function" ? matchPageRoute(resolvedPathname, request) : null;
-
-      // ── 8. Apply afterFiles rewrites from next.config.js ──────────
-      // These run after non-dynamic page routes but before dynamic routes.
-      if ((!pageMatch || pageMatch.route.isDynamic) && configRewrites.afterFiles?.length) {
-        const rewritten = matchRewrite(
-          matchResolvedPathname(resolvedPathname),
-          configRewrites.afterFiles,
-          postMwReqCtx,
-          basePathState,
-        );
-        if (rewritten) {
-          if (isExternalUrl(rewritten)) {
-            return proxyExternalRequest(request, rewritten);
-          }
-          resolvedUrl = mergeRewriteQuery(resolvedUrl, rewritten);
-          resolvedPathname = resolvedUrl.split("?")[0];
-        }
-      }
-
-      // ── 9. Page routes ────────────────────────────────────────────
-      let response: Response | undefined;
-      if (typeof renderPage === "function") {
-        const renderPageMatch =
-          typeof matchPageRoute === "function" ? matchPageRoute(resolvedPathname, request) : null;
-        const shouldDeferErrorPageOnMiss =
-          !isDataRequest && typeof matchPageRoute === "function" && !renderPageMatch;
-        const initialRenderOptions = shouldDeferErrorPageOnMiss
-          ? { renderErrorPageOnMiss: false }
-          : undefined;
-        response = await renderPage(request, resolvedUrl, null, ctx, undefined, initialRenderOptions);
-
-        // ── 10. Fallback rewrites (if SSR returned 404) ─────────────
-        let matchedFallbackRewrite = false;
-        if (
-          response &&
-          response.status === 404 &&
-          shouldDeferErrorPageOnMiss &&
-          configRewrites.fallback?.length
-        ) {
-          const fallbackRewrite = matchRewrite(
-            matchResolvedPathname(resolvedPathname),
-            configRewrites.fallback,
-            postMwReqCtx,
-            basePathState,
-          );
-          if (fallbackRewrite) {
-            if (isExternalUrl(fallbackRewrite)) {
-              return proxyExternalRequest(request, fallbackRewrite);
-            }
-            matchedFallbackRewrite = true;
-            response = await renderPage(
-              request,
-              mergeRewriteQuery(resolvedUrl, fallbackRewrite),
-              null,
-              ctx,
-            );
-          }
-        }
-        if (
-          response &&
-          response.status === 404 &&
-          shouldDeferErrorPageOnMiss &&
-          !matchedFallbackRewrite
-        ) {
-          response = await renderPage(request, resolvedUrl, null, ctx);
-        }
-      }
-
-      if (!response) {
-        return new Response("This page could not be found", { status: 404 });
-      }
-
-      return mergeHeaders(response, middlewareHeaders, middlewareRewriteStatus);
     } catch (error) {
       console.error("[vinext] Worker error:", error);
       return new Response("Internal Server Error", { status: 500 });
@@ -1390,62 +1175,83 @@ type WranglerDeployArgs = {
   env: string | undefined;
 };
 
+export function validateWranglerEnvName(env: string): string {
+  if (env.includes("\0")) {
+    throw new Error("Wrangler environment names cannot contain null bytes.");
+  }
+  return env;
+}
+
 export function buildWranglerDeployArgs(
   options: Pick<DeployOptions, "preview" | "env">,
 ): WranglerDeployArgs {
   const args = ["deploy"];
   const env = options.env || (options.preview ? "preview" : undefined);
   if (env) {
-    args.push("--env", env);
+    args.push("--env", validateWranglerEnvName(env));
   }
   return { args, env };
 }
 
 /**
- * Resolve the wrangler executable in node_modules.
+ * Resolve Wrangler's JavaScript CLI entrypoint in node_modules.
  *
- * Walks up ancestor directories so the binary is found even when node_modules
- * is hoisted to the workspace root in a monorepo.
- *
- * On Windows, `node_modules/.bin/` contains both a Unix shebang script (no
- * extension) and a `.CMD` shim. Node's `execFileSync` uses CreateProcess(),
- * which only resolves PATHEXT extensions (`.cmd`, `.exe`, ...) — spawning the
- * bare-name shebang file fails with ENOENT even though the file exists. So on
- * Windows we prefer the `.CMD` shim and only fall back to the bare name for a
- * clearer error message if neither is present.
+ * Invoking the JavaScript file through `process.execPath` avoids the `.cmd`
+ * shim and command shell that package managers create on Windows.
  */
 export function resolveWranglerBin(
   root: string,
-  platform: NodeJS.Platform = process.platform,
+  resolvePackageJson: (root: string) => string | null = (projectRoot) => {
+    try {
+      return createRequire(path.join(projectRoot, "package.json")).resolve("wrangler/package.json");
+    } catch {
+      return _findInNodeModules(projectRoot, "wrangler/package.json");
+    }
+  },
 ): string {
-  const candidates =
-    platform === "win32"
-      ? [".bin/wrangler.CMD", ".bin/wrangler.cmd", ".bin/wrangler"]
-      : [".bin/wrangler"];
-
-  for (const candidate of candidates) {
-    const found = _findInNodeModules(root, candidate);
-    if (found) return found;
+  const packageJsonPath = resolvePackageJson(root);
+  if (packageJsonPath) {
+    const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, "utf-8")) as {
+      bin?: string | Record<string, string>;
+    };
+    const bin = typeof packageJson.bin === "string" ? packageJson.bin : packageJson.bin?.wrangler;
+    if (bin) return path.resolve(path.dirname(packageJsonPath), bin);
   }
 
-  // Not found — return platform-appropriate path under root for error clarity.
-  return path.join(root, "node_modules", ...candidates[0].split("/"));
+  return path.join(root, "node_modules", "wrangler", "bin", "wrangler.js");
 }
 
-function runWranglerDeploy(root: string, options: Pick<DeployOptions, "preview" | "env">): string {
-  const wranglerBin = resolveWranglerBin(root);
+export function buildNodeCliInvocation(
+  scriptPath: string,
+  args: string[],
+  nodeExecutable: string = process.execPath,
+): { file: string; args: string[] } {
+  return { file: nodeExecutable, args: [scriptPath, ...args] };
+}
 
+export function buildWranglerInvocation(
+  root: string,
+  options: Pick<DeployOptions, "preview" | "env">,
+  nodeExecutable: string = process.execPath,
+): { file: string; args: string[]; env: string | undefined } {
+  const wranglerBin = resolveWranglerBin(root);
+  const { args, env } = buildWranglerDeployArgs(options);
+  return { ...buildNodeCliInvocation(wranglerBin, args, nodeExecutable), env };
+}
+
+export function runWranglerDeploy(
+  root: string,
+  options: Pick<DeployOptions, "preview" | "env">,
+  execute: typeof execFileSync = execFileSync,
+): string {
   const execOpts: ExecFileSyncOptions = {
     cwd: root,
     stdio: "pipe",
     encoding: "utf-8",
-    // On Windows, .bin/wrangler is a .cmd wrapper; execFileSync can't run
-    // it without a shell.  Enabling shell only on win32 keeps the
-    // no-shell-injection guarantee on other platforms.
-    shell: process.platform === "win32",
+    shell: false,
   };
 
-  const { args, env } = buildWranglerDeployArgs(options);
+  const { file, args, env } = buildWranglerInvocation(root, options);
 
   if (env) {
     console.log(`\n  Deploying to env: ${env}...`);
@@ -1453,10 +1259,7 @@ function runWranglerDeploy(root: string, options: Pick<DeployOptions, "preview" 
     console.log("\n  Deploying to production...");
   }
 
-  // execFileSync passes args as an array, avoiding shell injection on Unix.
-  // On Windows, shell: true is required for .cmd wrappers but the array form
-  // still prevents trivial injection.
-  const output = execFileSync(wranglerBin, args, execOpts) as string;
+  const output = execute(file, args, execOpts) as string;
 
   // Parse the deployed URL from wrangler output
   // Wrangler prints: "Published <name> (version_id)\n  https://<name>.<subdomain>.workers.dev"
@@ -1473,9 +1276,56 @@ function runWranglerDeploy(root: string, options: Pick<DeployOptions, "preview" 
   return deployedUrl ?? "(URL not detected in wrangler output)";
 }
 
+// ─── Pregenerated Concrete Paths Injection ────────────────────────────────────
+
+const VINEXT_PREGEN_START = "/* __VINEXT_PREGENERATED_CONCRETE_PATHS_START__ */";
+const VINEXT_PREGEN_END = "/* __VINEXT_PREGENERATED_CONCRETE_PATHS_END__ */";
+const VINEXT_PREGEN_RE = new RegExp(
+  `${escapeRegExp(VINEXT_PREGEN_START)}[\\s\\S]*?${escapeRegExp(VINEXT_PREGEN_END)}\\n?`,
+  "g",
+);
+
+/**
+ * Read the prerender manifest and inject pregenerated concrete paths into the
+ * App Router Worker bundle so the PPR fallback-shell guard is populated at
+ * module init time without calling `seedMemoryCacheFromPrerender`.
+ *
+ * The paths are injected as `globalThis.__VINEXT_PREGENERATED_CONCRETE_PATHS`
+ * wrapped in replaceable marker comments, and consumed by
+ * `initPregeneratedPathsFromGlobals` in the generated RSC entry.
+ *
+ * Idempotent: repeated calls strip the previous injection before writing the
+ * new one. If the manifest is missing, corrupt, or empty, any prior injection
+ * is stripped and nothing new is written — failing closed to empty.
+ */
+export function injectPregeneratedConcretePaths(root: string): void {
+  const workerEntry = path.resolve(root, "dist", "server", "index.js");
+  if (!fs.existsSync(workerEntry)) return;
+
+  let code = fs.readFileSync(workerEntry, "utf-8");
+  code = code.replace(VINEXT_PREGEN_RE, "");
+
+  const manifestPath = path.join(root, "dist", "server", "vinext-prerender.json");
+  const manifest = readPrerenderManifest(manifestPath);
+  const table = buildPregeneratedConcretePathTable(manifest ?? {});
+
+  if (table.length > 0) {
+    const injection =
+      `${VINEXT_PREGEN_START}\n` +
+      `globalThis.__VINEXT_PREGENERATED_CONCRETE_PATHS = ${JSON.stringify(table)};\n` +
+      `${VINEXT_PREGEN_END}\n`;
+    code = injection + code;
+  }
+
+  fs.writeFileSync(workerEntry, code);
+}
+
 // ─── Main Entry ──────────────────────────────────────────────────────────────
 
 export async function deploy(options: DeployOptions): Promise<void> {
+  const deployEnv = validateWranglerEnvName(
+    options.env || (options.preview ? "preview" : "production"),
+  );
   const root = path.resolve(options.root);
   loadDotenv({ root, mode: "production" });
 
@@ -1572,10 +1422,7 @@ export async function deploy(options: DeployOptions): Promise<void> {
 
   // Step 5: Build
   if (!options.skipBuild) {
-    // Resolve the env name the same way buildWranglerDeployArgs does, so the
-    // build emits a wrangler.json that matches the env we'll deploy with.
-    const buildEnv = options.env || (options.preview ? "preview" : undefined);
-    await runBuild(info, buildEnv);
+    await runBuild(info, deployEnv === "production" && !options.env ? undefined : deployEnv);
   } else {
     console.log("\n  Skipping build (--skip-build)");
   }
@@ -1600,6 +1447,10 @@ export async function deploy(options: DeployOptions): Promise<void> {
       }
       await runPrerender({ root: info.root, concurrency: options.prerenderConcurrency });
     }
+
+    // Inject pregenerated concrete paths into the Worker bundle so the PPR
+    // fallback-shell guard is populated without calling seedMemoryCacheFromPrerender.
+    injectPregeneratedConcretePaths(root);
   }
 
   // Step 6b: TPR — pre-render hot pages into KV cache (experimental, opt-in)
@@ -1619,8 +1470,7 @@ export async function deploy(options: DeployOptions): Promise<void> {
 
   // Step 7: Deploy via wrangler
   const url = runWranglerDeploy(root, {
-    preview: options.preview ?? false,
-    env: options.env,
+    env: deployEnv === "production" && !options.env ? undefined : deployEnv,
   });
 
   console.log("\n  ─────────────────────────────────────────");

@@ -34,6 +34,12 @@ export const VINEXT_PRERENDER_SECRET_HEADER = "x-vinext-prerender-secret";
 /** URL-encoded JSON route params for build-time prerender renders. */
 export const VINEXT_PRERENDER_ROUTE_PARAMS_HEADER = "x-vinext-prerender-route-params";
 
+/** Internal endpoint used to evaluate App Router generateStaticParams exports. */
+export const VINEXT_PRERENDER_STATIC_PARAMS_PATH = "/__vinext/prerender/static-params";
+
+/** Internal endpoint used to evaluate Pages Router getStaticPaths exports. */
+export const VINEXT_PRERENDER_PAGES_STATIC_PATHS_PATH = "/__vinext/prerender/pages-static-paths";
+
 /** TPR (Tailored Per-Request) revalidation interval in seconds. */
 export const VINEXT_REVALIDATE_HEADER = "x-vinext-revalidate";
 
@@ -91,6 +97,14 @@ export const NEXT_ACTION_HEADER = "next-action";
 
 /** Next.js action-not-found indicator (value "1"). */
 export const NEXTJS_ACTION_NOT_FOUND_HEADER = "x-nextjs-action-not-found";
+
+/**
+ * Deployment ID header used by the Pages Router for deployment-skew
+ * protection. Set on every `/_next/data/` response so the client can detect
+ * when a new deployment has been rolled out and trigger a hard navigation.
+ * Mirrors `NEXT_NAV_DEPLOYMENT_ID_HEADER` from Next.js `lib/constants.ts`.
+ */
+export const NEXTJS_DEPLOYMENT_ID_HEADER = "x-nextjs-deployment-id";
 
 /** Forwarded action marker — set when a request has already been forwarded between workers. */
 export const ACTION_FORWARDED_HEADER = "x-action-forwarded";

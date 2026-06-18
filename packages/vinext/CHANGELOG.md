@@ -1,5 +1,266 @@
 # vinext
 
+## 0.1.5
+
+### Bug Fixes
+
+- **Image:** preserve unoptimized remote URLs (#2139)
+- **Image Imports:** normalize watchChange id so image cache invalidates on Windows (#2125)
+- **Transforms:** emit sourcemaps from strip-server-exports and remove-console (#2124)
+- **Middleware:** match middleware taint ids by forward-slash on Windows (#2088)
+- **Build:** normalize canonicalized module ids to forward slashes on Windows (#2089)
+- **CSS:** keep module hashes stable with url assets (#2114)
+- **Middleware:** normalize trailing slash before matching (#2112)
+
+### Performance
+
+#### Dev
+
+- skip JSX transform for compiled runtime (#2121)
+- skip typeof window folding for prebundles (#2118)
+- externalize App Router request handler (#2108)
+
+#### Misc
+
+- **App Router:** defer cache-only runtimes (#2126)
+- **App Page Cache:** reuse HTML ISR key during regeneration (#2127)
+- **App Page Cache:** reuse the ISR cache key on the stale-regeneration path (#2123)
+- **Image Imports:** hoist image-extension regex to module scope (#2122)
+- **SSR:** isolate open redirect detection (#2120)
+- **Build:** rely on plugin hook filters (#2119)
+- **App Router:** defer action and route-handler runtimes (#2079)
+- **Cache:** isolate handler and request state (#2107)
+- **Build:** filter compatibility transform hooks (#2103)
+
+### Contributors
+
+- @james-elicx
+- @shulaoda
+- @TheAlexLichter
+
+## 0.1.4
+
+### Bug Fixes
+
+#### Pages
+
+- emit canonical **NEXT_DATA** JSON (#2043)
+- re-enter filesystem routes after rewrites (#2041)
+- apply Document renderPage enhancers (#2034)
+- interpolate same-segment rewrite params (#2030)
+- honor basePath in dev module loaders (#2033)
+- route hybrid form data requests (#2029)
+- preserve rewritten URLs during navigation (#2028)
+
+#### Misc
+
+- **Build:** preserve lazy RSC framework chunks (#2074)
+- **Middleware:** fail closed for unsafe matchers (#2078)
+- **Build:** strip server-side Pages data export transforms from client (#2055)
+- **Fonts:** detect trailing comma past comments when injecting font options (#2051)
+- **Csp:** match script-src-elem/attr when extracting script nonce (#2049)
+- **Script:** register src beforeInteractive scripts and mark hoisted output (#2019)
+- **i18n:** match NEXT_LOCALE cookie case-insensitively (#2050)
+- **Metadata:** gate twitter app and player tags on card type (#2053)
+- **Config:** support tsconfig extends array form (#2054)
+- **Navigation:** promote OperationToken to the eligibility authority (#2009)
+- **App Router:** preserve dynamic interception source routes (#2042)
+- **Image:** emit static imports as managed assets (#2040)
+- **Middleware:** classify Pages data requests by URL (#2039)
+- **Pages Router:** cancel deduped GSSP data waits (#2038)
+- **Router:** re-enter filesystem routes after rewrites (#2032)
+- **Actions:** return body-limit errors without closing responses (#2026)
+- **Router:** render slots beside grouped children (#2022)
+- **App Router:** settle superseded link navigations (#2025)
+- **Prerender:** deduplicate generateStaticParams entries (#2031)
+
+### Performance
+
+- **RSC:** prebundle static renderer entry (#2077)
+- **Dev:** prune NODE_ENV during dependency optimization (#2075)
+
+### Contributors
+
+- @Divkix
+- @james-elicx
+- @MaxtuneLee
+- @NathanDrake2406
+- @TheAlexLichter
+- @Xplod13
+
+## 0.1.3
+
+### Bug Fixes
+
+#### App Router
+
+- align router autoscroll with Next (#2004)
+- recover SSR shell render errors via **next_error** document (#1908)
+- preserve front redirects through fallback route handlers (#2000)
+- expose active source page on window.next (#1995)
+- fold typeof window before resolution (#1956)
+- support extensionless variable imports (#1958)
+- preserve page notFound precedence during metadata failure (#1957)
+
+#### Deploy
+
+- preserve app module identity with deployment ids (#2005)
+- prevent Windows shell injection (#1946)
+- improve deployment id parity (#1949)
+
+#### Pages
+
+- preserve app props for GSSP requests (#1996)
+- preserve module identity with deployment ids (#2012)
+- harden cookie parsing (#1947)
+
+#### Pages Router
+
+- pass rewrite URL to edge API requests (#1998)
+- block fallback shell for crawler UAs on prerender (#1543) (#1663)
+- restore scroll across reload history traversal (#1905)
+
+#### Router
+
+- honor hybrid pages route priority (#1997)
+- share Pages Router context across chunks (#2010)
+- restore pages scroll traversal state (#1999)
+- hard navigate Pages links to App routes (#1960)
+
+#### Shims
+
+- guard AsyncLocalStorage construction for browser bundles (#2020)
+- add useUntrackedPathname hook for error boundary parity (#1933)
+- match next/error RSC diagnostic (#1939)
+
+#### Misc
+
+- **Image:** allow any quality 1-100 when images.qualities is unset (#2023)
+- **Server:** strip HTTP/2 pseudo-headers before building Headers (#2021)
+- **Prerender:** surface thrown generateStaticParams/getStaticPaths errors (#2017)
+- **Routing:** re-encode trailing-slash Location for non-Latin-1 paths (#2011)
+- **PPR:** gate fallback shells until request-time resume is supported (#1716)
+- **Build:** honour experimental.lightningCssFeatures include/exclude (#1498) (#1664)
+- **Image:** prevent optimizer cache-key amplification (#1944)
+- **Actions:** bound Flight payload graph validation (#1942)
+- **Link:** preserve basePath hash navigation (#1952)
+- **Headers:** prioritize config cache headers for metadata assets (#1953)
+- **Config:** share CommonJS module fallback (#1990)
+- **Config:** honor resolve extensions and improve webpack config processing (#1959)
+- **CSS:** load local CommonJS PostCSS plugins (#1961)
+- **Cache:** honor fetch opt-outs and force-dynamic revalidate parity (#1907)
+
+### Performance
+
+- skip unnecessary import parsing (#1991)
+- cache fs probes and precompute route sort keys in scan/deploy paths (#1930)
+
+### Contributors
+
+- @Divkix
+- @james-elicx
+- @JaredStowell
+- @NathanDrake2406
+- @Xplod13
+
+## 0.1.2
+
+### Bug Fixes
+
+#### App Router
+
+- include parallel slot params in useParams (#1904)
+- preserve unstable_catchError boundaries (#1906)
+- suppress redirect console errors in production onCaughtError (root-layout-redirect) (#1878)
+- preload next/dynamic chunks with CSP nonce (#1594)
+- extend OTel tracer provider for Cache Component span context (#1868)
+- return HTTP 200 when notFound() is thrown from generateMetadata (#1864)
+- discover parallel-slot pages inside route groups for catch-all + parallel-routes-group (#1865)
+
+#### Pages Router
+
+- support stream proxying in API routes (#1902)
+- set x-nextjs-deployment-id on SSG \_next/data responses (#1863)
+- buffer SSR response for crawler/bot User-Agents (#1876)
+- hard-navigate to App Router destinations from Pages Router links (#1879)
+- bridge deprecated Router.on<Event> property callbacks (#1869)
+
+#### Misc
+
+- **Router:** support experimental gesture push (#1909)
+- **Prod Server:** stop double-evaluating the server bundle when chunks import the entry back (#1924)
+- **Trailing Slash:** canonical url trailing slash support (#1888)
+- **Edge Wasm:** handle `*.wasm?module` imports in non-Cloudflare builds (#1877)
+- **Config:** define cache components flag as boolean (#1903)
+- **Scss:** preprocess SCSS CSS-module composes deps via SassAwareFileSystemLoader (#1882)
+- **Routing:** normalize route root to forward slashes, drop downstream path workarounds (#1896)
+- **Middleware:** clear nextUrl.basePath for absolute paths outside basePath (part of #1830) (#1872)
+- **Cloudflare:** update cache adapter jsdoc and examples (#1898)
+- **Fonts:** normalize shims dir so shim-skip guards match on Windows (#1885)
+- **Check:** normalize scanned file paths to forward slashes on Windows (#1887)
+- **Shims:** use path.posix.join in resolveShimModulePath for Windows (#1886)
+- **Scss:** resolve tilde (~) imports from node_modules and project root (#1881)
+- **Build:** define process.env.NEXT_RUNTIME for server bundles (#1880)
+- **Build:** inline ../-relative font assets in OG routes (#1866)
+- **Use Cache:** pass soft tags to cache lookup so revalidatePath invalidates use-cache entries in route handlers (#1867)
+
+### Performance
+
+- **Server:** eliminate redundant per-request parsing in the request pipeline (#1929)
+- **Server:** hoist per-request regex compilation out of SSR streaming and shim hot paths (#1915)
+
+### Contributors
+
+- @Divkix
+- @james-elicx
+- @jgeurts
+- @MaxtuneLee
+- @NathanDrake2406
+- @shulaoda
+
+## 0.1.1
+
+### Bug Fixes
+
+#### App Router
+
+- match Pages navigation params in hybrid builds (#1741)
+- include route pattern in repeated-slash Link warning (#1554) (#1855)
+- scroll to top with hoisted children and loading.js (#1368) (#1857)
+- resolve explicit parallel slot with no page (#1535) (#1852)
+- propagate "use cache" tags to route-handler ISR entries (#1453) (#1848)
+- resolve query-only Link href against current path (#1540) (#1844)
+- render built-in fallback when global-error.tsx throws (#1548) (#1837)
+- clear useLinkStatus pending after interrupted navigation (#1527) (#1839)
+- respect reactMaxHeadersLength for preload Link header (#1552) (#1841)
+- preserve \_rsc query across redirects (#1529) (#1838)
+- apply trailingSlash to route handler request URL (#1827) (#1835)
+- restore scroll snapshots on back (#1743)
+- isolate page CSS chunks in production (#1738)
+
+#### Build
+
+- correct CSS ordering for global-not-found (#1549) (#1858)
+- exclude Vite build manifests from Cloudflare asset uploads (#1850)
+- don't crash on benign floating asset-import errors (#1510) (#1846)
+- expand require.context into import.meta.glob map (#1501) (#1836)
+- don't path-resolve bare specifier aliases for esmExternals (#1507) (#1843)
+- don't crash build when a PostCSS string plugin can't be resolved (#1509) (#1840)
+
+#### Misc
+
+- **Pages Router:** pass revalidateReason "on-demand" to gsp/gssp (#1462) (#1856)
+- **Actions:** return 404 for MPA action on app with no server actions (#1340) (#1853)
+- **Routing:** propagate middleware draft cookie to pages/api fallback (#1520) (#1845)
+- **Actions:** enforce serverActions.bodySizeLimit on fetch actions (#1828) (#1834)
+- support sibling-style interception routes (#1804)
+
+### Contributors
+
+- @Divkix
+- @james-elicx
+- @NathanDrake2406
+
 ## 0.1.0
 
 Today's release contains several app router bundling improvements like code splitting and lazy loading for faster cold starts, and minification by default for smaller bundles. Several CLI crashes were fixed for large projects, and more Next.js parity gaps were addressed.

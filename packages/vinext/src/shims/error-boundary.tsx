@@ -1,9 +1,10 @@
 "use client";
 
 import React from "react";
-// Import the local shim, not the public next/navigation alias. The built
-// package may execute this file before the plugin's resolveId hook is active.
-import { decodeRedirectError, isRedirectError, usePathname, useRouter } from "./navigation.js";
+import { decodeRedirectError, isRedirectError } from "./navigation-server.js";
+import { useErrorBoundaryPathname, useErrorBoundaryRouter } from "./error-boundary-navigation.js";
+import DefaultGlobalError from "./default-global-error.js";
+import { handleAppNavigationFailure } from "../client/app-nav-failure-handler.js";
 import { VINEXT_DEV_ERROR_RECOVERY_EVENT } from "../utils/dev-error-recovery-event.js";
 import { isNavigationSignalError } from "../utils/navigation-signal.js";
 
@@ -23,22 +24,23 @@ type RedirectBoundaryState = {
 };
 
 type ErrorBoundaryInnerProps = {
-  pathname: string;
+  isImplicitRootErrorBoundary?: boolean;
+  pathname: string | null;
 } & ErrorBoundaryProps;
 
 export type ErrorBoundaryState = {
   error: CapturedError | null;
-  previousPathname: string;
+  previousPathname: string | null;
   previousResetKey: string | null;
 };
 
 type BoundaryResetProps = {
-  pathname: string;
+  pathname: string | null;
   resetKey?: string | null;
 };
 
 type BoundaryResetState = {
-  previousPathname: string;
+  previousPathname: string | null;
   previousResetKey: string | null;
 };
 
@@ -86,7 +88,7 @@ function HandleRedirect({
   redirectType: "push" | "replace";
   reset: () => void;
 }) {
-  const router = useRouter();
+  const router = useErrorBoundaryRouter();
 
   React.useEffect(() => {
     React.startTransition(() => {
@@ -190,6 +192,9 @@ export class ErrorBoundaryInner extends React.Component<
     state: ErrorBoundaryState,
   ): ErrorBoundaryState | null {
     const nextResetState = readBoundaryResetState(props);
+    if (state.error && handleAppNavigationFailure(state.error.thrownValue)) {
+      return { error: null, ...nextResetState };
+    }
     if (state.error && shouldResetBoundary(nextResetState, state)) {
       return { error: null, ...nextResetState };
     }
@@ -239,7 +244,7 @@ export class ErrorBoundaryInner extends React.Component<
 }
 
 export function ErrorBoundary({ fallback, children, resetKey }: ErrorBoundaryProps) {
-  const pathname = usePathname();
+  const pathname = useErrorBoundaryPathname();
   return (
     <ErrorBoundaryInner pathname={pathname} resetKey={resetKey} fallback={fallback}>
       {children}
@@ -266,12 +271,16 @@ export function GlobalErrorBoundary({
   fallback: React.ComponentType<{ error: unknown; reset: () => void }>;
   children: React.ReactNode;
 }) {
-  const pathname = usePathname();
+  const pathname = useErrorBoundaryPathname();
   // No `resetKey`: as the outermost root boundary it resets only on pathname
   // change (the ErrorBoundaryInner default), matching Next.js's RootErrorBoundary
   // which also has no per-segment reset key.
   return (
-    <ErrorBoundaryInner pathname={pathname} fallback={fallback}>
+    <ErrorBoundaryInner
+      pathname={pathname}
+      fallback={fallback}
+      isImplicitRootErrorBoundary={fallback === DefaultGlobalError}
+    >
       {children}
     </ErrorBoundaryInner>
   );
@@ -288,12 +297,12 @@ type NotFoundBoundaryProps = {
 };
 
 type NotFoundBoundaryInnerProps = {
-  pathname: string;
+  pathname: string | null;
 } & NotFoundBoundaryProps;
 
 type NotFoundBoundaryState = {
   notFound: boolean;
-  previousPathname: string;
+  previousPathname: string | null;
   previousResetKey: string | null;
 };
 
@@ -354,7 +363,7 @@ class NotFoundBoundaryInner extends React.Component<
  * component. Segment reset keys own App Router remount semantics when present.
  */
 export function NotFoundBoundary({ fallback, children, resetKey }: NotFoundBoundaryProps) {
-  const pathname = usePathname();
+  const pathname = useErrorBoundaryPathname();
   return (
     <NotFoundBoundaryInner pathname={pathname} resetKey={resetKey} fallback={fallback}>
       {children}
@@ -373,12 +382,12 @@ type ForbiddenBoundaryProps = {
 };
 
 type ForbiddenBoundaryInnerProps = {
-  pathname: string;
+  pathname: string | null;
 } & ForbiddenBoundaryProps;
 
 type ForbiddenBoundaryState = {
   forbidden: boolean;
-  previousPathname: string;
+  previousPathname: string | null;
   previousResetKey: string | null;
 };
 
@@ -426,7 +435,7 @@ export class ForbiddenBoundaryInner extends React.Component<
 }
 
 export function ForbiddenBoundary({ fallback, children, resetKey }: ForbiddenBoundaryProps) {
-  const pathname = usePathname();
+  const pathname = useErrorBoundaryPathname();
   return (
     <ForbiddenBoundaryInner pathname={pathname} resetKey={resetKey} fallback={fallback}>
       {children}
@@ -445,12 +454,12 @@ type UnauthorizedBoundaryProps = {
 };
 
 type UnauthorizedBoundaryInnerProps = {
-  pathname: string;
+  pathname: string | null;
 } & UnauthorizedBoundaryProps;
 
 type UnauthorizedBoundaryState = {
   unauthorized: boolean;
-  previousPathname: string;
+  previousPathname: string | null;
   previousResetKey: string | null;
 };
 
@@ -498,7 +507,7 @@ export class UnauthorizedBoundaryInner extends React.Component<
 }
 
 export function UnauthorizedBoundary({ fallback, children, resetKey }: UnauthorizedBoundaryProps) {
-  const pathname = usePathname();
+  const pathname = useErrorBoundaryPathname();
   return (
     <UnauthorizedBoundaryInner pathname={pathname} resetKey={resetKey} fallback={fallback}>
       {children}
@@ -519,6 +528,7 @@ export function UnauthorizedBoundary({ fallback, children, resetKey }: Unauthori
 // ---------------------------------------------------------------------------
 
 export type DevRecoveryBoundaryProps = {
+  isImplicitRootErrorBoundary?: boolean;
   resetKey: number;
   // Called from componentDidCatch with the current resetKey so the host can
   // run any pending side effects that NavigationCommitSignal would normally
