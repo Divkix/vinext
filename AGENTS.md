@@ -501,7 +501,7 @@ The caching layer is pluggable. The default data cache handler is the in-memory 
 
 ### Dev `"use cache"` Does Not Read the Handler (no `TieredCacheHandler` needed)
 
-Next.js PR [#94784](https://github.com/vercel/next.js/pull/94784) added a dev-only `TieredCacheHandler` (plus a size-0 replacement and a dev private handler) to fix warm dev reloads being treated as **cold cache misses** under Cache Components. Their bug: in dev, Next.js *reads* the configured cache handler during a staged render, and a read that doesn't resolve in a microtask (a `cacheMaxMemorySize: 0` no-op stub, or a slow/remote custom handler's `get`) is counted as a miss.
+Next.js PR [#94784](https://github.com/vercel/next.js/pull/94784) added a dev-only `TieredCacheHandler` (plus a size-0 replacement and a dev private handler) to fix warm dev reloads being treated as **cold cache misses** under Cache Components. Their bug: in dev, Next.js _reads_ the configured cache handler during a staged render, and a read that doesn't resolve in a microtask (a `cacheMaxMemorySize: 0` no-op stub, or a slow/remote custom handler's `get`) is counted as a miss.
 
 **vinext is immune by design and does not port `TieredCacheHandler`.** vinext's dev `"use cache"` path never reads the handler: `registerCachedFunction` short-circuits in dev (`packages/vinext/src/shims/cache-runtime.ts`, the `if (isDev) return executeWithContext(...)` branch) and re-executes the function so HMR edits are reflected immediately. Consequently:
 
