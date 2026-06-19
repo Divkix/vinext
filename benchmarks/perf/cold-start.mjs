@@ -9,6 +9,7 @@ import { reportPerformanceSample } from "./report-sample.mjs";
 const repositoryRoot = process.env.VINEXT_PERF_TARGET_ROOT ?? process.cwd();
 const benchmarkDir = join(repositoryRoot, "benchmarks");
 const targetUser = process.env.VINEXT_PERF_TARGET_USER;
+const profiling = process.env.VINEXT_PERF_PROFILE === "true";
 const framework = process.argv[2];
 const route = process.argv[3] ?? "/";
 const expectedText = process.env.VINEXT_PERF_EXPECTED_TEXT ?? "Benchmark App";
@@ -68,10 +69,14 @@ async function clearDirectory(path) {
 function commandFor(port) {
   let command;
   if (framework === "vinext") {
-    const vpPath = execFileSync("which", ["vp"], { encoding: "utf8" }).trim();
+    const vpPath = profiling
+      ? join(projectDir, "node_modules/vite-plus/bin/vp")
+      : execFileSync("which", ["vp"], { encoding: "utf8" }).trim();
     command = {
-      command: vpPath,
-      args: ["dev", "--host", "127.0.0.1", "--port", String(port)],
+      command: profiling ? globalThis.process.execPath : vpPath,
+      args: profiling
+        ? [vpPath, "dev", "--host", "127.0.0.1", "--port", String(port)]
+        : ["dev", "--host", "127.0.0.1", "--port", String(port)],
     };
   } else {
     command = {
@@ -79,7 +84,7 @@ function commandFor(port) {
       args: ["dev", "--turbopack", "-H", "127.0.0.1", "-p", String(port)],
     };
   }
-  return targetUser
+  return targetUser && !profiling
     ? { command: "sudo", args: ["-u", targetUser, "--", command.command, ...command.args] }
     : command;
 }
