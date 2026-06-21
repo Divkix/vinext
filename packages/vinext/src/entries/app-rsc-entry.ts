@@ -42,6 +42,11 @@ const appRouteHandlerResponsePath = resolveEntryPath(
   "../server/app-route-handler-response.js",
   import.meta.url,
 );
+const appMiddlewarePath = resolveEntryPath("../server/app-middleware.js", import.meta.url);
+const metadataRouteResponsePath = resolveEntryPath(
+  "../server/metadata-route-response.js",
+  import.meta.url,
+);
 const appServerActionExecutionPath = resolveEntryPath(
   "../server/app-server-action-execution.js",
   import.meta.url,
@@ -151,6 +156,8 @@ type AppRouterConfig = {
   inlineCss?: boolean;
   /** Enables Next.js Cache Components semantics for App Router document HTML. */
   cacheComponents?: boolean;
+  /** Whether the RSC build discovered any server references. Defaults to true. */
+  hasServerActions?: boolean;
   /** Internationalization routing config for middleware matcher locale handling. */
   i18n?: NextI18nConfig | null;
   imageConfig?: ImageConfig;
@@ -212,6 +219,7 @@ export function generateRscEntry(
   const cacheMaxMemorySize = config?.cacheMaxMemorySize;
   const inlineCss = config?.inlineCss === true;
   const cacheComponents = config?.cacheComponents === true;
+  const hasServerActions = config?.hasServerActions !== false;
   const i18nConfig = config?.i18n ?? null;
   const hasPagesDir = config?.hasPagesDir ?? false;
   const publicFiles = config?.publicFiles ?? [];
@@ -248,12 +256,18 @@ async function __loadPrerenderPagesRoutes() {
 import ${JSON.stringify(serverGlobalsPath)};
 import {
   renderToReadableStream as _renderToReadableStream,
-  decodeAction,
+  ${
+    hasServerActions
+      ? `decodeAction,
   decodeFormState,
   decodeReply,
   loadServerAction,
-  createTemporaryReferenceSet,
-} from "@vitejs/plugin-rsc/rsc";
+  createTemporaryReferenceSet,`
+      : ""
+  }
+} from ${JSON.stringify(
+    hasServerActions ? "@vitejs/plugin-rsc/rsc" : "@vitejs/plugin-rsc/react/rsc",
+  )};
 import { createClientManifest as _createClientManifest } from "@vitejs/plugin-rsc/core/rsc";
 import { prerender as _prerender } from "@vitejs/plugin-rsc/vendor/react-server-dom/static.edge";
 import { createRscPrerenderer, createRscRenderer } from ${JSON.stringify(rscStreamHintsPath)};
@@ -267,7 +281,12 @@ import { getNavigationContext as _getNavigationContext } from "next/navigation";
 import { configureMemoryCacheHandler as __configureMemoryCacheHandler } from "vinext/shims/cache-handler";
 import { headersContextFromRequest, getDraftModeCookieHeader, getAndClearPendingCookies, consumeDynamicUsage, consumeInvalidDynamicUsageError, setHeadersAccessPhase } from "next/headers";
 import { mergeMetadata, resolveModuleMetadata, mergeViewport, resolveModuleViewport } from "vinext/metadata";
-${middlewarePath ? `import * as middlewareModule from ${JSON.stringify(normalizePathSeparators(middlewarePath))};` : ""}
+${
+  middlewarePath
+    ? `import * as middlewareModule from ${JSON.stringify(normalizePathSeparators(middlewarePath))};
+import { applyAppMiddleware as __applyAppMiddleware } from ${JSON.stringify(appMiddlewarePath)};`
+    : ""
+}
 ${
   instrumentationPath
     ? `import * as _instrumentation from ${JSON.stringify(normalizePathSeparators(instrumentationPath))};
@@ -286,7 +305,16 @@ ${
     : ""
 }
 const __loadAppRouteHandlerDispatch = () => import(${JSON.stringify(appRouteHandlerDispatchPath)});
-const __loadAppServerActionExecution = () => import(${JSON.stringify(appServerActionExecutionPath)});
+${
+  hasServerActions
+    ? `const __loadAppServerActionExecution = () => import(${JSON.stringify(appServerActionExecutionPath)});`
+    : ""
+}
+${
+  (metadataRoutes?.length ?? 0) > 0
+    ? `const __loadMetadataRouteResponse = () => import(${JSON.stringify(metadataRouteResponsePath)});`
+    : ""
+}
 import {
   sanitizeErrorForClient as __sanitizeErrorForClient,
 } from ${JSON.stringify(appRscErrorsPath)};
@@ -862,6 +890,9 @@ export default createAppRscHandler({
   },`
       : ""
   }
+  ${
+    hasServerActions
+      ? `
   async handleProgressiveActionRequest({
     actionId,
     cleanPathname,
@@ -1042,13 +1073,44 @@ export default createAppRscHandler({
       },
     });
   },
+  `
+      : ""
+  }
   i18nConfig: __i18nConfig,
-  isMiddlewareProxy: ${JSON.stringify(middlewarePath ? isProxyFile(middlewarePath) : false)},
   ${hasPagesDir ? `loadPrerenderPagesRoutes: __loadPrerenderPagesRoutes,` : ""}
-  makeThenableParams,
+  ${
+    (metadataRoutes?.length ?? 0) > 0
+      ? `async handleMetadataRouteRequest(cleanPathname, rawCleanPathname) {
+    const { handleMetadataRouteRequest: __handleMetadataRouteRequest } =
+      await __loadMetadataRouteResponse();
+    return __handleMetadataRouteRequest({
+      metadataRoutes,
+      cleanPathname,
+      rawCleanPathname,
+      makeThenableParams,
+    });
+  },`
+      : ""
+  }
   matchRoute,
-  metadataRoutes,
-  middlewareModule: ${middlewarePath ? "middlewareModule" : "null"},
+  ${
+    middlewarePath
+      ? `runMiddleware({ cleanPathname, context, isDataRequest, request }) {
+    return __applyAppMiddleware({
+      basePath: __basePath,
+      cleanPathname,
+      context,
+      filePath: ${JSON.stringify(middlewarePath ? normalizePathSeparators(middlewarePath) : "")},
+      i18nConfig: __i18nConfig,
+      isDataRequest,
+      isProxy: ${JSON.stringify(isProxyFile(middlewarePath))},
+      module: middlewareModule,
+      request,
+      trailingSlash: __trailingSlash,
+    });
+  },`
+      : ""
+  }
   publicFiles: __publicFiles,
   renderNotFound({ isRscRequest, matchedParams, middlewareContext, request, route, scriptNonce }) {
     const __isEdge = route ? __isEdgeRuntime(__resolveAppPageSegmentConfig({ layouts: route.layouts, page: route.page }).runtime) : false;

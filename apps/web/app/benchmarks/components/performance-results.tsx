@@ -155,7 +155,9 @@ export function PerformanceResultsTable({
                   {comparisonMode && (
                     <Table.Cell>
                       {change === null ? (
-                        <Badge variant="secondary">New</Badge>
+                        <Badge variant="secondary">
+                          {baselineMeasurements ? "Current only" : "New"}
+                        </Badge>
                       ) : (
                         <Badge
                           variant={neutral ? "primary" : improved ? "green" : "destructive"}
@@ -255,6 +257,7 @@ function PerformanceTrendChart({
         key={scenario.scenarioId}
         labels={runs.map((run) => run.shortSha)}
         pointKeys={runs.map((run) => run.id)}
+        pointHrefs={runs.map((run) => `/benchmarks/commit/${run.commitSha}`)}
         series={series}
         yLabel={scenario.unit}
         formatY={(value) => formatPerformanceValue(value, scenario.unit)}
