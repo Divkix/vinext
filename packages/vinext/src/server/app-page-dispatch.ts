@@ -120,7 +120,11 @@ type AppPageBackgroundRegenerator = (
 ) => void;
 
 type AppPageDispatchIntercept<TPage = unknown> = {
-  interceptLayouts?: readonly AppPageModule[] | null;
+  // Lazy-loaded layout modules: typed `unknown` because they arrive as
+  // dynamically-imported modules (read sites cast to AppPageModule). Matches the
+  // transport-level `interceptLayouts` on the route-matching/request types so an
+  // intercept match flows through `toInterceptOptions` in both directions.
+  interceptLayouts?: readonly unknown[] | null;
   matchedParams: AppPageParams;
   page: TPage;
   slotId?: string | null;
@@ -131,7 +135,7 @@ type AppPageDispatchIntercept<TPage = unknown> = {
 
 type AppPageDispatchInterceptOptions<TPage = unknown> = {
   interceptionContext: string | null;
-  interceptLayouts?: readonly AppPageModule[] | null;
+  interceptLayouts?: readonly unknown[] | null;
   interceptPage: TPage;
   interceptParams: AppPageParams;
   interceptSlotId?: string | null;
