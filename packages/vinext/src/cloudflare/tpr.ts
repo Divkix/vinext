@@ -23,10 +23,12 @@
 import fs from "node:fs";
 import path from "node:path";
 import { spawn, type ChildProcess } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import {
   VINEXT_REVALIDATE_HEADER,
   VINEXT_IMPLICIT_TAGS_HEADER,
   VINEXT_TPR_USER_AGENT,
+  VINEXT_TPR_SECRET_HEADER,
 } from "../server/headers.js";
 import { isrCacheKey } from "../server/isr-cache.js";
 import { buildAppPageCacheTags } from "../server/app-page-cache.js";
@@ -546,8 +548,12 @@ async function prerenderRoutes(
     return results;
   }
 
+  // Per-run secret: gates x-vinext-implicit-tags emission in the prod server so
+  // it can never be triggered by a spoofed User-Agent on a deployed Worker.
+  const tprSecret = randomUUID();
+
   // Start the local production server as a subprocess
-  const serverProcess = startLocalServer(root, port);
+  const serverProcess = startLocalServer(root, port, tprSecret);
 
   try {
     await waitForServer(port, SERVER_STARTUP_TIMEOUT);
@@ -560,6 +566,7 @@ async function prerenderRoutes(
           const response = await fetch(`http://127.0.0.1:${port}${routePath}`, {
             headers: {
               "User-Agent": VINEXT_TPR_USER_AGENT,
+              [VINEXT_TPR_SECRET_HEADER]: tprSecret,
               ...(hostDomain ? { Host: hostDomain } : {}),
             },
             redirect: "manual", // Don't follow redirects — cache the redirect itself
@@ -618,7 +625,7 @@ async function prerenderRoutes(
  * Uses the same Node.js binary and resolves prod-server.js relative
  * to the current module (works whether vinext is installed or linked).
  */
-function startLocalServer(root: string, port: number): ChildProcess {
+function startLocalServer(root: string, port: number, tprSecret: string): ChildProcess {
   const prodServerPath = path.resolve(import.meta.dirname, "..", "server", "prod-server.js");
   const outDir = path.join(root, "dist");
 
@@ -635,7 +642,7 @@ function startLocalServer(root: string, port: number): ChildProcess {
   const proc = spawn(process.execPath, ["--input-type=module", "-e", script], {
     cwd: root,
     stdio: "pipe",
-    env: { ...process.env, NODE_ENV: "production" },
+    env: { ...process.env, NODE_ENV: "production", VINEXT_TPR_SECRET: tprSecret },
   });
 
   // Forward server errors to the parent's stderr for debugging
