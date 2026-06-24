@@ -506,6 +506,15 @@ async function handleAppRscRequest<TRoute extends AppRscHandlerRoute>(
   // (#1963). After a rewrite the destination is already a resolved (decoded)
   // pathname, so raw == clean there — matching the legacy behavior for rewrites.
   let rawCleanPathname = normalized.rawCleanPathname;
+  // Single mutation path for post-boundary pathname rewrites (middleware,
+  // beforeFiles/afterFiles/fallback config rewrites). Rewrite destinations are
+  // already decoded, so raw === clean here. Centralizing the assignment keeps
+  // the clean/raw pair aligned by construction for the matchRoute two-split,
+  // so dynamic route params stay decoded exactly once (#1963).
+  const setRewrittenCleanPathname = (next: string): void => {
+    cleanPathname = next;
+    rawCleanPathname = next;
+  };
   let resolvedUrl = cleanPathname + url.search;
   const originalResolvedUrl = resolvedUrl;
   const getResolvedSearchParams = () => new URL(resolvedUrl, url).searchParams;
@@ -621,8 +630,7 @@ async function handleAppRscRequest<TRoute extends AppRscHandlerRoute>(
       });
     }
 
-    cleanPathname = middlewareResult.cleanPathname;
-    rawCleanPathname = cleanPathname;
+    setRewrittenCleanPathname(middlewareResult.cleanPathname);
     didMiddlewareRewrite = cleanPathname !== normalized.cleanPathname;
     if (middlewareResult.search !== null) {
       url.search = middlewareResult.search;
@@ -658,8 +666,7 @@ async function handleAppRscRequest<TRoute extends AppRscHandlerRoute>(
     if (beforeFilesRewrite instanceof Response) return beforeFilesRewrite;
     if (beforeFilesRewrite) {
       resolvedUrl = mergeRewriteQuery(resolvedUrl, beforeFilesRewrite);
-      cleanPathname = pathnameForResolvedUrl(resolvedUrl);
-      rawCleanPathname = cleanPathname;
+      setRewrittenCleanPathname(pathnameForResolvedUrl(resolvedUrl));
     }
   }
 
@@ -856,8 +863,7 @@ async function handleAppRscRequest<TRoute extends AppRscHandlerRoute>(
       if (afterFilesRewrite instanceof Response) return afterFilesRewrite;
       if (!afterFilesRewrite) continue;
       resolvedUrl = mergeRewriteQuery(resolvedUrl, afterFilesRewrite);
-      cleanPathname = pathnameForResolvedUrl(resolvedUrl);
-      rawCleanPathname = cleanPathname;
+      setRewrittenCleanPathname(pathnameForResolvedUrl(resolvedUrl));
       match = options.matchRoute(cleanPathname, rawCleanPathname);
       const rewrittenStaticPagesResponse = await renderPagesForMatchKind("static");
       if (rewrittenStaticPagesResponse) {
@@ -899,8 +905,7 @@ async function handleAppRscRequest<TRoute extends AppRscHandlerRoute>(
       if (fallbackRewrite instanceof Response) return fallbackRewrite;
       if (!fallbackRewrite) continue;
       resolvedUrl = mergeRewriteQuery(resolvedUrl, fallbackRewrite);
-      cleanPathname = pathnameForResolvedUrl(resolvedUrl);
-      rawCleanPathname = cleanPathname;
+      setRewrittenCleanPathname(pathnameForResolvedUrl(resolvedUrl));
       match = options.matchRoute(cleanPathname, rawCleanPathname);
       const rewrittenStaticPagesResponse = await renderPagesForMatchKind("static");
       if (rewrittenStaticPagesResponse) {
