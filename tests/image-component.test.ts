@@ -173,6 +173,13 @@ describe("Image SSR rendering", () => {
       }),
     );
     expect(html).toContain('sizes="(max-width: 768px) 100vw, 50vw"');
+    // With `sizes`, the w-descriptor srcSet uses device widths <= 2x the
+    // intrinsic width, and the fallback `src` is the largest candidate
+    // (widths[last]) — always an allowed width (fixes a latent 400).
+    expect(html).toContain(
+      `srcSet="${optUrlHtml("/img.png", 640)} 640w, ${optUrlHtml("/img.png", 750)} 750w, ${optUrlHtml("/img.png", 828)} 828w"`,
+    );
+    expect(html).toContain(`src="${optUrlHtml("/img.png", 828)}"`);
   });
 
   it("renders with blur placeholder styles", () => {
@@ -513,6 +520,25 @@ describe("getImageProps", () => {
 
     // No `sizes` + numeric width → x-descriptor srcSet ([800, 1600] → [828, 1920]).
     expect(props.srcSet).toBe(`${optUrl("/photo.png", 828)} 1x, ${optUrl("/photo.png", 1920)} 2x`);
+  });
+
+  it("generates w-descriptor srcSet when sizes is provided", () => {
+    const { props } = getImageProps({
+      alt: "sized",
+      src: "/photo.png",
+      width: 500,
+      height: 300,
+      sizes: "(max-width: 768px) 100vw, 50vw",
+    });
+
+    // With `sizes` → w-descriptor srcSet (device widths <= 2x intrinsic width).
+    // The fallback `src` is the largest candidate (widths[last]) — always an
+    // allowed width (fixes a latent 400 on the old raw-width src).
+    expect(props.srcSet).toBe(
+      `${optUrl("/photo.png", 640)} 640w, ${optUrl("/photo.png", 750)} 750w, ${optUrl("/photo.png", 828)} 828w`,
+    );
+    expect(props.src).toBe(optUrl("/photo.png", 828));
+    expect(props.sizes).toBe("(max-width: 768px) 100vw, 50vw");
   });
 
   it("handles loading=eager prop", () => {
