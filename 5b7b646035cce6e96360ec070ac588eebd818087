@@ -1,0 +1,27 @@
+packages/vinext/src/server/dev-server.ts
+  s_f7a96e7e5f1db7::t_139a8d9d75e65b 35-36,506-519,533-539,542,550,563-564,568,573,581-589,2114-2125,2134-2135,2138,2142-2145,2147
+packages/vinext/src/server/pages-page-handler.ts
+  s_f7a96e7e5f1db7::t_a7b2cbb8d29114 1064
+packages/vinext/src/server/pages-page-response.ts
+  s_f7a96e7e5f1db7::t_5c2a08ee3357bf 212,325,348-353,357,376-389,631
+tests/pages-document-asset-props.test.ts
+  s_f7a96e7e5f1db7::t_3d4be8d6fb1830 5-6,45,54,57-77
+tests/pages-document-assets.test.ts
+  s_f7a96e7e5f1db7::t_40095329ef7bcc 38,42-43,47-48,51-74,77-80,115-122,128,131,191-192
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "5b7b646035cce6e96360ec070ac588eebd818087",
+  "prompts": {},
+  "sessions": {
+    "s_f7a96e7e5f1db7": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f86d1-dc6a-7240-8545-10c701883966",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "James <james@eli.cx>"
+    }
+  }
+}
