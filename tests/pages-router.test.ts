@@ -2083,6 +2083,21 @@ export default class CustomDocument extends Document {
     });
   });
 
+  // Like Next.js, a trailing-slash API request is redirected before
+  // middleware runs, so its exact-pathname branch still applies.
+  it("redirects a trailing-slash API route request before middleware", async () => {
+    const res = await fetch(`${baseUrl}/api/append-header/?a=1`, { redirect: "manual" });
+    expect(res.status).toBe(308);
+    expect(res.headers.get("location")).toBe("/api/append-header?a=1");
+    expect(res.headers.getSetCookie()).toEqual([]);
+    expect(res.headers.get("x-custom-middleware")).toBeNull();
+
+    const followed = await fetch(`${baseUrl}/api/append-header/`);
+    expect(followed.status).toBe(200);
+    expect(followed.url).toBe(`${baseUrl}/api/append-header`);
+    expect(followed.headers.getSetCookie()).toEqual(["mw=1; Path=/", "h=1; Path=/"]);
+  });
+
   it("rejects res.appendHeader after the API route wrote its headers", async () => {
     const res = await fetch(`${baseUrl}/api/append-header-after-write`);
     expect(res.status).toBe(200);
@@ -8110,6 +8125,21 @@ describe("Production server middleware (Pages Router)", () => {
       multi: ["a", "b"],
       headersMulti: ["a", "b"],
     });
+  });
+
+  // Like Next.js, a trailing-slash API request is redirected before
+  // middleware runs, so its exact-pathname branch still applies.
+  it("redirects a trailing-slash API route request before middleware in production", async () => {
+    const res = await fetch(`${prodUrl}/api/append-header/?a=1`, { redirect: "manual" });
+    expect(res.status).toBe(308);
+    expect(res.headers.get("location")).toBe("/api/append-header?a=1");
+    expect(res.headers.getSetCookie()).toEqual([]);
+    expect(res.headers.get("x-custom-middleware")).toBeNull();
+
+    const followed = await fetch(`${prodUrl}/api/append-header/`);
+    expect(followed.status).toBe(200);
+    expect(followed.url).toBe(`${prodUrl}/api/append-header`);
+    expect(followed.headers.getSetCookie()).toEqual(["mw=1; Path=/", "h=1; Path=/"]);
   });
 
   it("rejects res.appendHeader after the API route wrote its headers in production", async () => {
